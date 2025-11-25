@@ -5,7 +5,7 @@ Raspberry Pi camera interface for IMX585
 
 This program is derived from Rpicamera.py developed by: [Gordon999](https://github.com/Gordon999)
 
-[SW200](PXL_20251124.jpg)
+<img src="PXL_20251124.jpg" alt="Preview Mode" width="400">
 
 ## Description
 
