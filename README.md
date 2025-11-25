@@ -1,110 +1,105 @@
 # Rpicamera
-Interface camera Raspberry Pi pour IMX585
+Raspberry Pi camera interface for IMX585
 
-# RPiCamera - Interface de contrôle avancée pour caméras Raspberry Pi
+# RPiCamera - Advanced control interface for Raspberry Pi cameras
 
-Le programme est issu du Rpicamera.py dévellopé par : [Gordon999](https://github.com/Gordon999)
+This program is derived from Rpicamera.py developed by: [Gordon999](https://github.com/Gordon999)
 
 ## Description
 
-RPiCamera est une application complète de contrôle et d'enregistrement pour caméras Raspberry Pi, développée avec une interface graphique Pygame. Le programme offre un contrôle avancé des paramètres de la caméra, optimisé pour l'astrophotographie avec le capteur IMX585.
-Cette version est optimisée pour le capteur IMX585 et fonctionne avec le libcamera custom développé par [will12753](https://github.com/will12753/libcamera-imx585), elle pourrait ne pas être optimale avec une version Libcamera standard fonctionnant avec autres capteurs IMX...
+RPiCamera is a comprehensive control and recording application for Raspberry Pi cameras, developed with a Pygame graphical interface. The program offers advanced camera parameter control, optimized for astrophotography with the IMX585 sensor.
+This version is optimized for the IMX585 sensor and works with the custom libcamera developed by [will12753](https://github.com/will12753/libcamera-imx585), it may not be optimal with a standard Libcamera version working with other IMX sensors...
 
+### Main features
 
-### Fonctionnalités principales
+- **Interactive graphical interface**: Complete control via Pygame interface and preview managed by Picamera2.
+- Preview operation up to 7 seconds exposure.
+- **Multiple recording modes**:
+  - Video recording (H.264, MJPEG, YUV420 and YUV420 ->SER for planetary imaging)
+  - Ability to capture SER video at 87 FPS by activating the zoom function (different ROI resolutions available).
+  - Image capture (RAW, JPG, PNG, RGB, YUV)
+  - Configurable time-lapse
+- **Video streaming**: TCP, UDP and RTSP support
+- **Real-time analysis**:
+  - Histograms (RGB and luminance)
+  - Focus function: HFR (Half-Flux Radius) and FWHM calculation for astrophotography focusing assistance
+  - In focus mode and zoom mode: focus value display (Laplacian of Variance) and SNR calculation
+- **Advanced controls**:
+  - Customizable white balance
+  - Exposure and gain control
+  - Gamma correction and noise reduction
+  - HDR modes: single / auto / sensor
+- **GPIO support**: External buttons for focus and trigger
+- ...
 
-- **Interface graphique interactive** : Contrôle complet via une interface Pygame et preview géré par Picamera2.
-- Possibilité de preview jusqu'à 7 secondes d'exposition.
-- **Modes d'enregistrement multiples** :
-  - Enregistrement vidéo (H.264, MJPEG, YUV420 et YUV420 ->SER pour l'imagerie planétaire)
-  - Possibilité de prendre en video SER à 87 FPS en activant la fonction zoom.
-  - Capture d'images (RAW, JPG, PNG, RGB, YUV)
-  - Time-lapse configurable
-- **Streaming vidéo** : Support TCP, UDP et RTSP
-- **Analyse en temps réel** :
-  - Histogrammes (RGB et luminance)
-  - Fonction focus manuel :calcul du HFR (Half-Flux Radius) et du FWHM pour l'aide à la mise au point astrophotographie
-  - Calcul du SNR en mode focus et zoom.
-- **Contrôles avancés** :
-  - Balance des blancs personnalisable
-  - Contrôle de l'exposition et du gain
-  - Correction gamma et débruitage
-  - Modes HDR single / auto / sesor
-- **Support GPIO** : Boutons externes pour focus et déclenchement
+## Dependencies
 
+### Python libraries
 
-
-## Dépendances
-
-### Bibliothèques Python
-
-Installez les dépendances Python avec pip :
-
+Install Python dependencies with pip:
 ```bash
 pip3 install pygame opencv-python numpy matplotlib picamera2 gpiozero
 ```
 
-Détail des bibliothèques :
+Library details:
 
-- **pygame** : Interface graphique et gestion des événements
-- **opencv-python (cv2)** : Traitement d'image et analyse
-- **numpy** : Calculs numériques et manipulation de tableaux
-- **matplotlib** : Génération de graphiques (histogrammes)
-- **picamera2** : Interface moderne pour les caméras Raspberry Pi
-- **libcamera** : Bibliothèque de contrôle caméra (voir section libcamera custom ci-dessous)
-- **gpiozero** : Contrôle des GPIO pour boutons externes
+- **pygame**: Graphical interface and event management
+- **opencv-python (cv2)**: Image processing and analysis
+- **numpy**: Numerical calculations and array manipulation
+- **matplotlib**: Graph generation (histograms)
+- **picamera2**: Modern interface for Raspberry Pi cameras
+- **libcamera**: Camera control library (see custom libcamera section below)
+- **gpiozero**: GPIO control for external buttons
 
+### System tools
 
-### Outils système
-
-Installez les outils système nécessaires :
-
-
+Install necessary system tools:
+```bash
 sudo apt-get install -y ffmpeg
 ```
 
-- **ffmpeg** : Conversion et post-traitement vidéo
+- **ffmpeg**: Video conversion and post-processing
 
-### Bibliothèques système supplémentaires
-
-
+### Additional system libraries
+```bash
 sudo apt-get install -y libcamera-dev libcamera-apps
 ```
 
-### Structure des fichiers
+### File structure
 
-- **Photos** : Enregistrées dans `~/Pictures/`-> je vous conseille de stocker les RAW directement sur clés USB: -  pic_dir     = "/media/admin/..."
-- **Vidéos** : Enregistrées dans `~/Videos/` -> gardez les videos sur la mémoire interne pour + de rapidité
-- **Configuration** : `~/PiLCConfig104.txt`
+- **Photos**: Saved in `~/Pictures/` -> I recommend storing RAW files directly on USB drives: - pic_dir = "/media/admin/..."
+- **Videos**: Saved in `~/Videos/` -> keep videos on internal memory for better speed
+- **Configuration**: `~/PiLCConfig104.txt`
 
+### Camera tuning files
 
-### Fichiers de tuning caméra
+You can use custom tuning files:
 
-Pour les caméras spécialisées, vous pouvez utiliser des fichiers de tuning personnalisés :
+- `~/imx585_lowlight.json`: Configuration for IMX585 in low-light mode
 
-- `~/imx585_lowlight.json` : Configuration pour IMX585 en mode low-light
+## Live stacking
 
+Live stacking can be used by combining this program with **ALS (Astro Live Stacker)**:
 
-Le live stacking peut être utilisé en combinant ce programme avec **ALS (Astro Live Stacker)** :
+- **ALS (Astro Live Stacker)**: [https://github.com/gehelem/als](https://github.com/gehelem/als)
 
-- **ALS (Astro Live Stacker)** : [https://github.com/gehelem/als](https://github.com/gehelem/als)
+ALS allows real-time image stacking to reveal faint celestial objects, in combination with video streams generated by RPiCamera.
+Configure ALS to read the directory of images recorded by the application in TIMELAPSE mode (ideally on USB drive).
 
-ALS permet d'empiler les images en temps réel pour révéler des objets célestes faibles, en combinaison avec les flux vidéo générés par RPiCamera.
-Configurez ALS pour lire le répertoire des images enregistrées par l'application en mode TIMELAPSE.
+## Contributions
 
-**Toutes les contributions sont les bienvenues !**
+**All contributions are welcome!**
 
-Le développement de ce programme est ouvert à la communauté. N'hésitez pas à :
+The development of this program is open to the community. Feel free to:
 
-- Proposer de nouvelles fonctionnalités
-- Corriger des bugs
-- Ajouter le support de nouveaux capteurs
-- Trouver une solution pour mettre en place le mode video RAW -> SER (pas trouvé pour l'instant)
-- Développer un auto strech du preview
-- Développer l'intégration d'un live stacking natif?
+- Propose new features
+- Fix bugs
+- Add support for new sensors
+- Find a solution to implement RAW video mode -> SER (not found yet)
+- Develop auto-stretch for preview
+- Develop native live stacking integration?
 
-
-## Licence
+## License
 
 Copyright (c) 2025 Gordon999
 
@@ -114,11 +109,10 @@ The above copyright notice and this permission notice shall be included in all c
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+## Useful resources and links
 
-## Ressources et liens utiles
-
-- **Programme original** : [Gordon999](https://github.com/Gordon999)
-- **Libcamera custom IMX585** : [will12753/libcamera-imx585](https://github.com/will12753/libcamera-imx585)
-- **Capteur IMX585** : [SOHO Enterprise](https://soho-enterprise.com/)
-- **Live Stacking (ALS)** : [Astro Live Stacker](https://github.com/gehelem/als)
+- **Original program**: [Gordon999](https://github.com/Gordon999)
+- **Custom libcamera IMX585**: [will12753/libcamera-imx585](https://github.com/will12753/libcamera-imx585)
+- **IMX585 sensor**: [SOHO Enterprise](https://soho-enterprise.com/)
+- **Live Stacking (ALS)**: [Astro Live Stacker](https://github.com/gehelem/als)
 
