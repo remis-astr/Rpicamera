@@ -815,7 +815,7 @@ con_file    = "PiLCConfig104.txt"
 # setup directories
 Home_Files  = []
 Home_Files.append(os.getlogin())
-pic_dir     = "/home/" + Home_Files[0] + "/" + pic + "/"
+pic_dir     = "/media/admin/THKAILAR/Pictures/"
 vid_dir     = "/home/" + Home_Files[0]+ "/" + vid + "/"
 config_file = "/home/" + Home_Files[0]+ "/" + con_file
 
@@ -890,7 +890,7 @@ cameras      = [  '', 'Pi v1', 'Pi v2', 'Pi v3', 'Pi HQ','Ard 16MP','Hawkeye', '
 camids       = [  '','ov5647','imx219','imx708','imx477',  'imx519', 'arduca','imx296',  'ov64a4','imx290','imx585','imx293','imx294','imx283','imx500','ov9281']
 x_sens       = [   0,    2592,    3280,    4608,    4056,      4656,     9152,    1456,      9248,    1920,    3856,    3856,    4168,    5472,    4056,    1280]
 y_sens       = [   0,    1944,    2464,    2592,    3040,      3496,     6944,    1088,      6944,    1080,    2180,    2180,    2824,    3648,    3040,     800]
-max_gains    = [  64,     255,      40,      64,      88,        64,       64,      64,        64,      64,      64,      64,      64,      64,      64,      64]
+max_gains    = [  64,     255,      40,      64,      88,        64,       64,      64,        64,      64,    4000,      64,      64,      64,      64,      64]
 max_shutters = [ 100,       1,      11,     112,     650,       200,      435,      15,       435,     100,     163,     100,     100,     100,     100,     100]
 max_vfs      = [  10,      15,      16,      21,      20,        15,       22,       7,        22,      10,      18,      18,      18,      23,      20,       3]
 modes        = ['manual','normal','sport']
@@ -2536,9 +2536,8 @@ while True:
                 print(f"DEBUG: Array shape: {array.shape}, dtype: {array.dtype}")
                 # Sauvegarder une frame de test pour vérifier
                 import cv2
-                debug_path = "/home/" + Home_Files[0] + "/debug_picamera2_frame.jpg"
-                cv2.imwrite(debug_path, cv2.cvtColor(array, cv2.COLOR_RGB2BGR))
-                print(f"DEBUG: Frame saved to {debug_path}")
+                cv2.imwrite('/home/admin/debug_picamera2_frame.jpg', cv2.cvtColor(array, cv2.COLOR_RGB2BGR))
+                print("DEBUG: Frame saved to /home/admin/debug_picamera2_frame.jpg")
                 pygame._picam2_debug_done = True
 
             # Convertir numpy array → pygame surface
