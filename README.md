@@ -4,7 +4,9 @@ Raspberry Pi camera interface for IMX585
 # RPiCamera - Advanced control interface for Raspberry Pi cameras
 
 This program is derived from Rpicamera.py developed by: [Gordon999](https://github.com/Gordon999)
+
 [SW200](PXL_20251124.jpg)
+
 ## Description
 
 RPiCamera is a comprehensive control and recording application for Raspberry Pi cameras, developed with a Pygame graphical interface. The program offers advanced camera parameter control, optimized for astrophotography with the IMX585 sensor.
