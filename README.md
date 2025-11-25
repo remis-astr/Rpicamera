@@ -1,48 +1,37 @@
 # Rpicamera
-Interface camera Raspberry Pi optimisée IMX585
+Interface camera Raspberry Pi pour IMX585
 
 # RPiCamera - Interface de contrôle avancée pour caméras Raspberry Pi
 
-**Auteur original** : [Gordon999](https://github.com/Gordon999)
-
-**Version spéciale IMX585** : Cette version est spécialement optimisée pour le capteur IMX585 et fonctionne avec le libcamera custom développé par [will12753](https://github.com/will12753/libcamera-imx585).
+Le programme est issu du Rpicamera.py dévellopé par : [Gordon999](https://github.com/Gordon999)
 
 ## Description
 
-RPiCamera est une application complète de contrôle et d'enregistrement pour caméras Raspberry Pi, développée avec une interface graphique Pygame. Le programme offre un contrôle avancé des paramètres de la caméra, particulièrement optimisé pour l'astrophotographie avec le capteur IMX585.
+RPiCamera est une application complète de contrôle et d'enregistrement pour caméras Raspberry Pi, développée avec une interface graphique Pygame. Le programme offre un contrôle avancé des paramètres de la caméra, optimisé pour l'astrophotographie avec le capteur IMX585.
+Cette version est optimisée pour le capteur IMX585 et fonctionne avec le libcamera custom développé par [will12753](https://github.com/will12753/libcamera-imx585), elle pourrait ne pas être optimale avec une version Libcamera standard fonctionnant avec autres capteurs IMX...
 
-### Capteur IMX585
-
-Le capteur IMX585 utilisé dans ce projet provient de [SOHO Enterprise](https://soho-enterprise.com/). Ce capteur haute sensibilité est particulièrement adapté pour l'astronomie et les applications en faible luminosité.
 
 ### Fonctionnalités principales
 
-- **Interface graphique interactive** : Contrôle complet via une interface Pygame
+- **Interface graphique interactive** : Contrôle complet via une interface Pygame et preview géré par Picamera2.
+- Possibilité de preview jusqu'à 7 secondes d'exposition.
 - **Modes d'enregistrement multiples** :
-  - Enregistrement vidéo (H.264, MJPEG, YUV420 et SER pour l'imagerie planétaire)
+  - Enregistrement vidéo (H.264, MJPEG, YUV420 et YUV420 ->SER pour l'imagerie planétaire)
+  - Possibilité de prendre en video SER à 87 FPS en activant la fonction zoom.
   - Capture d'images (RAW, JPG, PNG, RGB, YUV)
-  - Time-lapse automatisé
+  - Time-lapse configurable
 - **Streaming vidéo** : Support TCP, UDP et RTSP
 - **Analyse en temps réel** :
   - Histogrammes (RGB et luminance)
-  - Calcul du HFR (Half-Flux Radius) pour l'aide à la mise au point astrophotographie
-  - Détection de centroïdes
+  - Fonction focus manuel :calcul du HFR (Half-Flux Radius) et du FWHM pour l'aide à la mise au point astrophotographie
+  - Calcul du SNR en mode focus et zoom.
 - **Contrôles avancés** :
-  - Focus manuel/automatique (pour caméras compatibles)
   - Balance des blancs personnalisable
   - Contrôle de l'exposition et du gain
-  - Modes de mesure de lumière
   - Correction gamma et débruitage
+  - Modes HDR single / auto / sesor
 - **Support GPIO** : Boutons externes pour focus et déclenchement
-- **Post-traitement** : Correction automatique des timestamps vidéo via ffmpeg
 
-
-
-Le live stacking peut être utilisé en combinant ce programme avec **ALS (Astro Live Stacker)** :
-
-- **ALS (Astro Live Stacker)** : [https://github.com/gehelem/als](https://github.com/gehelem/als)
-
-ALS permet d'empiler les images en temps réel pour révéler des objets célestes faibles, en combinaison avec les flux vidéo générés par RPiCamera.
 
 
 ## Dépendances
@@ -85,7 +74,7 @@ sudo apt-get install -y libcamera-dev libcamera-apps
 ### Structure des fichiers
 
 - **Photos** : Enregistrées dans `~/Pictures/`-> je vous conseille de stocker les RAW directement sur clés USB: -  pic_dir     = "/media/admin/..."
-- **Vidéos** : Enregistrées dans `~/Videos/` -> gardez les videos sur la mémoire interne
+- **Vidéos** : Enregistrées dans `~/Videos/` -> gardez les videos sur la mémoire interne pour + de rapidité
 - **Configuration** : `~/PiLCConfig104.txt`
 
 
@@ -93,10 +82,15 @@ sudo apt-get install -y libcamera-dev libcamera-apps
 
 Pour les caméras spécialisées, vous pouvez utiliser des fichiers de tuning personnalisés :
 
-- `~/imx290a.json` : Configuration pour IMX290
 - `~/imx585_lowlight.json` : Configuration pour IMX585 en mode low-light
 
 
+Le live stacking peut être utilisé en combinant ce programme avec **ALS (Astro Live Stacker)** :
+
+- **ALS (Astro Live Stacker)** : [https://github.com/gehelem/als](https://github.com/gehelem/als)
+
+ALS permet d'empiler les images en temps réel pour révéler des objets célestes faibles, en combinaison avec les flux vidéo générés par RPiCamera.
+Configurez ALS pour lire le répertoire des images enregistrées par l'application en mode TIMELAPSE.
 
 **Toutes les contributions sont les bienvenues !**
 
@@ -105,7 +99,9 @@ Le développement de ce programme est ouvert à la communauté. N'hésitez pas �
 - Proposer de nouvelles fonctionnalités
 - Corriger des bugs
 - Ajouter le support de nouveaux capteurs
-- Développer l'intégration d'un live stacking natif
+- Trouver une solution pour mettre en place le mode video RAW -> SER (pas trouvé pour l'instant)
+- Développer un auto strech du preview
+- Développer l'intégration d'un live stacking natif?
 
 
 ## Licence
