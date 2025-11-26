@@ -905,6 +905,95 @@ v15_max_fps  = [240,200,200, 130]
 zwidths      = [640,800,1280,2592,3280,4056,4656,9152]
 zheights     = [480,600, 960,1944,2464,3040,3496,6944]
 zfs          = [1, 0.5, 0.333333, 0.25, 0.2, 0.166666]  # Zoom: 1x, 2x, 3x, 4x, 5x, 6x
+# Labels de résolution pour le slider de zoom
+zoom_res_labels = {
+    0: "",
+    1: "1920x1080",  # 2x zoom
+    2: "1280x720",   # 3x zoom
+    3: "DISABLED",   # 3x désactivé
+    4: "640x480",    # 5x zoom
+    5: "640x368"     # 6x zoom
+}
+
+# FPS optimaux pour chaque niveau de zoom (ROI permet des FPS plus élevés)
+# Format: {zoom_level: (fps_standard, fps_v3, fps_v9, fps_imx585)}
+zoom_optimal_fps = {
+    1: (60, 100, 120, 30),   # 1920x1080 - 2x zoom
+    2: (120, 120, 150, 60),  # 1280x720  - 3x zoom
+    4: (200, 200, 240, 120), # 640x480   - 5x zoom
+    5: (200, 200, 240, 120)  # 640x368   - 6x zoom
+}
+
+def sync_video_resolution_with_zoom():
+    """
+    Synchronise vwidth, vheight, vformat ET fps avec la résolution du zoom actuel.
+    Appelée automatiquement quand le zoom change pour éviter les incohérences.
+    Optimise aussi les FPS pour tirer parti des résolutions ROI plus petites.
+    """
+    global zoom, vwidth, vheight, vformat, vwidths, vheights, fps, video_limits, Pi_Cam
+
+    # Résolutions correspondant aux niveaux de zoom
+    zoom_resolutions = {
+        1: (1920, 1080),  # 2x zoom
+        2: (1280, 720),   # 3x zoom
+        4: (640, 480),    # 5x zoom
+        5: (640, 368)     # 6x zoom
+    }
+
+    # Si zoom actif, synchroniser avec la résolution du zoom
+    if zoom > 0 and zoom in zoom_resolutions:
+        target_width, target_height = zoom_resolutions[zoom]
+
+        # Chercher l'index correspondant dans vwidths/vheights
+        vformat_found = False
+        for i in range(len(vwidths)):
+            if vwidths[i] == target_width and vheights[i] == target_height:
+                vformat = i
+                vwidth = target_width
+                vheight = target_height
+                vformat_found = True
+                break
+
+        # Si pas trouvé dans la liste, mettre à jour directement vwidth/vheight
+        if not vformat_found:
+            vwidth = target_width
+            vheight = target_height
+            # vformat reste inchangé
+
+        # Optimiser les FPS pour le zoom (ROI permet des FPS plus élevés)
+        if zoom in zoom_optimal_fps:
+            fps_standard, fps_v3, fps_v9, fps_imx585 = zoom_optimal_fps[zoom]
+
+            # Choisir les FPS selon le type de caméra
+            if Pi_Cam == 3:
+                optimal_fps = fps_v3
+            elif Pi_Cam == 9:
+                optimal_fps = fps_v9
+            elif Pi_Cam == 10:  # IMX585
+                optimal_fps = fps_imx585
+            elif Pi_Cam == 15:
+                optimal_fps = fps_v9  # OV9281 utilise les mêmes que IMX290
+            else:
+                optimal_fps = fps_standard
+
+            # Sauvegarder les FPS d'origine si première activation du zoom
+            if not hasattr(sync_video_resolution_with_zoom, 'fps_backup'):
+                sync_video_resolution_with_zoom.fps_backup = fps
+                sync_video_resolution_with_zoom.vfps_backup = video_limits[5]
+
+            # Mettre à jour fps et la limite max pour profiter du ROI
+            # IMPORTANT: Ces variables sont déclarées global en haut de la fonction
+            globals()['fps'] = optimal_fps  # Utiliser les FPS optimaux
+            video_limits[5] = optimal_fps  # Nouvelle limite max
+    else:
+        # Zoom désactivé : restaurer les FPS d'origine si sauvegardés
+        if hasattr(sync_video_resolution_with_zoom, 'fps_backup'):
+            globals()['fps'] = sync_video_resolution_with_zoom.fps_backup
+            video_limits[5] = sync_video_resolution_with_zoom.vfps_backup
+            # Nettoyer les sauvegardes
+            delattr(sync_video_resolution_with_zoom, 'fps_backup')
+            delattr(sync_video_resolution_with_zoom, 'vfps_backup')
+
 shutters     = [-4000,-2000,-1600,-1250,-1000,-800,-640,-500,-400,-320,-288,-250,-240,-200,-160,-144,-125,-120,-100,-96,-80,-60,-50,-48,-40,-30,-25,
                 -20,-15,-13,-10,-8,-6,-5,-4,-3,0.4,0.5,0.6,0.8,1,1.1,1.2,2,3,4,5,6,7,8,9,10,11,15,20,25,30,40,50,60,75,100,112,120,150,200,220,230,
                 239,435,500,600,650,660,670]
@@ -2339,7 +2428,8 @@ def Menu():
       elif zoom < 10:
           button(0,4,1,9)
           text(0,4,2,0,1,"ZOOMED",ft,0)
-          text(0,4,3,1,1,str(zoom),fv,0)
+          # Afficher la résolution ROI au lieu du numéro de zoom
+          text(0,4,3,1,1,zoom_res_labels.get(zoom, str(zoom)),fv,0)
           draw_Vbar(0,4,greyColor,'zoom',zoom)
       if Pi_Cam == 3 and v3_af == 1:
           if fxz != 1:
@@ -2741,10 +2831,12 @@ while True:
                     pass  # Garder l'ancienne image affichée
 
             # Scaling et affichage
-            if igw/igh > 1.5:
-                image = pygame.transform.scale(image, (preview_width,int(preview_height * 0.75)))
-            else:
-                image = pygame.transform.scale(image, (preview_width,preview_height))
+            # En mode zoom, l'image arrive déjà à la bonne taille via ROI, ne pas rescaler
+            if zoom == 0:
+                if igw/igh > 1.5:
+                    image = pygame.transform.scale(image, (preview_width,int(preview_height * 0.75)))
+                else:
+                    image = pygame.transform.scale(image, (preview_width,preview_height))
             windowSurfaceObj.blit(image, (0,0))
     if (zoom > 0 or foc_man == 1 or focus_mode == 1 or histogram > 0):
         # Utiliser array3d au lieu de pixels3d pour ne pas verrouiller la surface
@@ -2812,11 +2904,17 @@ while True:
             graph.set_alpha(160)
             # Aligner avec le haut du bandeau noir (preview_height * 0.75)
             hist_y = int(preview_height * 0.75) + 1
-            pygame.draw.rect(windowSurfaceObj, greyColor, Rect(9, hist_y-1, 64, 102), 1)
-            pygame.draw.rect(windowSurfaceObj, greyColor, Rect(73, hist_y-1, 64, 102), 1)
-            pygame.draw.rect(windowSurfaceObj, greyColor, Rect(137, hist_y-1, 64, 102), 1)
-            pygame.draw.rect(windowSurfaceObj, greyColor, Rect(201, hist_y-1, 66, 102), 1)
-            windowSurfaceObj.blit(graph, (10, hist_y))
+            # Histogramme sur 2/3 de la largeur (587 pixels)
+            hist_width = int(preview_width * 2 / 3)
+            # Diviser en 4 sections égales
+            section_width = hist_width // 4
+            pygame.draw.rect(windowSurfaceObj, greyColor, Rect(9, hist_y-1, section_width-2, 102), 1)
+            pygame.draw.rect(windowSurfaceObj, greyColor, Rect(9+section_width, hist_y-1, section_width-2, 102), 1)
+            pygame.draw.rect(windowSurfaceObj, greyColor, Rect(9+section_width*2, hist_y-1, section_width-2, 102), 1)
+            pygame.draw.rect(windowSurfaceObj, greyColor, Rect(9+section_width*3, hist_y-1, section_width-2, 102), 1)
+            # Étirer le graphique pour remplir les 2/3
+            graph_stretched = pygame.transform.scale(graph, (hist_width-8, 100))
+            windowSurfaceObj.blit(graph_stretched, (10, hist_y))
         
         # Nettoyage des variables numpy (array3d ne crée pas de verrou)
         del image2
@@ -2915,22 +3013,27 @@ while True:
                 # Afficher "N/A" si pas d'étoile détectée
                 text(20, 3, 0, 2, 0, "FWHM: N/A", fv * 2, 0)
 
-            # Graphique HFR - dans le bandeau noir en bas, à côté de l'histogramme
+            # Graphique HFR - dans le bandeau noir en bas, à droite de l'histogramme (1/3 restant)
             try:
                 graph_surface = update_hfr_graph(hfr_val)
                 if graph_surface is not None and alt_dis < 2:
-                    # Position : au centre du bandeau noir, à droite de l'histogramme
+                    # Position : 1/3 restant du bandeau noir, à droite de l'histogramme (2/3)
                     # Le haut du graphique doit être aligné avec le haut du bandeau noir (preview_height * 0.75)
-                    graph_x = 280  # À droite de l'histogramme (qui se termine à ~267)
+                    hist_width = int(preview_width * 2 / 3)
+                    graph_x = hist_width + 20  # À droite de l'histogramme avec marge
                     graph_y = int(preview_height * 0.75) + 1  # Aligné avec le haut du bandeau noir
+
+                    # Adapter la taille du graphique au 1/3 restant
+                    remaining_width = preview_width - hist_width - 30  # 30 = marges
+                    graph_resized = pygame.transform.scale(graph_surface, (remaining_width, 100))
 
                     # Dessiner un cadre gris autour du graphique (même style que l'histogramme)
                     pygame.draw.rect(windowSurfaceObj, greyColor,
                                    Rect(graph_x - 1, graph_y - 1,
-                                        graph_surface.get_width() + 2,
-                                        graph_surface.get_height() + 2), 1)
+                                        graph_resized.get_width() + 2,
+                                        graph_resized.get_height() + 2), 1)
 
-                    windowSurfaceObj.blit(graph_surface, (graph_x, graph_y))
+                    windowSurfaceObj.blit(graph_resized, (graph_x, graph_y))
             except Exception as e:
                 pass  # Ignorer les erreurs du graphique
 
@@ -4491,6 +4594,8 @@ while True:
                     # Zoom manuel supprimé: simplifié la condition
                     if igw/igh > 1.5 and alt_dis == 0:
                         pygame.draw.rect(windowSurfaceObj,(0,0,0),Rect(0,int(preview_height * .75),preview_width,preview_height))
+                # Synchroniser la résolution vidéo avec le zoom
+                sync_video_resolution_with_zoom()
                 print(zoom)
                 if zoom < 2:
                     if zoom == 0:
@@ -4501,7 +4606,7 @@ while True:
                     else:
                         button(0,4,1,9)
                         text(0,4,2,0,1,"ZOOMED",ft,0)
-                        text(0,4,3,1,1,str(zoom),fv,0)
+                        text(0,4,3,1,1,zoom_res_labels.get(zoom, str(zoom)),fv,0)
                         draw_Vbar(0,4,dgryColor,'zoom',zoom)
                         
                     if foc_man == 0:
@@ -4519,7 +4624,7 @@ while True:
                 else:
                     button(0,4,1,9)
                     text(0,4,2,0,1,"ZOOMED",ft,0)
-                    text(0,4,3,1,1,str(zoom),fv,0)
+                    text(0,4,3,1,1,zoom_res_labels.get(zoom, str(zoom)),fv,0)
                     draw_Vbar(0,4,dgryColor,'zoom',zoom)
                 if zoom > 0:
                     fxx = 0
@@ -4607,18 +4712,20 @@ while True:
                     # FOCUS button NON AF camera (ajout IMX585 = Pi_Cam 10)
                     if (Pi_Cam < 3 or Pi_Cam == 4 or Pi_Cam == 7 or Pi_Cam == 9 or Pi_Cam == 10 or (Pi_Cam ==3 and v3_af == 0)) and focus_mode == 0:
                         zoom = 4
+                        sync_video_resolution_with_zoom()
                         focus_mode = 1
                         button(0,5,1,9)
                         text(0,5,3,0,1,"FOCUS",ft,0)
                         button(0,4,1,9)
                         text(0,4,2,0,1,"ZOOMED",ft,0)
-                        text(0,4,3,1,1,str(zoom),fv,0)
+                        text(0,4,3,1,1,zoom_res_labels.get(zoom, str(zoom)),fv,0)
                         draw_Vbar(0,4,dgryColor,'zoom',zoom)
                         time.sleep(0.25)
                         restart = 1
                     # CANCEL FOCUS NON AF camera (ajout IMX585 = Pi_Cam 10)
                     elif (Pi_Cam < 3 or Pi_Cam == 4 or Pi_Cam == 7 or Pi_Cam == 9 or Pi_Cam == 10 or (Pi_Cam ==3 and v3_af == 0)) and focus_mode == 1:
                         zoom = 0
+                        sync_video_resolution_with_zoom()
                         focus_mode = 0
                         reset_fwhm_history()
                         reset_hfr_history()
@@ -4662,12 +4769,13 @@ while True:
                         focus_mode = 0
                         reset_fwhm_history()
                         reset_hfr_history()
-                        foc_man = 0 
+                        foc_man = 0
                         if Pi_Cam == 8:
                             v3_f_mode = 2 # continuous focus
                         else:
                             v3_f_mode = 0
                         zoom = 0
+                        sync_video_resolution_with_zoom()
                         fxx = 0
                         fxy = 0
                         fxz = 1
@@ -4688,6 +4796,7 @@ while True:
                         v3_f_mode = 2 # continuous focus
                         foc_man = 0
                         zoom = 0
+                        sync_video_resolution_with_zoom()
                         fxx = 0
                         fxy = 0
                         fxz = 1
@@ -4709,6 +4818,7 @@ while True:
                         v3_f_mode = 0 # auto focus
                         foc_man = 0
                         zoom = 0
+                        sync_video_resolution_with_zoom()
                         fxx = 0
                         fxy = 0
                         fxz = 1
