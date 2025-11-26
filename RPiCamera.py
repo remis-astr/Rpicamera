@@ -784,7 +784,7 @@ vlen        = 10   # video length in seconds
 fps         = 15   # video fps - Réduit pour IMX585
 vformat     = 10   # set video format (10 = 1920x1080), see vwidths & vheights below
 codec       = 0    # set video codec  (0 = h264), see codecs below
-tinterval   = 60   # time between timelapse shots in seconds
+tinterval   = 5.0   # time between timelapse shots in seconds
 tshots      = 10   # number of timelapse shots
 saturation  = 10   # picture colour saturation
 meter       = 2    # metering mode (2 = average), see meters below
@@ -890,7 +890,7 @@ cameras      = [  '', 'Pi v1', 'Pi v2', 'Pi v3', 'Pi HQ','Ard 16MP','Hawkeye', '
 camids       = [  '','ov5647','imx219','imx708','imx477',  'imx519', 'arduca','imx296',  'ov64a4','imx290','imx585','imx293','imx294','imx283','imx500','ov9281']
 x_sens       = [   0,    2592,    3280,    4608,    4056,      4656,     9152,    1456,      9248,    1920,    3856,    3856,    4168,    5472,    4056,    1280]
 y_sens       = [   0,    1944,    2464,    2592,    3040,      3496,     6944,    1088,      6944,    1080,    2180,    2180,    2824,    3648,    3040,     800]
-max_gains    = [  64,     255,      40,      64,      88,        64,       64,      64,        64,      64,    4000,      64,      64,      64,      64,      64]
+max_gains    = [  64,     255,      40,      64,      88,        64,       64,      64,        64,      64,    3000,      64,      64,      64,      64,      64]  # IMX585: max 3000 avec courbe non-linéaire
 max_shutters = [ 100,       1,      11,     112,     650,       200,      435,      15,       435,     100,     163,     100,     100,     100,     100,     100]
 max_vfs      = [  10,      15,      16,      21,      20,        15,       22,       7,        22,      10,      18,      18,      18,      23,      20,       3]
 modes        = ['manual','normal','sport']
@@ -963,8 +963,8 @@ if Pi == 5:
 still_limits = ['mode',0,len(modes)-1,'speed',0,len(shutters)-1,'gain',0,30,'brightness',-100,100,'contrast',0,200,'ev',-10,10,'blue',1,80,'sharpness',0,30,
                 'denoise',0,len(denoises)-1,'quality',0,100,'red',1,80,'extn',0,len(extns)-1,'saturation',0,20,'meter',0,len(meters)-1,'awb',0,len(awbs)-1,
                 'histogram',0,len(histograms)-1,'v3_f_speed',0,len(v3_f_speeds)-1]
-video_limits = ['vlen',0,3600,'fps',1,40,'v5_focus',10,2500,'vformat',0,7,'0',0,0,'zoom',0,5,'Focus',0,1,'tduration',1,86400,'tinterval',0,3600,'tshots',1,999,
-                'flicker',0,3,'codec',0,len(codecs)-1,'profile',0,len(h264profiles)-1,'v3_focus',10,2000,'histarea',10,50,'v3_f_range',0,len(v3_f_ranges)-1,
+video_limits = ['vlen',0,3600,'fps',1,40,'v5_focus',10,2500,'vformat',0,7,'0',0,0,'zoom',0,5,'Focus',0,1,'tduration',1,86400,'tinterval',0.01,10,'tshots',1,999,
+                'flicker',0,3,'codec',0,len(codecs)-1,'profile',0,len(h264profiles)-1,'v3_focus',10,2000,'histarea',10,300,'v3_f_range',0,len(v3_f_ranges)-1,
                 'str_cap',0,len(strs)-1,'v6_focus',10,1020]
 
 # check config_file exists, if not then write default values
@@ -986,7 +986,11 @@ with open(config_file, "r") as file:
        item = line.split(" : ")
        config.append(item[1])
        line = file.readline()
-config = list(map(int,config))
+# Convertir d'abord en float, puis en int sauf pour tinterval (index 13)
+config = list(map(float,config))
+for i in range(len(config)):
+    if i != 13:  # Garder tinterval comme float
+        config[i] = int(config[i])
 
 mode        = config[0]
 speed       = config[1]
@@ -1045,6 +1049,41 @@ def setmaxvformat():
     if Pi_Cam == 4 and codec == 0:
         max_vformat = 12
     
+def slider_to_gain_nonlinear(slider_value, max_gain):
+    """
+    Convertit position slider linéaire (0-max_gain) en gain non-linéaire (1-max_gain)
+    70% de la plage → gain 1-1000 (précis)
+    30% de la plage → gain 1000-max_gain (moins précis)
+    """
+    if max_gain <= 1000:
+        # Pour caméras avec gain max <= 1000, rester linéaire
+        return max(1, slider_value)
+
+    # Normaliser la position (0.0 à 1.0)
+    slider_pos = slider_value / max_gain
+
+    if slider_pos <= 0.7:
+        # 70% du slider → gain 1 à 1000 (précis)
+        return int(1 + (slider_pos / 0.7) * 999)
+    else:
+        # 30% du slider → gain 1000 à max_gain (moins précis)
+        return int(1000 + ((slider_pos - 0.7) / 0.3) * (max_gain - 1000))
+
+def gain_to_slider_nonlinear(gain_value, max_gain):
+    """
+    Inverse : convertit gain (1-max_gain) en position slider linéaire (0-max_gain)
+    Pour ajustements +/- des boutons
+    """
+    if max_gain <= 1000:
+        return gain_value
+
+    if gain_value <= 1000:
+        # gain 1-1000 → 0-70% du slider
+        return int(((gain_value - 1) / 999) * 0.7 * max_gain)
+    else:
+        # gain 1000-max_gain → 70-100% du slider
+        return int((0.7 + ((gain_value - 1000) / (max_gain - 1000)) * 0.3) * max_gain)
+
 def Camera_Version():
     # Check for Pi Camera version
     global lver,v3_af,camera,vwidths2,vheights2,configtxt,mode,mag,max_gain,max_shutter,Pi_Cam,max_camera,same_cams,x_sens,y_sens,igw,igh
@@ -1390,12 +1429,20 @@ def draw_bar(col,row,color,msg,value):
             pmax = still_limits[f+2]
     if msg == "speed":
         pmax = max_speed
+
+    # Pour le gain non-linéaire (IMX585), convertir gain → position slider
+    display_value = value
+    display_mag = mag
+    if msg == "gain" and pmax > 1000 and value > 0:
+        display_value = gain_to_slider_nonlinear(value, pmax)
+        display_mag = gain_to_slider_nonlinear(mag, pmax)
+
     pygame.draw.rect(windowSurfaceObj,color,Rect(preview_width + col*bw,(row * bh) + 1,bw-2,int(bh/3)))
-    if pmin > -1: 
-        j = value / (pmax - pmin)  * bw
-        jag = mag / (pmax - pmin) * bw
+    if pmin > -1:
+        j = display_value / (pmax - pmin)  * bw
+        jag = display_mag / (pmax - pmin) * bw
     else:
-        j = int(bw/2) + (value / (pmax - pmin)  * bw)
+        j = int(bw/2) + (display_value / (pmax - pmin)  * bw)
     j = min(j,bw-5)
     pygame.draw.rect(windowSurfaceObj,(80,140,90),Rect(int(preview_width + int(col*bw) + 2),int(row * bh)+1,int(j+1),int(bh/3)))
     if msg == "gain" and value > mag:
@@ -1708,20 +1755,109 @@ def preview():
     global saturation,meters,meter,flickers,flicker,sharpnesss,sharpness,rotate,v3_hdrs,mjpeg_extractor
     global picam2, use_picamera2, Pi_Cam, camera, v3_af, v5_af, vflip, hflip, denoise, denoises, quality
 
+    # Variables statiques pour mémoriser la configuration précédente
+    if not hasattr(preview, 'prev_config'):
+        preview.prev_config = {}
+
     # ===== MODE PICAMERA2 =====
     if use_picamera2:
-        # Arrêter l'ancienne instance
-        if picam2 is not None:
+        # Déterminer la taille de capture pour détecter si changement
+        if (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8) and (focus_mode == 1 or zoom > 0):
+            capture_size = (3280, 2464)
+        elif (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8) or focus_mode == 1:
+            capture_size = (1920, 1440)
+        elif Pi_Cam == 3:
+            capture_size = (2304, 1296)
+        elif Pi_Cam == 10:
+            capture_size = (1928, 1090)
+        else:
+            capture_size = (preview_width, preview_height)
+
+        # Détecter si recréation nécessaire (changements majeurs de config)
+        need_recreation = (
+            picam2 is None or
+            preview.prev_config.get('camera') != camera or
+            preview.prev_config.get('capture_size') != capture_size or
+            preview.prev_config.get('vflip') != vflip or
+            preview.prev_config.get('hflip') != hflip or
+            preview.prev_config.get('mode_type') != (0 if mode == 0 or sspeed > 80000 else 1)
+        )
+
+        # Calculer speed2 et autres paramètres (avant le if/else)
+        speed2 = sspeed
+        max_exposure_seconds = max_shutters[Pi_Cam]
+        max_frame_duration = int(max_exposure_seconds * 1_000_000)
+        min_frame_duration = 11415 if Pi_Cam == 10 else 100
+
+        # ========== CHEMIN RAPIDE : Juste changer les contrôles ==========
+        if not need_recreation and picam2 is not None:
+            if show_cmds == 1:
+                print(f"  [FAST PATH] Just updating controls (no recreation)...")
+
+            # Préparer les contrôles à changer
+            fast_controls = {}
+
+            # Exposition et gain (mode manuel)
+            if mode == 0:
+                fast_controls["FrameDurationLimits"] = (min_frame_duration, max(max_frame_duration, speed2))
+                fast_controls["ExposureTime"] = speed2
+                fast_controls["AnalogueGain"] = float(gain)
+
+            # Brightness & Contrast
+            fast_controls["Brightness"] = brightness / 100
+            fast_controls["Contrast"] = contrast / 100
+
+            # AWB
+            if awb == 0:
+                fast_controls["ColourGains"] = (red/10, blue/10)
+            else:
+                awb_modes = {
+                    1: controls.AwbModeEnum.Auto, 2: controls.AwbModeEnum.Incandescent,
+                    3: controls.AwbModeEnum.Tungsten, 4: controls.AwbModeEnum.Fluorescent,
+                    5: controls.AwbModeEnum.Indoor, 6: controls.AwbModeEnum.Daylight, 7: controls.AwbModeEnum.Cloudy,
+                }
+                if awb in awb_modes:
+                    fast_controls["AwbMode"] = awb_modes[awb]
+
+            # Saturation & Sharpness
+            fast_controls["Saturation"] = saturation / 10
+            fast_controls["Sharpness"] = sharpness / 10
+
+            # Appliquer tous les contrôles en une seule fois (rapide!)
             try:
-                picam2.stop()
-                picam2.close()
-            except:
-                pass
+                picam2.set_controls(fast_controls)
 
-        # Créer nouvelle instance
-        picam2 = Picamera2(camera)
+                if show_cmds == 1:
+                    print(f"  ✓ Controls updated instantly - ExposureTime={speed2}µs, Gain={gain}")
 
-        # Déterminer la taille de capture selon caméra
+                # Pas besoin de mémoriser la config car elle n'a pas changé
+                restart = 0
+                return  # Early return - évite toute la recréation !
+            except RuntimeError as e:
+                # Si les contrôles ne sont pas disponibles (ex: après rpicam-still),
+                # forcer une recréation complète
+                if show_cmds == 1:
+                    print(f"  ⚠ Fast path failed ({e}), forcing full recreation...")
+                need_recreation = True  # Forcer la recréation
+                # Continue vers le chemin complet ci-dessous
+
+        # ========== CHEMIN COMPLET : Recréation nécessaire ==========
+        if show_cmds == 1:
+            print(f"  [FULL RECREATION] Config changed - recreating Picamera2...")
+
+            # Arrêter l'ancienne instance
+            if picam2 is not None:
+                try:
+                    picam2.stop()
+                    picam2.close()
+                    time.sleep(0.5)
+                except:
+                    pass
+
+            # Créer nouvelle instance
+            picam2 = Picamera2(camera)
+
+        # Déterminer la taille de capture selon caméra (pour les deux chemins)
         if (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8) and (focus_mode == 1 or zoom > 0):
             capture_size = (3280, 2464)
         elif (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8) or focus_mode == 1:
@@ -1774,8 +1910,9 @@ def preview():
         # Exposition et mode
         if mode == 0:
             # Mode manuel
-            # NE PAS modifier FrameDurationLimits - la caméra supporte nativement jusqu'à 163s
-            # Définir uniquement ExposureTime et AnalogueGain pour désactiver l'AE
+            # IMPORTANT: Appliquer FrameDurationLimits dynamiquement pour éviter que la caméra
+            # garde un FrameDuration élevé après une exposition longue
+            controls_dict["FrameDurationLimits"] = (min_frame_duration, max(max_frame_duration, speed2))
             controls_dict["ExposureTime"] = speed2
             controls_dict["AnalogueGain"] = float(gain)
         else:
@@ -1831,69 +1968,68 @@ def preview():
             config["transform"] = Transform(vflip=(vflip == 1), hflip=(hflip == 1))
 
         picam2.configure(config)
+
+        # CRITIQUE: En mode manuel, appliquer TOUS les contrôles AVANT start()
+        # Cela évite que libcamera garde un état résiduel d'une configuration précédente
+        if mode == 0:
+            initial_frame_duration = (min_frame_duration, max(max_frame_duration, speed2))
+            pre_start_controls = {
+                "FrameDurationLimits": initial_frame_duration,
+                "ExposureTime": speed2,
+                "AnalogueGain": float(gain)
+            }
+            picam2.set_controls(pre_start_controls)
+            if show_cmds == 1:
+                print(f"  Pre-start controls: FDL={initial_frame_duration[0]}-{initial_frame_duration[1]}µs, Exp={speed2}µs, Gain={gain}")
+        else:
+            initial_frame_duration = (min_frame_duration, max(max_frame_duration, speed2))
+            picam2.set_controls({"FrameDurationLimits": initial_frame_duration})
+            if show_cmds == 1:
+                print(f"  Pre-start FrameDurationLimits: {initial_frame_duration[0]}µs to {initial_frame_duration[1]}µs")
+
         picam2.start()
 
-        # Attendre que la caméra démarre
-        time.sleep(0.5)
+        # Attendre que la caméra démarre (réduit pour accélérer)
+        time.sleep(0.1)
 
         # APPLIQUER TOUS LES CONTRÔLES APRÈS LE START
         # Pour l'IMX585, c'est nécessaire pour que les contrôles soient correctement appliqués
         try:
             if show_cmds == 1:
                 print(f"Applying controls: ExposureTime={speed2}µs, Gain={controls_dict.get('AnalogueGain')}, Mode={mode}")
-                print(f"  FrameDurationLimits configured: {min_frame_duration}µs to {max_frame_duration}µs ({max_exposure_seconds}s)")
+                fd_limits = controls_dict.get('FrameDurationLimits', (min_frame_duration, max_frame_duration))
+                print(f"  FrameDurationLimits: {fd_limits[0]}µs to {fd_limits[1]}µs ({fd_limits[1]/1000000:.1f}s max)")
 
             # En mode manuel, appliquer ExposureTime et AnalogueGain ensemble
             # Cela désactive automatiquement l'auto-exposition
             if mode == 0:
                 exposure_controls = {
+                    "FrameDurationLimits": controls_dict["FrameDurationLimits"],
                     "ExposureTime": controls_dict["ExposureTime"],
                     "AnalogueGain": controls_dict["AnalogueGain"]
                 }
 
                 picam2.set_controls(exposure_controls)
 
-                if show_cmds == 1:
-                    print(f"  Exposure controls applied, waiting for stabilization...")
-
-                # Pour l'IMX585 avec longues expositions, attendre plus longtemps
-                # et capturer plusieurs frames pour forcer la stabilisation
-                if Pi_Cam == 10 and sspeed > 100000:
-                    time.sleep(1.0)  # Attente plus longue
-                    # Capturer 2-3 frames pour forcer l'application des contrôles
-                    for i in range(3):
-                        try:
-                            meta = picam2.capture_metadata()
-                            if show_cmds == 1:
-                                exp = meta.get('ExposureTime', 0)
-                                print(f"    Stabilization frame {i+1}: ExposureTime={exp}µs ({exp/1000:.1f}ms)")
-                        except:
-                            pass
-                        time.sleep(0.2)
-
-                    # Réappliquer les contrôles d'exposition pour s'assurer qu'ils sont bien pris
-                    if show_cmds == 1:
-                        print(f"  Re-applying exposure controls...")
-                    picam2.set_controls(exposure_controls)
-                    time.sleep(0.5)
-                else:
-                    time.sleep(0.5)
+                # Suppression des étapes de stabilisation/réapplication pour expositions longues
+                # (trop lent, pas nécessaire)
+                time.sleep(0.1)
 
                 # Appliquer les autres contrôles
                 other_controls = {k: v for k, v in controls_dict.items()
-                                if k not in ["ExposureTime", "AnalogueGain"]}
+                                if k not in ["FrameDurationLimits", "ExposureTime", "AnalogueGain"]}
                 if other_controls:
                     picam2.set_controls(other_controls)
-                    time.sleep(0.3)
+                    time.sleep(0.05)
             else:
                 # Mode auto : appliquer tous les contrôles ensemble
                 picam2.set_controls(controls_dict)
-                time.sleep(0.5)
+                time.sleep(0.1)
 
             # Appliquer les contrôles de focus séparément si nécessaire
             if focus_controls:
                 picam2.set_controls(focus_controls)
-                time.sleep(0.2)
+                time.sleep(0.05)
 
             # ===== APPLIQUER LE ZOOM PREVIEW avec ScalerCrop =====
             if zoom > 0 and zoom <= 5 and zoom != 3:  # Zoom 3 désactivé
@@ -1929,7 +2065,7 @@ def preview():
                     # Appliquer ScalerCrop
                     scaler_crop = (crop_x, crop_y, crop_width, crop_height)
                     picam2.set_controls({"ScalerCrop": scaler_crop})
-                    time.sleep(0.2)
+                    time.sleep(0.05)
 
                     if show_cmds == 1:
                         zoom_factor = 1.0 / zfs[zoom]
@@ -1960,8 +2096,8 @@ def preview():
                 print(f"  Camera FrameDurationLimits: {fd_limits}")
 
             # Lire les contrôles effectifs après application
-            # Attendre suffisamment pour que les contrôles se stabilisent
-            time.sleep(0.5)
+            # Délai réduit pour accélérer
+            time.sleep(0.1)
             actual_controls = picam2.capture_metadata()
             if actual_controls:
                 actual_exp = actual_controls.get('ExposureTime')
@@ -1976,8 +2112,17 @@ def preview():
                     print(f"  ⚠ WARNING: ExposureTime réel différent de la demande!")
                     print(f"    Écart: {speed2 - actual_exp}µs ({100*(speed2-actual_exp)/speed2:.1f}%)")
 
+        # Mémoriser la configuration actuelle pour la prochaine fois
+        preview.prev_config = {
+            'camera': camera,
+            'capture_size': capture_size,
+            'vflip': vflip,
+            'hflip': hflip,
+            'mode_type': 0 if mode == 0 or sspeed > 80000 else 1
+        }
+
         restart = 0
-        time.sleep(0.2)
+        # Suppression du sleep final pour accélérer
         return
 
     # ===== MODE RPICAM-VID (code original) =====
@@ -2601,9 +2746,9 @@ while True:
             else:
                 image = pygame.transform.scale(image, (preview_width,preview_height))
             windowSurfaceObj.blit(image, (0,0))
-    if (zoom > 0 or foc_man == 1 or focus_mode == 1):
+    if (zoom > 0 or foc_man == 1 or focus_mode == 1 or histogram > 0):
         # Utiliser array3d au lieu de pixels3d pour ne pas verrouiller la surface
-        # Cela améliore grandement la fluidité de l'affichage en mode focus
+        # Cela améliore grandement la fluidité de l'affichage en mode focus et histogram
         image2 = pygame.surfarray.array3d(image)
         # Transposer car array3d retourne (width, height, channels) au lieu de (height, width, channels)
         image2_transposed = np.transpose(image2, (1, 0, 2))
@@ -2611,7 +2756,7 @@ while True:
         gray = cv2.cvtColor(crop2,cv2.COLOR_RGB2GRAY)
         
         # Histogramme OPTIMISÉ avec numpy vectorisé (80-95% plus rapide)
-        if (zoom > 0 or focus_mode == 1) and histogram > 0:
+        if histogram > 0:
             # Calculer les histogrammes avec numpy (100-1000x plus rapide que les boucles Python)
             bins = np.arange(257)  # 0-256 pour np.histogram
 
@@ -2665,14 +2810,13 @@ while True:
             graph = pygame.surfarray.make_surface(output)
             graph = pygame.transform.flip(graph, 0, 1)
             graph.set_alpha(160)
-            if alt_dis < 2:
-                # Aligner avec le haut du bandeau noir (preview_height * 0.75)
-                hist_y = int(preview_height * 0.75) + 1
-                pygame.draw.rect(windowSurfaceObj, greyColor, Rect(9, hist_y-1, 64, 102), 1)
-                pygame.draw.rect(windowSurfaceObj, greyColor, Rect(73, hist_y-1, 64, 102), 1)
-                pygame.draw.rect(windowSurfaceObj, greyColor, Rect(137, hist_y-1, 64, 102), 1)
-                pygame.draw.rect(windowSurfaceObj, greyColor, Rect(201, hist_y-1, 66, 102), 1)
-                windowSurfaceObj.blit(graph, (10, hist_y))
+            # Aligner avec le haut du bandeau noir (preview_height * 0.75)
+            hist_y = int(preview_height * 0.75) + 1
+            pygame.draw.rect(windowSurfaceObj, greyColor, Rect(9, hist_y-1, 64, 102), 1)
+            pygame.draw.rect(windowSurfaceObj, greyColor, Rect(73, hist_y-1, 64, 102), 1)
+            pygame.draw.rect(windowSurfaceObj, greyColor, Rect(137, hist_y-1, 64, 102), 1)
+            pygame.draw.rect(windowSurfaceObj, greyColor, Rect(201, hist_y-1, 66, 102), 1)
+            windowSurfaceObj.blit(graph, (10, hist_y))
         
         # Nettoyage des variables numpy (array3d ne crée pas de verrou)
         del image2
@@ -2720,11 +2864,37 @@ while True:
         except:
             text(20,2,0,2,0,"SNR = N/A",fv* 2,0)
         
-        # *** FWHM : S'affiche dès que focus_mode == 1 ***
+        # *** HFR : Calcul et affichage permanent (robuste aux aigrettes) ***
+        if focus_mode == 1 or histogram > 0:
+            hfr_val = calculate_hfr(image, xx, xy, histarea)
+
+            if hfr_val is not None:
+                # Déterminer la couleur selon la qualité HFR
+                # HFR en pixels : plus petit = meilleur
+                # Valeurs typiques pour astrophotographie
+                if hfr_val < 2:
+                    hfr_color = 1  # vert (excellent - étoile très concentrée)
+                elif hfr_val < 3.5:
+                    hfr_color = 2  # jaune (bon)
+                elif hfr_val < 5:
+                    hfr_color = 2  # jaune (moyen)
+                else:
+                    hfr_color = 3  # rouge (mauvais - étoile diffuse)
+
+                # Affichage texte HFR - position adaptée selon le mode
+                # En preview: ligne 3 (juste sous SNR), en focus: ligne 4 (sous FWHM)
+                hfr_line = 3 if focus_mode == 0 else 4
+                text(20, hfr_line, hfr_color, 2, 0, "HFR: " + str(round(hfr_val, 2)), fv * 2, 0)
+            else:
+                # Afficher "N/A" si pas d'étoile détectée
+                hfr_line = 3 if focus_mode == 0 else 4
+                text(20, hfr_line, 0, 2, 0, "HFR: N/A", fv * 2, 0)
+
+        # *** Éléments affichés SEULEMENT en mode focus ***
         if focus_mode == 1:
+            # FWHM
             fwhm_val = calculate_fwhm(image, xx, xy, histarea)
-            
-            # Toujours afficher FWHM, même si None
+
             if fwhm_val is not None:
                 # Déterminer la couleur selon la qualité FWHM
                 # Note: FWHM est en pixels, pas en arcsec
@@ -2738,37 +2908,14 @@ while True:
                     fwhm_color = 2  # jaune (moyenne)
                 else:
                     fwhm_color = 3  # rouge (mauvaise - étoile très large)
-                
-                # Affichage texte FWHM - même style que SNR
+
+                # Affichage texte FWHM
                 text(20, 3, fwhm_color, 2, 0, "FWHM: " + str(round(fwhm_val, 1)), fv * 2, 0)
             else:
                 # Afficher "N/A" si pas d'étoile détectée
                 text(20, 3, 0, 2, 0, "FWHM: N/A", fv * 2, 0)
-            
-            # *** HFR : Calcul et affichage (robuste aux aigrettes) ***
-            hfr_val = calculate_hfr(image, xx, xy, histarea)
-            
-            if hfr_val is not None:
-                # Déterminer la couleur selon la qualité HFR
-                # HFR en pixels : plus petit = meilleur
-                # Valeurs typiques pour astrophotographie
-                if hfr_val < 2:
-                    hfr_color = 1  # vert (excellent - étoile très concentrée)
-                elif hfr_val < 3.5:
-                    hfr_color = 2  # jaune (bon)
-                elif hfr_val < 5:
-                    hfr_color = 2  # jaune (moyen)
-                else:
-                    hfr_color = 3  # rouge (mauvais - étoile diffuse)
-                
-                # Affichage texte HFR
-                text(20, 4, hfr_color, 2, 0, "HFR: " + str(round(hfr_val, 2)), fv * 2, 0)
-            else:
-                # Afficher "N/A" si pas d'étoile détectée
-                text(20, 4, 0, 2, 0, "HFR: N/A", fv * 2, 0)
-            
+
             # Graphique HFR - dans le bandeau noir en bas, à côté de l'histogramme
-            # S'affiche que hfr_val soit None ou non
             try:
                 graph_surface = update_hfr_graph(hfr_val)
                 if graph_surface is not None and alt_dis < 2:
@@ -2776,24 +2923,21 @@ while True:
                     # Le haut du graphique doit être aligné avec le haut du bandeau noir (preview_height * 0.75)
                     graph_x = 280  # À droite de l'histogramme (qui se termine à ~267)
                     graph_y = int(preview_height * 0.75) + 1  # Aligné avec le haut du bandeau noir
-                    
+
                     # Dessiner un cadre gris autour du graphique (même style que l'histogramme)
-                    pygame.draw.rect(windowSurfaceObj, greyColor, 
-                                   Rect(graph_x - 1, graph_y - 1, 
-                                        graph_surface.get_width() + 2, 
+                    pygame.draw.rect(windowSurfaceObj, greyColor,
+                                   Rect(graph_x - 1, graph_y - 1,
+                                        graph_surface.get_width() + 2,
                                         graph_surface.get_height() + 2), 1)
-                    
+
                     windowSurfaceObj.blit(graph_surface, (graph_x, graph_y))
             except Exception as e:
                 pass  # Ignorer les erreurs du graphique
 
-                # Afficher "N/A" si pas d'étoile détectée
-                text(20, 4, 0, 2, 0, "HFR: N/A", fv * 2, 0)
-        
-        # Rectangle rouge et croix
-        pygame.draw.rect(windowSurfaceObj,redColor,Rect(xx-histarea,xy-histarea,histarea*2,histarea*2),1)
-        pygame.draw.line(windowSurfaceObj,(255,255,255),(xx-int(histarea/2),xy),(xx+int(histarea/2),xy),1)
-        pygame.draw.line(windowSurfaceObj,(255,255,255),(xx,xy-int(histarea/2)),(xx,xy+int(histarea/2)),1)
+            # Rectangle rouge et croix d'analyse
+            pygame.draw.rect(windowSurfaceObj,redColor,Rect(xx-histarea,xy-histarea,histarea*2,histarea*2),1)
+            pygame.draw.line(windowSurfaceObj,(255,255,255),(xx-int(histarea/2),xy),(xx+int(histarea/2),xy),1)
+            pygame.draw.line(windowSurfaceObj,(255,255,255),(xx,xy-int(histarea/2)),(xx,xy+int(histarea/2)),1)
     
     # Mode preview (zoom == 0 ET focus_mode == 0)
     if zoom == 0 and focus_mode == 0:
@@ -3999,13 +4143,15 @@ while True:
                         count = 0
                         old_count = 0
                         trig = 1
+                        p = None
                         while count < tshots and stop == 0:
                             if time.monotonic() - start2 > tinterval:
                                 start2 = time.monotonic()
-                                poll = p.poll()
-                                while poll == None:
+                                if p is not None:
                                     poll = p.poll()
-                                    time.sleep(0.1)
+                                    while poll == None:
+                                        poll = p.poll()
+                                        time.sleep(0.1)
                                 fname =  pic_dir + str(timestamp) + "_" + str(count) + "." + extns2[extn]
                                 if lver != "bookwo" and lver != "trixie":
                                     datastr = "libcamera-still"
@@ -4262,6 +4408,12 @@ while True:
                             tdur = int(tduration - (time.monotonic() - start_timelapse))
                             td = timedelta(seconds=tdur)
                             text(0,2,1,1,1,str(td),fv,0)
+                        # Attendre que le processus rpicam-vid se termine complètement
+                        if p is not None:
+                            print("[DEBUG] Waiting for rpicam-vid to finish...")
+                            p.wait()
+                            print("[DEBUG] rpicam-vid finished, waiting for camera release...")
+                            time.sleep(2.0)  # Délai supplémentaire pour libération complète de la caméra
                     # Redémarrer Picamera2 si nécessaire après le timelapse
                     resume_picamera2()
                     timelapse = 0
@@ -4941,18 +5093,25 @@ while True:
                         pmin = still_limits[f+1]
                         pmax = still_limits[f+2]
                 if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
-                    gain = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                    slider_val = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                    gain = slider_to_gain_nonlinear(slider_val, pmax)
                 elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
-                    gain = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
+                    slider_val = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
+                    gain = slider_to_gain_nonlinear(slider_val, pmax)
                 elif (mousey > preview_height * .75  and mousey < preview_height * .75 + int(bh/3)) and alt_dis == 2:
-                    gain = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
+                    slider_val = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
+                    gain = slider_to_gain_nonlinear(slider_val, pmax)
                 else:
                     if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        gain -=1
-                        gain  = max(gain ,pmin)
+                        # Bouton - : ajuster avec courbe non-linéaire
+                        slider_pos = gain_to_slider_nonlinear(gain, pmax)
+                        slider_pos = max(slider_pos - 1, pmin)
+                        gain = slider_to_gain_nonlinear(slider_pos, pmax)
                     else:
-                        gain  +=1
-                        gain = min(gain ,pmax)
+                        # Bouton + : ajuster avec courbe non-linéaire
+                        slider_pos = gain_to_slider_nonlinear(gain, pmax)
+                        slider_pos = min(slider_pos + 1, pmax)
+                        gain = slider_to_gain_nonlinear(slider_pos, pmax)
                 if gain > 0:
                     text(0,3,5,0,1,"Gain    A/D",ft,10)
                     if gain <= mag:
@@ -5741,18 +5900,20 @@ while True:
                         pmin = video_limits[f+1]
                         pmax = video_limits[f+2]
                 if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
-                    tinterval = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                    tinterval = round(((mousex-preview_width) / bw) * (pmax-pmin) + pmin, 2)
                 elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
-                    tinterval = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
+                    tinterval = round(((mousex-((button_row - 9)*bw)) / bw) * (pmax-pmin) + pmin, 2)
                 elif (mousey > preview_height * .75 + (bh*3)  and mousey < preview_height * .75 + (bh*3) + int(bh/3)) and alt_dis == 2:
-                    tinterval = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
+                    tinterval = round(((mousex-((button_row - 9)*bw)) / bw) * (pmax-pmin) + pmin, 2)
                 else:
+                    # Pas intelligent: 0.01s si < 1s, sinon 0.1s
+                    step = 0.01 if tinterval < 1 else 0.1
                     if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        tinterval -=1
-                        tinterval = max(tinterval,pmin)
+                        tinterval = round(tinterval - step, 2)
+                        tinterval = max(tinterval, pmin)
                     else:
-                        tinterval +=1
-                        tinterval = min(tinterval,pmax)
+                        tinterval = round(tinterval + step, 2)
+                        tinterval = min(tinterval, pmax)
                 td = timedelta(seconds=tinterval)
                 text(0,2,3,1,1,str(td),fv,12)
                 draw_Vbar(0,2,lyelColor,'tinterval',tinterval)
