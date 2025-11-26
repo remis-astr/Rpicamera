@@ -708,35 +708,49 @@ def calculate_hfr(image_surface, center_x, center_y, area_size):
         
         # Soustraire le fond (minimum local)
         gray_sub = gray.astype(float) - min_val
-        
-        # Calculer le flux total
-        total_flux = np.sum(gray_sub)
-        
+
+        # CORRECTION : Utiliser un seuil pour ignorer le bruit
+        # Ne considérer que les pixels avec au moins 30% de l'intensité maximale
+        # Seuil plus élevé pour éviter les variations erratiques (2 à 60)
+        threshold = (max_val - min_val) * 0.30
+
+        # Créer un masque pour les pixels significatifs
+        significant_mask = gray_sub >= threshold
+
+        # Si pas assez de pixels significatifs, retourner None
+        # Minimum de 10 pixels requis pour un calcul fiable
+        if np.sum(significant_mask) < 10:
+            return None
+
+        # Calculer le flux total (uniquement les pixels significatifs)
+        total_flux = np.sum(gray_sub[significant_mask])
+
         if total_flux <= 0:
             return None
-        
-        # Calculer le centroïde
+
+        # Calculer le centroïde (uniquement sur les pixels significatifs)
         height, width = gray_sub.shape
         y_indices, x_indices = np.mgrid[0:height, 0:width]
-        
-        cx = np.sum(x_indices * gray_sub) / total_flux
-        cy = np.sum(y_indices * gray_sub) / total_flux
-        
-        # Calculer la distance de chaque pixel au centroïde
+
+        cx = np.sum(x_indices[significant_mask] * gray_sub[significant_mask]) / total_flux
+        cy = np.sum(y_indices[significant_mask] * gray_sub[significant_mask]) / total_flux
+
+        # Calculer la distance de chaque pixel significatif au centroïde
         distances = np.sqrt((x_indices - cx)**2 + (y_indices - cy)**2)
-        
+
+        # Extraire seulement les pixels significatifs
+        sig_distances = distances[significant_mask]
+        sig_flux = gray_sub[significant_mask]
+
         # Trier les pixels par distance croissante
-        flat_distances = distances.flatten()
-        flat_flux = gray_sub.flatten()
-        
-        sorted_indices = np.argsort(flat_distances)
-        sorted_distances = flat_distances[sorted_indices]
-        sorted_flux = flat_flux[sorted_indices]
-        
+        sorted_indices = np.argsort(sig_distances)
+        sorted_distances = sig_distances[sorted_indices]
+        sorted_flux = sig_flux[sorted_indices]
+
         # Calculer le flux cumulé
         cumulative_flux = np.cumsum(sorted_flux)
         half_flux = total_flux / 2.0
-        
+
         # Trouver le rayon contenant 50% du flux
         idx = np.searchsorted(cumulative_flux, half_flux)
         
@@ -1851,9 +1865,19 @@ def preview():
     # ===== MODE PICAMERA2 =====
     if use_picamera2:
         # Déterminer la taille de capture pour détecter si changement
-        if (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8) and (focus_mode == 1 or zoom > 0):
+        # Si zoom actif, utiliser la résolution correspondante au niveau de zoom
+        if zoom > 0:
+            # Résolutions correspondant aux niveaux de zoom
+            zoom_capture_sizes = {
+                1: (1920, 1080),  # 2x zoom
+                2: (1280, 720),   # 3x zoom
+                4: (640, 480),    # 5x zoom
+                5: (640, 368)     # 6x zoom
+            }
+            capture_size = zoom_capture_sizes.get(zoom, (vwidth, vheight))
+        elif (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8) and focus_mode == 1:
             capture_size = (3280, 2464)
-        elif (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8) or focus_mode == 1:
+        elif (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8):
             capture_size = (1920, 1440)
         elif Pi_Cam == 3:
             capture_size = (2304, 1296)
@@ -1947,9 +1971,18 @@ def preview():
             picam2 = Picamera2(camera)
 
         # Déterminer la taille de capture selon caméra (pour les deux chemins)
-        if (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8) and (focus_mode == 1 or zoom > 0):
+        # Si zoom actif, utiliser la résolution correspondante au niveau de zoom
+        if zoom > 0:
+            zoom_capture_sizes = {
+                1: (1920, 1080),  # 2x zoom
+                2: (1280, 720),   # 3x zoom
+                4: (640, 480),    # 5x zoom
+                5: (640, 368)     # 6x zoom
+            }
+            capture_size = zoom_capture_sizes.get(zoom, (vwidth, vheight))
+        elif (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8) and focus_mode == 1:
             capture_size = (3280, 2464)
-        elif (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8) or focus_mode == 1:
+        elif (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8):
             capture_size = (1920, 1440)
         elif Pi_Cam == 3:  # Pi v3
             capture_size = (2304, 1296)
@@ -2240,9 +2273,18 @@ def preview():
     datastr += " --camera " + str(camera) + " -n --codec mjpeg -t 0 --segment 1"
 
     # SORTIE DIRECTE VERS FICHIERS JPEG (méthode originale simple et stable)
-    if (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8) and (focus_mode == 1 or zoom > 0):
+    # Si zoom actif, utiliser la résolution correspondante au niveau de zoom
+    if zoom > 0:
+        zoom_cmd_resolutions = {
+            1: " --width 1920 --height 1080 -o /run/shm/test%04d.jpg ",
+            2: " --width 1280 --height 720 -o /run/shm/test%04d.jpg ",
+            4: " --width 640 --height 480 -o /run/shm/test%04d.jpg ",
+            5: " --width 640 --height 368 -o /run/shm/test%04d.jpg "
+        }
+        datastr += zoom_cmd_resolutions.get(zoom, f" --width {vwidth} --height {vheight} -o /run/shm/test%04d.jpg ")
+    elif (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8) and focus_mode == 1:
         datastr += " --width 3280 --height 2464 -o /run/shm/test%04d.jpg "
-    elif (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8) or focus_mode == 1 :
+    elif (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8):
         datastr += " --width 1920 --height 1440 -o /run/shm/test%04d.jpg "
     elif Pi_Cam == 3:  # Pi v3
         datastr += " --width 2304 --height 1296 -o /run/shm/test%04d.jpg "
@@ -2361,7 +2403,7 @@ def preview():
     time.sleep(0.2)
 
 def Menu():
-    global vwidths2,vheights2,Pi_Cam,scientif,mode,v3_hdr,scientific,tinterval,zoom,vwidth,vheight,preview_width,preview_height,ft,fv,focus,fxz,v3_hdr,v3_hdrs,bw,bh,ft,fv,cam1,v3_f_mode,v3_af,button_row
+    global vwidths2,vheights2,Pi_Cam,scientif,mode,v3_hdr,scientific,tinterval,zoom,vwidth,vheight,preview_width,preview_height,ft,fv,focus,fxz,v3_hdr,v3_hdrs,bw,bh,ft,fv,cam1,v3_f_mode,v3_af,button_row,xx,xy
     pygame.draw.rect(windowSurfaceObj,(0,0,0),Rect(preview_width,0,bw,preview_height))
     if menu > 0: 
         # set button sizes
@@ -2964,6 +3006,8 @@ while True:
         
         # *** HFR : Calcul et affichage permanent (robuste aux aigrettes) ***
         if focus_mode == 1 or histogram > 0:
+            # Utiliser la même zone que le réticule (histarea) pour cohérence avec FWHM
+            # L'algorithme avec seuil à 20% filtre le bruit efficacement
             hfr_val = calculate_hfr(image, xx, xy, histarea)
 
             if hfr_val is not None:
@@ -4608,8 +4652,8 @@ while True:
                         text(0,4,2,0,1,"ZOOMED",ft,0)
                         text(0,4,3,1,1,zoom_res_labels.get(zoom, str(zoom)),fv,0)
                         draw_Vbar(0,4,dgryColor,'zoom',zoom)
-                        
-                    if foc_man == 0:
+
+                    if foc_man == 0 and focus_mode == 0:
                         button(0,5,0,9)
                         text(0,5,5,0,1,"FOCUS",ft,7)
                     # determine if camera native format
@@ -4626,6 +4670,15 @@ while True:
                     text(0,4,2,0,1,"ZOOMED",ft,0)
                     text(0,4,3,1,1,zoom_res_labels.get(zoom, str(zoom)),fv,0)
                     draw_Vbar(0,4,dgryColor,'zoom',zoom)
+
+                # Maintenir le bouton Focus actif si on est en mode focus
+                if focus_mode == 1:
+                    # Recentrer le réticule lors du changement de zoom en mode focus
+                    xx = int(preview_width/2)
+                    xy = int(preview_height/2)
+                    button(0,5,1,9)
+                    text(0,5,3,0,1,"FOCUS",ft,0)
+
                 if zoom > 0:
                     fxx = 0
                     fxy = 0
@@ -4714,6 +4767,9 @@ while True:
                         zoom = 4
                         sync_video_resolution_with_zoom()
                         focus_mode = 1
+                        # Recentrer le réticule
+                        xx = int(preview_width/2)
+                        xy = int(preview_height/2)
                         button(0,5,1,9)
                         text(0,5,3,0,1,"FOCUS",ft,0)
                         button(0,4,1,9)
@@ -4738,11 +4794,14 @@ while True:
                         text(0,4,3,1,1,"",fv,7)
                         draw_Vbar(0,4,greyColor,'zoom',zoom)
                         restart = 1
-                    # Pi V3 manual focus 
+                    # Pi V3 manual focus
                     elif Pi_Cam == 3 and v3_af == 1 and v3_f_mode == 0:
                         focus_mode = 1
-                        v3_f_mode = 1 
-                        foc_man = 1 
+                        v3_f_mode = 1
+                        foc_man = 1
+                        # Recentrer le réticule
+                        xx = int(preview_width/2)
+                        xy = int(preview_height/2)
                         restart = 1
                         button(0,5,1,9)
                         time.sleep(0.25)
@@ -4755,7 +4814,10 @@ while True:
                     elif ((Pi_Cam == 5 and v5_af == 1) or Pi_Cam == 6 or Pi_Cam == 8) and v3_f_mode == 0:
                         focus_mode = 1
                         v3_f_mode = 1
-                        foc_man = 1 
+                        foc_man = 1
+                        # Recentrer le réticule
+                        xx = int(preview_width/2)
+                        xy = int(preview_height/2)
                         text(0,5,3,0,1,'<<< ' + str(focus) + ' >>>',fv,0)
                         if Pi_Cam == 5:
                             draw_Vbar(0,5,dgryColor,'v5_focus',focus)
