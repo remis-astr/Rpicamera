@@ -868,6 +868,11 @@ still       = 0
 video       = 0
 timelapse   = 0
 stream      = 0
+stretch_mode = 0  # Mode stretch astro pour le preview
+stretch_p_low = 10   # Percentile bas pour stretch (0.1% à 10%, stocké x10 pour slider)
+stretch_p_high = 995 # Percentile haut pour stretch (90% à 100%, stocké x10 pour slider)
+stretch_factor = 100 # Facteur de stretch (1 à 30, stocké x10 pour slider)
+stretch_preset = 0   # Préréglage stretch: 0=Custom, 1=Lune, 2=Galaxie, 3=Nébuleuse, 4=Jour
 fwhm_history = deque(maxlen=240)
 fwhm_times = deque(maxlen=240)
 fwhm_start_time = 0
@@ -1022,6 +1027,7 @@ v3_f_ranges  = ['normal','macro','full']
 v3_f_speeds  = ['normal','fast']
 histograms   = ["OFF","Red","Green","Blue","Lum","ALL"]
 strs         = ["Still","Video","Stream","Timelapse"]
+stretch_presets = ['Custom','Lune','Galaxie','Nebuleuse','Jour']
 v3_hdrs      = ["off","single-exp","auto","sensor"]
 
 #check linux version.
@@ -1068,13 +1074,15 @@ still_limits = ['mode',0,len(modes)-1,'speed',0,len(shutters)-1,'gain',0,30,'bri
                 'histogram',0,len(histograms)-1,'v3_f_speed',0,len(v3_f_speeds)-1]
 video_limits = ['vlen',0,3600,'fps',1,40,'v5_focus',10,2500,'vformat',0,7,'0',0,0,'zoom',0,5,'Focus',0,1,'tduration',1,86400,'tinterval',0.01,10,'tshots',1,999,
                 'flicker',0,3,'codec',0,len(codecs)-1,'profile',0,len(h264profiles)-1,'v3_focus',10,2000,'histarea',10,300,'v3_f_range',0,len(v3_f_ranges)-1,
-                'str_cap',0,len(strs)-1,'v6_focus',10,1020]
+                'str_cap',0,len(strs)-1,'v6_focus',10,1020,'stretch_p_low',1,100,'stretch_p_high',900,1000,'stretch_factor',10,300,'stretch_preset',0,4]
 
 # check config_file exists, if not then write default values
 titles = ['mode','speed','gain','brightness','contrast','frame','red','blue','ev','vlen','fps','vformat','codec','tinterval','tshots','extn','zx','zy','zoom','saturation',
-          'meter','awb','sharpness','denoise','quality','profile','level','histogram','histarea','v3_f_speed','v3_f_range','rotate','IRF','str_cap','v3_hdr','timet','vflip','hflip']
+          'meter','awb','sharpness','denoise','quality','profile','level','histogram','histarea','v3_f_speed','v3_f_range','rotate','IRF','str_cap','v3_hdr','timet','vflip','hflip',
+          'stretch_p_low','stretch_p_high','stretch_factor','stretch_preset']
 points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat,codec,tinterval,tshots,extn,zx,zy,zoom,saturation,
-          meter,awb,sharpness,denoise,quality,profile,level,histogram,histarea,v3_f_speed,v3_f_range,rotate,IRF,str_cap,v3_hdr,timet,vflip,hflip]
+          meter,awb,sharpness,denoise,quality,profile,level,histogram,histarea,v3_f_speed,v3_f_range,rotate,IRF,str_cap,v3_hdr,timet,vflip,hflip,
+          stretch_p_low,stretch_p_high,stretch_factor,stretch_preset]
 if not os.path.exists(config_file):
     with open(config_file, 'w') as f:
         for item in range(0,len(titles)):
@@ -1132,6 +1140,21 @@ v3_hdr      = config[34]
 timet       = config[35]
 vflip       = config[36]
 hflip       = config[37]
+
+# Ajouter les nouveaux paramètres stretch si le fichier de config est ancien
+if len(config) <= 38:
+    config.append(10)    # stretch_p_low par défaut
+if len(config) <= 39:
+    config.append(995)   # stretch_p_high par défaut
+if len(config) <= 40:
+    config.append(100)   # stretch_factor par défaut
+if len(config) <= 41:
+    config.append(0)     # stretch_preset par défaut (Custom)
+
+stretch_p_low    = config[38]
+stretch_p_high   = config[39]
+stretch_factor   = config[40]
+stretch_preset   = config[41]
 
 if codec > len(codecs)-1:
     codec = 0
@@ -1852,6 +1875,47 @@ def reset_hfr_history():
     hfr_times.clear()
     hfr_start_time = 0
 
+def astro_stretch(array):
+    """
+    Applique un étirement astro (autostretch) sur une image numpy array
+    Utilise une technique de normalisation par percentiles et fonction asinh
+    pour accentuer les détails faibles tout en préservant les hautes lumières
+
+    Args:
+        array: numpy array de l'image (H, W, 3) en RGB
+
+    Returns:
+        numpy array étiré de même dimension
+    """
+    global stretch_p_low, stretch_p_high, stretch_factor
+
+    # Convertir en float pour les calculs
+    img_float = array.astype(np.float32)
+
+    # Calculer les percentiles pour éviter l'effet des pixels chauds
+    # Utilise les valeurs configurables (divisées par 10 car stockées x10)
+    p_low = np.percentile(img_float, stretch_p_low / 10.0)
+    p_high = np.percentile(img_float, stretch_p_high / 10.0)
+
+    # Éviter la division par zéro
+    if p_high - p_low < 1:
+        return array
+
+    # Normaliser entre 0 et 1
+    img_normalized = (img_float - p_low) / (p_high - p_low)
+    img_normalized = np.clip(img_normalized, 0, 1)
+
+    # Appliquer une transformation asinh pour accentuer les détails faibles
+    # asinh est plus doux que sqrt et préserve mieux les détails
+    # Utilise le facteur configurable (divisé par 10 car stocké x10)
+    factor = stretch_factor / 10.0
+    img_stretched = np.arcsinh(img_normalized * factor) / np.arcsinh(factor)
+
+    # Reconvertir en uint8
+    img_stretched = (img_stretched * 255).astype(np.uint8)
+
+    return img_stretched
+
 def preview():
     global use_ard,lver,Pi,scientif,scientific,fxx,fxy,fxz,v3_focus,v3_hdr,v3_f_mode,v3_f_modes,prev_fps,focus_fps,focus_mode,restart,datastr
     global count,p, brightness,contrast,modes,mode,red,blue,gain,sspeed,ev,preview_width,preview_height,zoom,igw,igh,zx,zy,awbs,awb,saturations
@@ -2428,7 +2492,7 @@ def Menu():
     if menu == 0:
         # set button sizes
         bw = int(preview_width/5.66)
-        bh = int(preview_height/6)
+        bh = int(preview_height/7)
         ft = int(preview_width/46)
         fv = int(preview_width/46)
         # Effacer la zone des boutons pour éviter les sliders résiduels
@@ -2436,17 +2500,19 @@ def Menu():
         button(0,0,4,4)
         button(0,1,2,4)
         button(0,2,3,4)
-        button(0,3,0,4)
+        button(0,3,5,4)
         button(0,4,0,4)
         button(0,5,0,4)
+        button(0,6,0,4)
         text(0,0,8,0,1,"         STILL ",ft,1)
         text(0,1,8,0,1,"         VIDEO",ft,2)
         text(0,2,8,0,1,"       TIMELAPSE",ft-1,4)
-        text(0,3,1,0,1,"      CAMERA",ft,7)
-        text(0,3,1,1,1,"    Settings",ft,7)
-        text(0,4,1,0,1,"       OTHER",ft,7)
+        text(0,3,1,0,1,"       STRECH",ft,1)
+        text(0,4,1,0,1,"      CAMERA",ft,7)
         text(0,4,1,1,1,"    Settings",ft,7)
-        text(0,5,2,0,1,"     EXIT",fv+10,7)
+        text(0,5,1,0,1,"       OTHER",ft,7)
+        text(0,5,1,1,1,"    Settings",ft,7)
+        text(0,6,2,0,1,"     EXIT",fv+10,7)
       
     elif menu == 1:
       text(0,1,1,0,1,"STILL",ft,7)
@@ -2519,6 +2585,8 @@ def Menu():
         text(0,7,5,0,1," STILL -t time ",fv,7)
         text(0,7,3,1,1,str(timet),fv,7)
         text(0,8,2,0,1,"SAVE CONFIG",fv,7)
+        button(0,9,0,9)
+        text(0,9,1,0,1,"Page 2 ",ft,7)
         draw_Vbar(0,2,greyColor,'str_cap',str_cap)
         draw_bar(0,3,greyColor,'histogram',histogram)
         draw_Vbar(0,4,greyColor,'histarea',histarea)
@@ -2658,6 +2726,28 @@ def Menu():
         draw_Vbar(0,1,lyelColor,'tduration',tduration)
         draw_Vbar(0,2,lyelColor,'tinterval',tinterval)
         draw_Vbar(0,3,lyelColor,'tshots',tshots)
+
+    elif menu == 7:
+        # OTHER Settings Page 2 - Stretch Parameters
+        # Dessiner d'abord tous les rectangles de fond pour éviter les zones noires
+        for row in [1, 2, 3, 4, 5, 6, 7, 8]:
+            pygame.draw.rect(windowSurfaceObj, greyColor, Rect(preview_width, row * bh, bw, bh+1))
+
+        text(0,1,5,0,1,"Stretch Low %",ft,7)
+        text(0,1,3,1,1,str(stretch_p_low/10)[0:4],fv,7)
+        text(0,2,5,0,1,"Stretch High %",ft,7)
+        text(0,2,3,1,1,str(stretch_p_high/10)[0:5],fv,7)
+        text(0,3,5,0,1,"Stretch Factor",ft,7)
+        text(0,3,3,1,1,str(stretch_factor/10)[0:4],fv,7)
+        text(0,4,5,0,1,"Preset",ft,7)
+        text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
+        text(0,8,2,0,1,"SAVE CONFIG",fv,7)
+        button(0,9,0,9)
+        text(0,9,1,0,1,"Page 1 ",ft,7)
+        draw_Vbar(0,1,greyColor,'stretch_p_low',stretch_p_low)
+        draw_Vbar(0,2,greyColor,'stretch_p_high',stretch_p_high)
+        draw_Vbar(0,3,greyColor,'stretch_factor',stretch_factor)
+        draw_Vbar(0,4,greyColor,'stretch_preset',stretch_preset)
 
 text(0,0,6,2,1,"Please Wait, checking camera",int(fv* 1.7),1)
 text(0,0,6,2,1,"Found " + str(cameras[Pi_Cam]),int(fv*1.7),1)
@@ -2817,6 +2907,10 @@ while True:
                 print("DEBUG: Frame saved to /home/admin/debug_picamera2_frame.jpg")
                 pygame._picam2_debug_done = True
 
+            # Appliquer le stretch astro si le mode est activé
+            if stretch_mode == 1:
+                array = astro_stretch(array)
+
             # Convertir numpy array → pygame surface
             # Picamera2 retourne (height, width, 3) en RGB
             # pygame.surfarray.make_surface attend (width, height, 3)
@@ -2825,7 +2919,19 @@ while True:
             image = pygame.surfarray.make_surface(np.swapaxes(array, 0, 1)[:,:,[2,1,0]])
 
             # Scaling si nécessaire
-            if image.get_width() != preview_width or image.get_height() != preview_height:
+            if stretch_mode == 1:
+                # En mode stretch, afficher en VRAI plein écran (cache la barre de tâches)
+                # Obtenir la résolution maximale de l'écran
+                modes = pygame.display.list_modes()
+                if modes and modes != -1:
+                    # Prendre la résolution la plus grande (la première de la liste)
+                    max_width, max_height = modes[0]
+                else:
+                    # Fallback si list_modes ne fonctionne pas
+                    screen_info = pygame.display.Info()
+                    max_width, max_height = screen_info.current_w, screen_info.current_h
+                image = pygame.transform.scale(image, (max_width, max_height))
+            elif image.get_width() != preview_width or image.get_height() != preview_height:
                 if igw/igh > 1.5:
                     image = pygame.transform.scale(image, (preview_width, int(preview_height * 0.75)))
                 else:
@@ -2872,15 +2978,39 @@ while True:
                 except (pygame.error, OSError):
                     pass  # Garder l'ancienne image affichée
 
+            # Appliquer le stretch astro si le mode est activé
+            if stretch_mode == 1:
+                # Convertir pygame surface → numpy array
+                img_array = pygame.surfarray.array3d(image)
+                # Transposer de (width, height, channels) à (height, width, channels)
+                img_array = np.transpose(img_array, (1, 0, 2))
+                # Appliquer le stretch
+                img_array = astro_stretch(img_array)
+                # Reconvertir en pygame surface
+                image = pygame.surfarray.make_surface(np.swapaxes(img_array, 0, 1))
+
             # Scaling et affichage
             # En mode zoom, l'image arrive déjà à la bonne taille via ROI, ne pas rescaler
-            if zoom == 0:
+            if stretch_mode == 1:
+                # En mode stretch, afficher en VRAI plein écran (cache la barre de tâches)
+                # Obtenir la résolution maximale de l'écran
+                modes = pygame.display.list_modes()
+                if modes and modes != -1:
+                    # Prendre la résolution la plus grande (la première de la liste)
+                    max_width, max_height = modes[0]
+                else:
+                    # Fallback si list_modes ne fonctionne pas
+                    screen_info = pygame.display.Info()
+                    max_width, max_height = screen_info.current_w, screen_info.current_h
+                image = pygame.transform.scale(image, (max_width, max_height))
+            elif zoom == 0:
                 if igw/igh > 1.5:
                     image = pygame.transform.scale(image, (preview_width,int(preview_height * 0.75)))
                 else:
                     image = pygame.transform.scale(image, (preview_width,preview_height))
             windowSurfaceObj.blit(image, (0,0))
-    if (zoom > 0 or foc_man == 1 or focus_mode == 1 or histogram > 0):
+    # Ne pas afficher les overlays en mode stretch
+    if (zoom > 0 or foc_man == 1 or focus_mode == 1 or histogram > 0) and stretch_mode == 0:
         # Utiliser array3d au lieu de pixels3d pour ne pas verrouiller la surface
         # Cela améliore grandement la fluidité de l'affichage en mode focus et histogram
         image2 = pygame.surfarray.array3d(image)
@@ -3086,14 +3216,16 @@ while True:
             pygame.draw.line(windowSurfaceObj,(255,255,255),(xx-int(histarea/2),xy),(xx+int(histarea/2),xy),1)
             pygame.draw.line(windowSurfaceObj,(255,255,255),(xx,xy-int(histarea/2)),(xx,xy+int(histarea/2)),1)
     
-    # Mode preview (zoom == 0 ET focus_mode == 0)
-    if zoom == 0 and focus_mode == 0:
+    # Mode preview (zoom == 0 ET focus_mode == 0) - Ne pas afficher en mode stretch
+    if zoom == 0 and focus_mode == 0 and stretch_mode == 0:
         text(0,0,6,2,0,"Preview",fv* 2,0)
-    
+
     # Mode preview (zoom == 0)
     if zoom == 0:
         #pygame.draw.rect(windowSurfaceObj,blackColor,Rect(0,0,int(preview_width/4.5),int(preview_height/8)),0)
-        text(0,0,6,2,0,"Preview",fv* 2,0)
+        # Ne pas afficher le texte en mode stretch
+        if stretch_mode == 0:
+            text(0,0,6,2,0,"Preview",fv* 2,0)
         zxp = (zx -((preview_width/2) / (igw/preview_width)))
         zyp = (zy -((preview_height/2) / (igh/preview_height)))
         zxq = (zx - zxp) * 2
@@ -3118,7 +3250,8 @@ while True:
             gw = 2
         else:
             gw = 1
-        if ((Pi_Cam == 3 and v3_af == 1) or ((Pi_Cam == 5 or Pi_Cam == 6)) or Pi_Cam == 8) and fxz != 1 and zoom == 0:
+        # Ne pas afficher le rectangle de focus en mode stretch (déjà géré plus bas)
+        if ((Pi_Cam == 3 and v3_af == 1) or ((Pi_Cam == 5 or Pi_Cam == 6)) or Pi_Cam == 8) and fxz != 1 and zoom == 0 and stretch_mode == 0:
             pygame.draw.rect(windowSurfaceObj,(200,0,0),Rect(int(fxx*preview_width),int(fxy*preview_height*.75),int(fxz*preview_width),int(fyz*preview_height)),1)
 
     # *** CRUCIAL : Mettre à jour l'affichage pygame ***
@@ -3127,7 +3260,9 @@ while True:
     # *** CETTE PARTIE EST CRUCIALE : Mode preview (zoom == 0) ***
     if zoom == 0:
         #pygame.draw.rect(windowSurfaceObj,blackColor,Rect(0,0,int(preview_width/4.5),int(preview_height/8)),0)
-        text(0,0,6,2,0,"Preview",fv* 2,0)
+        # Ne pas afficher le texte en mode stretch
+        if stretch_mode == 0:
+            text(0,0,6,2,0,"Preview",fv* 2,0)
         zxp = (zx -((preview_width/2) / (igw/preview_width)))
         zyp = (zy -((preview_height/2) / (igh/preview_height)))
         zxq = (zx - zxp) * 2
@@ -3152,7 +3287,8 @@ while True:
             gw = 2
         else:
             gw = 1
-        if ((Pi_Cam == 3 and v3_af == 1) or ((Pi_Cam == 5 or Pi_Cam == 6)) or Pi_Cam == 8) and fxz != 1 and zoom == 0:
+        # Ne pas afficher le rectangle de focus en mode stretch
+        if ((Pi_Cam == 3 and v3_af == 1) or ((Pi_Cam == 5 or Pi_Cam == 6)) or Pi_Cam == 8) and fxz != 1 and zoom == 0 and stretch_mode == 0:
             pygame.draw.rect(windowSurfaceObj,(200,0,0),Rect(int(fxx*preview_width),int(fxy*preview_height*.75),int(fxz*preview_width),int(fyz*preview_height)),1)
 
         pygame.display.update()
@@ -3178,6 +3314,25 @@ while True:
       # MOVE HISTAREA
       elif (event.type == MOUSEBUTTONUP):
         mousex, mousey = event.pos
+
+        # Si on est en mode stretch, un clic quitte ce mode
+        if stretch_mode == 1:
+            stretch_mode = 0
+            # Restaurer le mode d'affichage normal (avec l'interface)
+            if frame == 1:
+                if fullscreen == 1:
+                    windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.FULLSCREEN, 24)
+                else:
+                    windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), 0, 24)
+            else:
+                windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.NOFRAME, 24)
+            # Effacer l'écran (remplir de noir)
+            windowSurfaceObj.fill((0, 0, 0))
+            # Redessiner le menu pour restaurer l'affichage normal
+            Menu()
+            pygame.display.update()
+            continue
+
         if mousex < preview_width and mousey < preview_height and mousex != 0 and mousey != 0 and event.button != 3 and menu == 0:
             xx = mousex
             xx = min(xx,preview_width - histarea)
@@ -4569,14 +4724,26 @@ while True:
                     restart = 2 
                         
                 elif button_row == 3:
+                    # STRECH - Active le mode stretch astro pour le preview
+                    stretch_mode = 1
+                    # Passer en mode fullscreen pour couvrir aussi la barre de tâches
+                    modes = pygame.display.list_modes()
+                    if modes and modes != -1:
+                        max_width, max_height = modes[0]
+                    else:
+                        screen_info = pygame.display.Info()
+                        max_width, max_height = screen_info.current_w, screen_info.current_h
+                    windowSurfaceObj = pygame.display.set_mode((max_width, max_height), pygame.FULLSCREEN, 24)
+
+                elif button_row == 4:
                     menu = 1
                     Menu()
-                        
-                elif button_row == 4:
+
+                elif button_row == 5:
                     menu = 2
                     Menu()
-                        
-                elif button_row == 5:
+
+                elif button_row == 6:
                     # EXIT
                     kill_preview_process()
                     if picam2 is not None:
@@ -5119,12 +5286,21 @@ while True:
                    config[35] = timet
                    config[36] = vflip
                    config[37] = hflip
+                   config[38] = stretch_p_low
+                   config[39] = stretch_p_high
+                   config[40] = stretch_factor
+                   config[41] = stretch_preset
                    with open(config_file, 'w') as f:
                       for item in range(0,len(titles)):
                           f.write(titles[item] + " : " + str(config[item]) + "\n")
                    time.sleep(1)
-                   text(0,8,2,0,1,"SAVE CONFIG",fv,7) 
-                          
+                   text(0,8,2,0,1,"SAVE CONFIG",fv,7)
+
+              elif button_row == 9:
+                  # Page 2
+                  menu = 7
+                  Menu()
+
             # MENU 3    
             elif menu == 3: 
               if button_row == 9:
@@ -5681,6 +5857,10 @@ while True:
                    config[35] = timet
                    config[36] = vflip
                    config[37] = hflip
+                   config[38] = stretch_p_low
+                   config[39] = stretch_p_high
+                   config[40] = stretch_factor
+                   config[41] = stretch_preset
                    with open(config_file, 'w') as f:
                       for item in range(0,len(titles)):
                           f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -6027,6 +6207,10 @@ while True:
                    config[35] = timet
                    config[36] = vflip
                    config[37] = hflip
+                   config[38] = stretch_p_low
+                   config[39] = stretch_p_high
+                   config[40] = stretch_factor
+                   config[41] = stretch_preset
                    with open(config_file, 'w') as f:
                       for item in range(0,len(titles)):
                           f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -6180,13 +6364,185 @@ while True:
                    config[35] = timet
                    config[36] = vflip
                    config[37] = hflip
+                   config[38] = stretch_p_low
+                   config[39] = stretch_p_high
+                   config[40] = stretch_factor
+                   config[41] = stretch_preset
                    with open(config_file, 'w') as f:
                       for item in range(0,len(titles)):
                           f.write(titles[item] + " : " + str(config[item]) + "\n")
                    time.sleep(1)
                    text(0,8,2,0,1,"SAVE CONFIG",fv,12)
-        
-                
+
+            # MENU 7 - OTHER Settings Page 2
+            elif menu == 7:
+              if button_row == 9:
+                  # Page 1
+                  menu = 2
+                  Menu()
+
+              elif button_row == 1:
+                # STRETCH LOW PERCENTILE
+                pmin = 1    # 0.1%
+                pmax = 100  # 10%
+                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    stretch_p_low = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                else:
+                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                        stretch_p_low -=1
+                        stretch_p_low = max(stretch_p_low,pmin)
+                    else:
+                        stretch_p_low +=1
+                        stretch_p_low = min(stretch_p_low,pmax)
+                stretch_preset = 0  # Retour à Custom si modification manuelle
+                text(0,1,3,1,1,str(stretch_p_low/10)[0:4],fv,7)
+                draw_Vbar(0,1,greyColor,'stretch_p_low',stretch_p_low)
+                text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
+                draw_Vbar(0,4,greyColor,'stretch_preset',stretch_preset)
+                time.sleep(.05)
+
+              elif button_row == 2:
+                # STRETCH HIGH PERCENTILE
+                pmin = 900  # 90%
+                pmax = 1000 # 100%
+                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    stretch_p_high = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
+                else:
+                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                        stretch_p_high -=1
+                        stretch_p_high = max(stretch_p_high,pmin)
+                    else:
+                        stretch_p_high +=1
+                        stretch_p_high = min(stretch_p_high,pmax)
+                stretch_preset = 0  # Retour à Custom si modification manuelle
+                text(0,2,3,1,1,str(stretch_p_high/10)[0:5],fv,7)
+                draw_Vbar(0,2,greyColor,'stretch_p_high',stretch_p_high)
+                text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
+                draw_Vbar(0,4,greyColor,'stretch_preset',stretch_preset)
+                time.sleep(.05)
+
+              elif button_row == 3:
+                # STRETCH FACTOR
+                pmin = 10   # 1.0
+                pmax = 300  # 30.0
+                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    stretch_factor = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
+                else:
+                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                        stretch_factor -=5
+                        stretch_factor = max(stretch_factor,pmin)
+                    else:
+                        stretch_factor +=5
+                        stretch_factor = min(stretch_factor,pmax)
+                stretch_preset = 0  # Retour à Custom si modification manuelle
+                text(0,3,3,1,1,str(stretch_factor/10)[0:4],fv,7)
+                draw_Vbar(0,3,greyColor,'stretch_factor',stretch_factor)
+                text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
+                draw_Vbar(0,4,greyColor,'stretch_preset',stretch_preset)
+                time.sleep(.05)
+
+              elif button_row == 4:
+                # STRETCH PRESET
+                pmin = 0
+                pmax = 4
+                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    stretch_preset = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                else:
+                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                        stretch_preset -=1
+                        stretch_preset = max(stretch_preset,pmin)
+                    else:
+                        stretch_preset +=1
+                        stretch_preset = min(stretch_preset,pmax)
+
+                # Charger les valeurs du preset
+                if stretch_preset == 1:
+                    # Lune - moins agressif
+                    stretch_p_low = 20
+                    stretch_p_high = 980
+                    stretch_factor = 50
+                elif stretch_preset == 2:
+                    # Galaxie - très agressif
+                    stretch_p_low = 5
+                    stretch_p_high = 995
+                    stretch_factor = 150
+                elif stretch_preset == 3:
+                    # Nébuleuse - moyennement agressif
+                    stretch_p_low = 10
+                    stretch_p_high = 995
+                    stretch_factor = 120
+                elif stretch_preset == 4:
+                    # Jour - peu agressif
+                    stretch_p_low = 10
+                    stretch_p_high = 990
+                    stretch_factor = 30
+                # Si Custom (0), ne rien changer
+
+                # Mettre à jour l'affichage
+                text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
+                draw_Vbar(0,4,greyColor,'stretch_preset',stretch_preset)
+                if stretch_preset != 0:
+                    # Mettre à jour l'affichage des paramètres si un preset a été sélectionné
+                    text(0,1,3,1,1,str(stretch_p_low/10)[0:4],fv,7)
+                    draw_Vbar(0,1,greyColor,'stretch_p_low',stretch_p_low)
+                    text(0,2,3,1,1,str(stretch_p_high/10)[0:5],fv,7)
+                    draw_Vbar(0,2,greyColor,'stretch_p_high',stretch_p_high)
+                    text(0,3,3,1,1,str(stretch_factor/10)[0:4],fv,7)
+                    draw_Vbar(0,3,greyColor,'stretch_factor',stretch_factor)
+                time.sleep(.05)
+
+              elif button_row == 8:
+                   # SAVE CONFIG
+                   text(0,8,3,0,1,"SAVE Config",fv,7)
+                   config[0] = mode
+                   config[1] = speed
+                   config[2] = gain
+                   config[3] = int(brightness)
+                   config[4] = int(contrast)
+                   config[5] = frame
+                   config[6] = int(red)
+                   config[7] = int(blue)
+                   config[8] = ev
+                   config[9] = vlen
+                   config[10] = fps
+                   config[11] = vformat
+                   config[12] = codec
+                   config[13] = tinterval
+                   config[14] = tshots
+                   config[15] = extn
+                   config[16] = zx
+                   config[17] = zy
+                   config[18] = zoom
+                   config[19] = int(saturation)
+                   config[20] = meter
+                   config[21] = awb
+                   config[22] = sharpness
+                   config[23] = int(denoise)
+                   config[24] = quality
+                   config[25] = profile
+                   config[26] = level
+                   config[27] = histogram
+                   config[28] = histarea
+                   config[29] = v3_f_speed
+                   config[30] = v3_f_range
+                   config[31] = rotate
+                   config[32] = IRF
+                   config[33] = str_cap
+                   config[34] = v3_hdr
+                   config[35] = timet
+                   config[36] = vflip
+                   config[37] = hflip
+                   config[38] = stretch_p_low
+                   config[39] = stretch_p_high
+                   config[40] = stretch_factor
+                   config[41] = stretch_preset
+                   with open(config_file, 'w') as f:
+                      for item in range(0,len(titles)):
+                          f.write(titles[item] + " : " + str(config[item]) + "\n")
+                   time.sleep(1)
+                   text(0,8,2,0,1,"SAVE CONFIG",fv,7)
+
+
         # RESTART
         if restart > 0:
             kill_preview_process()
