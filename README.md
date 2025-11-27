@@ -94,8 +94,8 @@ The development of this program is open to the community. Feel free to:
 - Propose new features
 - Fix bugs
 - Add support for new sensors
-- Find a solution to implement RAW video mode -> SER (not found yet)
-- Develop auto-stretch for preview
+- Find a solution to implement RAW video mode -> SER (not found yet need help)
+- Develop auto-stretch for preview -> done
 - Develop native live stacking integration?
 
 ## License
