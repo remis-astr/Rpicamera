@@ -28,6 +28,8 @@ import datetime
 import subprocess
 import signal
 import cv2
+from pathlib import Path
+import shutil
 import glob
 from datetime import timedelta
 import numpy as np
@@ -869,10 +871,15 @@ video       = 0
 timelapse   = 0
 stream      = 0
 stretch_mode = 0  # Mode stretch astro pour le preview
+livestack_mode = 0  # Mode live stacking
+livestack_process = None  # Subprocess livestack.py
+livestack_capture_process = None  # Subprocess capture DNG
+livestack_dir = None  # Répertoire DNG temporaire
+livestack_output = None  # Fichier PNG résultat
 stretch_p_low = 10   # Percentile bas pour stretch (0.1% à 10%, stocké x10 pour slider)
 stretch_p_high = 995 # Percentile haut pour stretch (90% à 100%, stocké x10 pour slider)
 stretch_factor = 100 # Facteur de stretch (1 à 30, stocké x10 pour slider)
-stretch_preset = 0   # Préréglage stretch: 0=Custom, 1=Lune, 2=Galaxie, 3=Nébuleuse, 4=Jour
+stretch_preset = 0   # Préréglage stretch: 0=OFF, 1=AUTO, 2=Nébuleuse, 3=Galaxie
 fwhm_history = deque(maxlen=240)
 fwhm_times = deque(maxlen=240)
 fwhm_start_time = 0
@@ -883,6 +890,11 @@ hfr_times = deque(maxlen=240)
 hfr_start_time = 0
 hfr_fig = None
 hfr_ax = None
+focus_history = deque(maxlen=240)
+focus_times = deque(maxlen=240)
+focus_start_time = 0
+focus_fig = None
+focus_ax = None
 mjpeg_extractor = None  # Instance de l'extracteur MJPEG
 p = None  # Subprocess rpicam-vid (None en mode Picamera2)
 
@@ -1027,7 +1039,7 @@ v3_f_ranges  = ['normal','macro','full']
 v3_f_speeds  = ['normal','fast']
 histograms   = ["OFF","Red","Green","Blue","Lum","ALL"]
 strs         = ["Still","Video","Stream","Timelapse"]
-stretch_presets = ['Custom','Lune','Galaxie','Nebuleuse','Jour']
+stretch_presets = ['OFF','AUTO','Nebuleuse','Galaxie']
 v3_hdrs      = ["off","single-exp","auto","sensor"]
 
 #check linux version.
@@ -1074,7 +1086,7 @@ still_limits = ['mode',0,len(modes)-1,'speed',0,len(shutters)-1,'gain',0,30,'bri
                 'histogram',0,len(histograms)-1,'v3_f_speed',0,len(v3_f_speeds)-1]
 video_limits = ['vlen',0,3600,'fps',1,40,'v5_focus',10,2500,'vformat',0,7,'0',0,0,'zoom',0,5,'Focus',0,1,'tduration',1,86400,'tinterval',0.01,10,'tshots',1,999,
                 'flicker',0,3,'codec',0,len(codecs)-1,'profile',0,len(h264profiles)-1,'v3_focus',10,2000,'histarea',10,300,'v3_f_range',0,len(v3_f_ranges)-1,
-                'str_cap',0,len(strs)-1,'v6_focus',10,1020,'stretch_p_low',1,100,'stretch_p_high',900,1000,'stretch_factor',10,300,'stretch_preset',0,4]
+                'str_cap',0,len(strs)-1,'v6_focus',10,1020,'stretch_p_low',1,100,'stretch_p_high',900,1000,'stretch_factor',10,300,'stretch_preset',0,3]
 
 # check config_file exists, if not then write default values
 titles = ['mode','speed','gain','brightness','contrast','frame','red','blue','ev','vlen','fps','vformat','codec','tinterval','tshots','extn','zx','zy','zoom','saturation',
@@ -1149,7 +1161,7 @@ if len(config) <= 39:
 if len(config) <= 40:
     config.append(100)   # stretch_factor par défaut
 if len(config) <= 41:
-    config.append(0)     # stretch_preset par défaut (Custom)
+    config.append(0)     # stretch_preset par défaut (OFF)
 
 stretch_p_low    = config[38]
 stretch_p_high   = config[39]
@@ -1713,23 +1725,24 @@ def get_fwhm_quality_text(fwhm):
 def init_fwhm_graph():
     """Initialise le graphique matplotlib pour le FWHM"""
     global fwhm_fig, fwhm_ax
-    
+
     if fwhm_fig is None:
-        fwhm_fig, fwhm_ax = plt.subplots(figsize=(3, 2), dpi=80)
-        fwhm_fig.patch.set_facecolor('black')
-        fwhm_ax.set_facecolor('black')
-        
+        fwhm_fig, fwhm_ax = plt.subplots(figsize=(6, 3), dpi=100)
+        fwhm_fig.patch.set_facecolor('#1a1a1a')
+        fwhm_ax.set_facecolor('#0a0a0a')
+
     return fwhm_fig, fwhm_ax
 
 def init_hfr_graph():
     """Initialise le graphique matplotlib pour le HFR"""
     global hfr_fig, hfr_ax
-    
+
     if hfr_fig is None:
-        hfr_fig, hfr_ax = plt.subplots(figsize=(3, 2), dpi=80)
-        hfr_fig.patch.set_facecolor('black')
-        hfr_ax.set_facecolor('black')
-        
+        # Taille et style élégants pour meilleure lisibilité
+        hfr_fig, hfr_ax = plt.subplots(figsize=(6, 3), dpi=100)
+        hfr_fig.patch.set_facecolor('#1a1a1a')
+        hfr_ax.set_facecolor('#0a0a0a')
+
     return hfr_fig, hfr_ax
 
 def update_fwhm_graph(fwhm_val):
@@ -1768,20 +1781,21 @@ def update_fwhm_graph(fwhm_val):
         ax.plot(times_list[i:i+2], fwhm_list[i:i+2], 
                color=color_norm, linewidth=2, marker='o', markersize=3)
     
-    ax.set_xlabel('Temps (s)', color='white', fontsize=8)
-    ax.set_ylabel('FWHM (px)', color='white', fontsize=8)
-    ax.set_title('Évolution FWHM', color='white', fontsize=9)
-    ax.tick_params(colors='white', labelsize=7)
-    ax.grid(True, alpha=0.3, color='gray', linestyle='--', linewidth=0.5)
+    ax.set_xlabel('Temps (s)', color='white', fontsize=11, fontweight='bold')
+    ax.set_ylabel('FWHM (px)', color='white', fontsize=11, fontweight='bold')
+    ax.set_title('Évolution FWHM', color='white', fontsize=12, fontweight='bold')
+    ax.tick_params(colors='white', labelsize=10)
+    ax.grid(True, alpha=0.3, color='gray', linestyle='--', linewidth=0.8)
     
     max_fwhm = max(fwhm_list)
     ax.set_ylim(0, max(max_fwhm * 1.2, 15))
-    
+
     for spine in ax.spines.values():
         spine.set_color('white')
-    
+        spine.set_linewidth(1.5)
+
     plt.tight_layout()
-    
+
     try:
         canvas = FigureCanvasAgg(fig)
         canvas.draw()
@@ -1834,20 +1848,21 @@ def update_hfr_graph(hfr_val):
             color = (255, 0, 0)  # rouge
         
         color_norm = tuple(c/255.0 for c in color)
-        ax.plot(times_list[i:i+2], hfr_list[i:i+2], 
-               color=color_norm, linewidth=2, marker='o', markersize=3)
+        ax.plot(times_list[i:i+2], hfr_list[i:i+2],
+               color=color_norm, linewidth=2.5, marker='o', markersize=4)
     
-    ax.set_xlabel('Temps (s)', color='white', fontsize=8)
-    ax.set_ylabel('HFR (px)', color='white', fontsize=8)
-    ax.set_title('Évolution HFR', color='white', fontsize=9)
-    ax.tick_params(colors='white', labelsize=7)
-    ax.grid(True, alpha=0.3, color='gray', linestyle='--', linewidth=0.5)
-    
+    ax.set_xlabel('Temps (s)', color='white', fontsize=11, fontweight='bold')
+    ax.set_ylabel('HFR (px)', color='white', fontsize=11, fontweight='bold')
+    ax.set_title('Évolution HFR', color='white', fontsize=12, fontweight='bold')
+    ax.tick_params(colors='white', labelsize=10)
+    ax.grid(True, alpha=0.3, color='gray', linestyle='--', linewidth=0.8)
+
     max_hfr = max(hfr_list)
     ax.set_ylim(0, max(max_hfr * 1.2, 8))
-    
+
     for spine in ax.spines.values():
         spine.set_color('white')
+        spine.set_linewidth(1.5)
     
     plt.tight_layout()
     
@@ -1874,6 +1889,194 @@ def reset_hfr_history():
     hfr_history.clear()
     hfr_times.clear()
     hfr_start_time = 0
+
+def init_focus_graph():
+    """Initialise le graphique Focus (Laplacian variance)"""
+    global focus_fig, focus_ax
+    if focus_fig is None:
+        focus_fig, focus_ax = plt.subplots(figsize=(6, 3), dpi=100)
+        focus_fig.patch.set_facecolor('#1a1a1a')
+        focus_ax.set_facecolor('#0a0a0a')
+    return focus_fig, focus_ax
+
+def update_focus_graph(focus_val):
+    """Met à jour le graphique Focus et retourne une surface pygame"""
+    global focus_history, focus_times, focus_start_time, focus_fig, focus_ax
+
+    if focus_val is None or focus_val == 0:
+        return None
+
+    if focus_start_time == 0:
+        focus_start_time = time.time()
+
+    current_time = time.time() - focus_start_time
+    focus_history.append(focus_val)
+    focus_times.append(current_time)
+
+    if len(focus_history) < 2:
+        return None
+
+    fig, ax = init_focus_graph()
+    ax.clear()
+
+    # Zones de qualité Focus avec gradients subtils
+    ax.axhspan(0, 50, alpha=0.15, color='red', linewidth=0)
+    ax.axhspan(50, 200, alpha=0.15, color='orange', linewidth=0)
+    ax.axhspan(200, 500, alpha=0.15, color='yellow', linewidth=0)
+    max_focus = max(list(focus_history) + [800])
+    ax.axhspan(500, max_focus * 1.2, alpha=0.15, color='green', linewidth=0)
+
+    # Courbe Focus avec dégradé de couleurs
+    times_list = list(focus_times)
+    focus_list = list(focus_history)
+
+    for i in range(len(focus_list) - 1):
+        # Déterminer la couleur selon la qualité du focus
+        if focus_list[i] > 500:
+            color = (0, 255, 0)  # vert
+        elif focus_list[i] > 200:
+            color = (255, 255, 0)  # jaune
+        elif focus_list[i] > 50:
+            color = (255, 165, 0)  # orange
+        else:
+            color = (255, 0, 0)  # rouge
+
+        color_norm = tuple(c/255.0 for c in color)
+        ax.plot(times_list[i:i+2], focus_list[i:i+2],
+               color=color_norm, linewidth=3, marker='o', markersize=5,
+               markeredgecolor='white', markeredgewidth=0.5)
+
+    ax.set_xlabel('Temps (s)', color='white', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Focus', color='white', fontsize=11, fontweight='bold')
+    ax.set_title('Évolution Focus (Laplacian)', color='white', fontsize=12, fontweight='bold')
+    ax.tick_params(colors='white', labelsize=10)
+    ax.grid(True, alpha=0.3, color='gray', linestyle='--', linewidth=0.8)
+
+    ax.set_ylim(0, max(max_focus * 1.2, 800))
+
+    for spine in ax.spines.values():
+        spine.set_color('white')
+        spine.set_linewidth(1.5)
+
+    plt.tight_layout()
+
+    try:
+        canvas = FigureCanvasAgg(fig)
+        canvas.draw()
+        buf = canvas.buffer_rgba()
+        w, h = canvas.get_width_height()
+        graph_surface = pygame.image.frombuffer(buf, (w, h), 'RGBA')
+        return graph_surface
+    except:
+        return None
+
+def update_combined_hfr_fwhm_graph(hfr_val, fwhm_val):
+    """Met à jour un graphique combiné HFR+FWHM et retourne une surface pygame"""
+    global hfr_history, hfr_times, hfr_start_time
+    global fwhm_history, fwhm_times, fwhm_start_time
+
+    # Synchroniser les temps de départ
+    if hfr_start_time == 0 and fwhm_start_time == 0:
+        hfr_start_time = fwhm_start_time = time.time()
+    elif hfr_start_time == 0:
+        hfr_start_time = fwhm_start_time
+    elif fwhm_start_time == 0:
+        fwhm_start_time = hfr_start_time
+
+    current_time = time.time() - hfr_start_time
+
+    # Ajouter les valeurs aux historiques
+    if hfr_val is not None:
+        hfr_history.append(hfr_val)
+        hfr_times.append(current_time)
+
+    if fwhm_val is not None:
+        fwhm_history.append(fwhm_val)
+        fwhm_times.append(current_time)
+
+    if len(hfr_history) < 2 and len(fwhm_history) < 2:
+        return None
+
+    # Créer le graphique avec double axe Y
+    fig, ax1 = plt.subplots(figsize=(6, 3), dpi=100)
+    fig.patch.set_facecolor('#1a1a1a')
+    ax1.set_facecolor('#0a0a0a')
+
+    # Axe pour HFR (gauche)
+    if len(hfr_history) >= 2:
+        hfr_times_list = list(hfr_times)
+        hfr_list = list(hfr_history)
+
+        # Tracer HFR avec couleur dynamique
+        for i in range(len(hfr_list) - 1):
+            if hfr_list[i] < 2:
+                color = '#00ff00'  # vert
+            elif hfr_list[i] < 3.5:
+                color = '#ffff00'  # jaune
+            else:
+                color = '#ff6600'  # orange
+
+            ax1.plot(hfr_times_list[i:i+2], hfr_list[i:i+2],
+                    color=color, linewidth=2.5, marker='o', markersize=4)
+
+        ax1.set_ylabel('HFR (px)', color='#00ff88', fontsize=11, fontweight='bold')
+        ax1.tick_params(axis='y', labelcolor='#00ff88', colors='#00ff88', labelsize=10)
+        max_hfr = max(hfr_list)
+        ax1.set_ylim(0, max(max_hfr * 1.2, 8))
+
+    # Axe pour FWHM (droite)
+    ax2 = ax1.twinx()
+    if len(fwhm_history) >= 2:
+        fwhm_times_list = list(fwhm_times)
+        fwhm_list = list(fwhm_history)
+
+        # Tracer FWHM avec couleur dynamique
+        for i in range(len(fwhm_list) - 1):
+            if fwhm_list[i] < 5:
+                color = '#ff00ff'  # magenta
+            elif fwhm_list[i] < 10:
+                color = '#ff88ff'  # rose
+            else:
+                color = '#ff0088'  # rouge-rose
+
+            ax2.plot(fwhm_times_list[i:i+2], fwhm_list[i:i+2],
+                    color=color, linewidth=2.5, marker='s', markersize=4, linestyle='--')
+
+        ax2.set_ylabel('FWHM (px)', color='#ff00ff', fontsize=11, fontweight='bold')
+        ax2.tick_params(axis='y', labelcolor='#ff00ff', colors='#ff00ff', labelsize=10)
+        max_fwhm = max(fwhm_list)
+        ax2.set_ylim(0, max(max_fwhm * 1.2, 15))
+
+    ax1.set_xlabel('Temps (s)', color='white', fontsize=11, fontweight='bold')
+    ax1.set_title('HFR + FWHM', color='white', fontsize=12, fontweight='bold')
+    ax1.tick_params(axis='x', colors='white', labelsize=10)
+    ax1.grid(True, alpha=0.3, color='gray', linestyle=':', linewidth=0.8)
+
+    for spine in ax1.spines.values():
+        spine.set_color('white')
+        spine.set_linewidth(1.5)
+    for spine in ax2.spines.values():
+        spine.set_color('white')
+        spine.set_linewidth(1.5)
+
+    plt.tight_layout()
+
+    try:
+        canvas = FigureCanvasAgg(fig)
+        canvas.draw()
+        buf = canvas.buffer_rgba()
+        w, h = canvas.get_width_height()
+        graph_surface = pygame.image.frombuffer(buf, (w, h), 'RGBA')
+        return graph_surface
+    except:
+        return None
+
+def reset_focus_history():
+    """Réinitialise l'historique Focus"""
+    global focus_history, focus_times, focus_start_time
+    focus_history.clear()
+    focus_times.clear()
+    focus_start_time = 0
 
 def astro_stretch(array):
     """
@@ -2477,22 +2680,24 @@ def Menu():
         fv = int(preview_width/46)
         for d in range(1,9):
             button(0,0,0,4)
-            if menu == 1:  
+            if menu == 1:
                 button(0,d,0,4)
-            elif menu == 2:  
+            elif menu == 2:
                 button(0,d,0,4)
-            elif menu == 3 or menu == 4:  
+            elif menu == 3 or menu == 4:
                 button(0,d,6,4)
-            elif menu == 5:  
+            elif menu == 5:
                 button(0,d,7,4)
-            elif menu == 6:  
+            elif menu == 6:
                 button(0,d,8,4)
+            elif menu == 7:
+                button(0,d,0,4)
         text(0,0,1,0,1,"MAIN MENU ",ft,7)
       
     if menu == 0:
         # set button sizes
         bw = int(preview_width/5.66)
-        bh = int(preview_height/7)
+        bh = int(preview_height/8)
         ft = int(preview_width/46)
         fv = int(preview_width/46)
         # Effacer la zone des boutons pour éviter les sliders résiduels
@@ -2500,19 +2705,21 @@ def Menu():
         button(0,0,4,4)
         button(0,1,2,4)
         button(0,2,3,4)
-        button(0,3,5,4)
-        button(0,4,0,4)
+        button(0,3,9,4)
+        button(0,4,5,4)
         button(0,5,0,4)
         button(0,6,0,4)
+        button(0,7,0,4)
         text(0,0,8,0,1,"         STILL ",ft,1)
         text(0,1,8,0,1,"         VIDEO",ft,2)
         text(0,2,8,0,1,"       TIMELAPSE",ft-1,4)
-        text(0,3,1,0,1,"       STRECH",ft,1)
-        text(0,4,1,0,1,"      CAMERA",ft,7)
-        text(0,4,1,1,1,"    Settings",ft,7)
-        text(0,5,1,0,1,"       OTHER",ft,7)
+        text(0,3,1,0,1,"     LIVE STACK",ft,1)
+        text(0,4,1,0,1,"       STRETCH",ft,1)
+        text(0,5,1,0,1,"      CAMERA",ft,7)
         text(0,5,1,1,1,"    Settings",ft,7)
-        text(0,6,2,0,1,"     EXIT",fv+10,7)
+        text(0,6,1,0,1,"       OTHER",ft,7)
+        text(0,6,1,1,1,"    Settings",ft,7)
+        text(0,7,2,0,1,"     EXIT",fv+10,7)
       
     elif menu == 1:
       text(0,1,1,0,1,"STILL",ft,7)
@@ -2552,8 +2759,8 @@ def Menu():
           elif v3_f_mode == 0 or v3_f_mode == 2:
               button(0,5,0,9)
               text(0,5,5,0,1,"FOCUS",ft,7)
-          text(0,6,2,0,1,"Focus Speed",ft,7)
-          text(0,6,3,1,1,v3_f_speeds[v3_f_speed],fv,7)
+          text(0,7,2,0,1,"Focus Speed",ft,7)
+          text(0,7,3,1,1,v3_f_speeds[v3_f_speed],fv,7)
           text(0,7,2,0,1,"Focus Range",ft,7)
           text(0,7,3,1,1,v3_f_ranges[v3_f_range],fv,7)
           
@@ -2580,8 +2787,8 @@ def Menu():
         text(0,4,3,1,1,str(histarea),fv,7)
         text(0,5,5,0,1,"Vert Flip",ft,7)
         text(0,5,3,1,1,str(vflip),fv,7)
-        text(0,6,5,0,1,"Horiz Flip",ft,7)
-        text(0,6,3,1,1,str(hflip),fv,7)
+        text(0,7,5,0,1,"Horiz Flip",ft,7)
+        text(0,7,3,1,1,str(hflip),fv,7)
         text(0,7,5,0,1," STILL -t time ",fv,7)
         text(0,7,3,1,1,str(timet),fv,7)
         text(0,8,2,0,1,"SAVE CONFIG",fv,7)
@@ -2625,7 +2832,7 @@ def Menu():
       text(0,8,3,1,1,str(red/10)[0:3],fv,10)
       button(0,9,0,9) 
       text(0,9,1,0,1,"Page 2 ",ft,7)
-      draw_bar(0,1,lgrnColor,'mode',mode)
+      draw_bar(0,2,lgrnColor,'mode',mode)
       if mode == 0:
             draw_bar(0,2,lgrnColor,'speed',speed)  # Affiche la barre du shutter en mode manuel
       else:
@@ -2637,45 +2844,65 @@ def Menu():
       draw_bar(0,7,lgrnColor,'blue',blue)
       draw_bar(0,8,lgrnColor,'red',red)
                 
-    elif menu == 4: 
-        text(0,1,5,0,1,"Metering",fv,10)
-        text(0,1,3,1,1,meters[meter],fv,10)
-        text(0,2,5,0,1,"Quality",ft,10)
-        text(0,2,3,1,1,str(quality)[0:3],fv,10)
-        text(0,3,5,0,1,"Saturation",fv,10)
-        text(0,3,3,1,1,str(saturation/10),fv,10)
-        text(0,4,5,0,1,"Denoise",fv,10)
-        text(0,4,3,1,1,denoises[denoise],fv,10)
-        text(0,5,5,0,1,"Sharpness",fv,10)
-        text(0,5,3,1,1,str(sharpness/10),fv,10)
+    elif menu == 4:
+
+        # Ligne 1 - Page 1 (retour)
+        button(0,1,0,9)
+        text(0,1,1,0,1,"Page 1 ",ft,7)
+
+        # Ligne 2 - Metering
+        text(0,2,5,0,1,"Metering",ft,10)
+        text(0,2,3,1,1,meters[meter],fv,10)
+        draw_bar(0,2,lgrnColor,'meter',meter)
+
+        # Ligne 3 - Quality
+        text(0,3,5,0,1,"Quality",ft,10)
+        text(0,3,3,1,1,str(quality)[0:3],fv,10)
+        draw_bar(0,3,lgrnColor,'quality',quality)
+
+        # Ligne 4 - Saturation
+        text(0,4,5,0,1,"Saturation",ft,10)
+        text(0,4,3,1,1,str(saturation/10),fv,10)
+        draw_bar(0,4,lgrnColor,'saturation',saturation)
+
+        # Ligne 5 - Denoise
+        text(0,5,5,0,1,"Denoise",ft,10)
+        text(0,5,3,1,1,denoises[denoise],fv,10)
+        draw_bar(0,5,lgrnColor,'denoise',denoise)
+
+        # Ligne 6 - Sharpness
+        text(0,6,5,0,1,"Sharpness",ft,10)
+        text(0,6,3,1,1,str(sharpness/10),fv,10)
+        draw_bar(0,6,lgrnColor,'sharpness',sharpness)
+
+        # Ligne 7 - HDR / IR Filter / Scientific (selon caméra)
         if (Pi_Cam == 3 or Pi == 5):
-            text(0,6,5,0,1,"HDR",fv,10)
-            text(0,6,3,1,1,v3_hdrs[v3_hdr],fv,10)
+            button(0,7,6,4)
+            text(0,7,5,0,1,"HDR",ft,10)
+            text(0,7,3,1,1,v3_hdrs[v3_hdr],fv,10)
         elif Pi_Cam == 9:
-            button(0,6,6,4)
-            text(0,6,5,0,1,"IR Filter",fv,10)
+            button(0,7,6,4)
+            text(0,7,5,0,1,"IR Filter",ft,10)
             if IRF == 0:
-                text(0,6,3,1,1,"Off",fv,10)
+                text(0,7,3,1,1,"Off",fv,10)
             else:
-                text(0,6,3,1,1,"ON ",fv,10)
+                text(0,7,3,1,1,"ON ",fv,10)
         elif Pi_Cam == 4 and scientif == 1:
-            button(0,6,6,4)
-            text(0,6,5,0,1,"Scientific",fv,10)
+            button(0,7,6,4)
+            text(0,7,5,0,1,"Scientific",ft,10)
             if scientific == 0:
-                text(0,6,3,1,1,"Off",fv,10)
+                text(0,7,3,1,1,"Off",fv,10)
             else:
-                text(0,6,3,1,1,"ON ",fv,10)
-        text(0,7,5,0,1,"File Format",ft,10)
-        text(0,7,3,1,1,extns[extn],fv,10)
-        text(0,8,2,0,1,"SAVE CONFIG",fv,10)
-        button(0,9,0,9) 
-        text(0,9,1,0,1,"Page 1 ",ft,7)
-        draw_bar(0,1,lgrnColor,'meter',meter)
-        draw_bar(0,2,lgrnColor,'quality',quality)
-        draw_bar(0,3,lgrnColor,'saturation',saturation)
-        draw_bar(0,4,lgrnColor,'denoise',denoise)
-        draw_bar(0,5,lgrnColor,'sharpness',sharpness)
-        draw_bar(0,7,lgrnColor,'extn',extn)
+                text(0,7,3,1,1,"ON ",fv,10)
+
+        # Ligne 8 - File Format
+        text(0,8,5,0,1,"File Format",ft,10)
+        text(0,8,3,1,1,extns[extn],fv,10)
+        draw_bar(0,8,lgrnColor,'extn',extn)
+
+        # Ligne 9 - SAVE CONFIG
+        button(0,9,6,4)
+        text(0,9,2,0,1,"SAVE CONFIG",fv,10)
       
     elif menu == 5:
         text(0,1,5,0,1,"V_Length",ft,11)
@@ -2688,8 +2915,8 @@ def Menu():
         text(0,4,3,1,1,codecs[codec],fv,11)
         text(0,5,5,0,1,"h264 Profile",ft,11)
         text(0,5,3,1,1,str(h264profiles[profile]),fv,11)
-        text(0,6,5,0,1,"V_Preview",ft,11)
-        text(0,6,3,1,1,"ON ",fv,11)
+        text(0,7,5,0,1,"V_Preview",ft,11)
+        text(0,7,3,1,1,"ON ",fv,11)
         draw_Vbar(0,3,lpurColor,'vformat',vformat)
         text(0,8,2,0,1,"SAVE CONFIG",fv,11)
         # determine if camera native format
@@ -2729,25 +2956,32 @@ def Menu():
 
     elif menu == 7:
         # OTHER Settings Page 2 - Stretch Parameters
-        # Dessiner d'abord tous les rectangles de fond pour éviter les zones noires
-        for row in [1, 2, 3, 4, 5, 6, 7, 8]:
-            pygame.draw.rect(windowSurfaceObj, greyColor, Rect(preview_width, row * bh, bw, bh+1))
-
+        # Ligne 1 - Stretch Low %
         text(0,1,5,0,1,"Stretch Low %",ft,7)
         text(0,1,3,1,1,str(stretch_p_low/10)[0:4],fv,7)
+        draw_Vbar(0,1,greyColor,'stretch_p_low',stretch_p_low)
+
+        # Ligne 2 - Stretch High %
         text(0,2,5,0,1,"Stretch High %",ft,7)
         text(0,2,3,1,1,str(stretch_p_high/10)[0:5],fv,7)
+        draw_Vbar(0,2,greyColor,'stretch_p_high',stretch_p_high)
+
+        # Ligne 3 - Stretch Factor
         text(0,3,5,0,1,"Stretch Factor",ft,7)
         text(0,3,3,1,1,str(stretch_factor/10)[0:4],fv,7)
+        draw_Vbar(0,3,greyColor,'stretch_factor',stretch_factor)
+
+        # Ligne 4 - Preset
         text(0,4,5,0,1,"Preset",ft,7)
         text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
+        draw_Vbar(0,4,greyColor,'stretch_preset',stretch_preset)
+
+        # Ligne 8 - SAVE CONFIG
         text(0,8,2,0,1,"SAVE CONFIG",fv,7)
+
+        # Ligne 9 - Page 1
         button(0,9,0,9)
         text(0,9,1,0,1,"Page 1 ",ft,7)
-        draw_Vbar(0,1,greyColor,'stretch_p_low',stretch_p_low)
-        draw_Vbar(0,2,greyColor,'stretch_p_high',stretch_p_high)
-        draw_Vbar(0,3,greyColor,'stretch_factor',stretch_factor)
-        draw_Vbar(0,4,greyColor,'stretch_preset',stretch_preset)
 
 text(0,0,6,2,1,"Please Wait, checking camera",int(fv* 1.7),1)
 text(0,0,6,2,1,"Found " + str(cameras[Pi_Cam]),int(fv*1.7),1)
@@ -2907,8 +3141,8 @@ while True:
                 print("DEBUG: Frame saved to /home/admin/debug_picamera2_frame.jpg")
                 pygame._picam2_debug_done = True
 
-            # Appliquer le stretch astro si le mode est activé
-            if stretch_mode == 1:
+            # Appliquer le stretch astro si le mode est activé ET que le preset n'est pas OFF
+            if stretch_mode == 1 and stretch_preset != 0:
                 array = astro_stretch(array)
 
             # Convertir numpy array → pygame surface
@@ -2922,10 +3156,10 @@ while True:
             if stretch_mode == 1:
                 # En mode stretch, afficher en VRAI plein écran (cache la barre de tâches)
                 # Obtenir la résolution maximale de l'écran
-                modes = pygame.display.list_modes()
-                if modes and modes != -1:
+                display_modes = pygame.display.list_modes()
+                if display_modes and display_modes != -1:
                     # Prendre la résolution la plus grande (la première de la liste)
-                    max_width, max_height = modes[0]
+                    max_width, max_height = display_modes[0]
                 else:
                     # Fallback si list_modes ne fonctionne pas
                     screen_info = pygame.display.Info()
@@ -2978,8 +3212,8 @@ while True:
                 except (pygame.error, OSError):
                     pass  # Garder l'ancienne image affichée
 
-            # Appliquer le stretch astro si le mode est activé
-            if stretch_mode == 1:
+            # Appliquer le stretch astro si le mode est activé ET que le preset n'est pas OFF
+            if stretch_mode == 1 and stretch_preset != 0:
                 # Convertir pygame surface → numpy array
                 img_array = pygame.surfarray.array3d(image)
                 # Transposer de (width, height, channels) à (height, width, channels)
@@ -2994,10 +3228,10 @@ while True:
             if stretch_mode == 1:
                 # En mode stretch, afficher en VRAI plein écran (cache la barre de tâches)
                 # Obtenir la résolution maximale de l'écran
-                modes = pygame.display.list_modes()
-                if modes and modes != -1:
+                display_modes = pygame.display.list_modes()
+                if display_modes and display_modes != -1:
                     # Prendre la résolution la plus grande (la première de la liste)
-                    max_width, max_height = modes[0]
+                    max_width, max_height = display_modes[0]
                 else:
                     # Fallback si list_modes ne fonctionne pas
                     screen_info = pygame.display.Info()
@@ -3020,7 +3254,8 @@ while True:
         gray = cv2.cvtColor(crop2,cv2.COLOR_RGB2GRAY)
         
         # Histogramme OPTIMISÉ avec numpy vectorisé (80-95% plus rapide)
-        if histogram > 0:
+        # Ne pas afficher l'histogramme en mode focus
+        if histogram > 0 and focus_mode == 0:
             # Calculer les histogrammes avec numpy (100-1000x plus rapide que les boucles Python)
             bins = np.arange(257)  # 0-256 pour np.histogram
 
@@ -3046,46 +3281,47 @@ while True:
             if bluee is not None:
                 bluee = np.where(bluee > 0, (25 * np.log10(bluee)).astype(int), 0)
 
-            # Créer le graphique (optimisé)
-            output = np.zeros((256, 100, 3), dtype=np.uint8)
+            # Calculer la hauteur du bandeau noir pour utiliser toute la hauteur disponible
+            hist_y = int(preview_height * 0.75) + 1
+            hist_height = preview_height - hist_y - 2  # -2 pour une petite marge en bas
+            # L'histogramme occupe TOUTE la largeur du bandeau (au lieu de 2/3)
+            hist_width = preview_width - 20  # -20 pour marges gauche/droite
 
-            # Dessiner chaque courbe avec numpy vectorisé
+            # Créer le graphique optimisé avec numpy (approche vectorisée rapide)
+            output = np.zeros((256, hist_height, 3), dtype=np.uint8)
+
+            # Normaliser les valeurs pour la hauteur disponible
+            scale_factor = hist_height / 100  # Adapter l'échelle à la nouvelle hauteur
+
+            # Dessiner chaque courbe avec numpy vectorisé (très rapide)
             for i in range(255):
                 if lume is not None and lume[i] > 0:
-                    y_start = min(lume[i], lume[i+1])
-                    y_end = max(lume[i], lume[i+1])
-                    output[i, y_start:min(y_end+1, 100), :] = 255  # Blanc pour luminance
+                    y_start = min(int(lume[i] * scale_factor), int(lume[i+1] * scale_factor))
+                    y_end = max(int(lume[i] * scale_factor), int(lume[i+1] * scale_factor))
+                    output[i, y_start:min(y_end+1, hist_height), :] = 255  # Blanc pour luminance
 
                 if rede is not None and rede[i] > 0:
-                    y_start = min(rede[i], rede[i+1]) if i < 255 else rede[i]
-                    y_end = max(rede[i], rede[i+1]) if i < 255 else rede[i]
-                    output[i, y_start:min(y_end+1, 100), 0] = 255  # Rouge
+                    y_start = min(int(rede[i] * scale_factor), int(rede[i+1] * scale_factor)) if i < 255 else int(rede[i] * scale_factor)
+                    y_end = max(int(rede[i] * scale_factor), int(rede[i+1] * scale_factor)) if i < 255 else int(rede[i] * scale_factor)
+                    output[i, y_start:min(y_end+1, hist_height), 0] = 255  # Rouge
 
                 if greene is not None and greene[i] > 0:
-                    y_start = min(greene[i], greene[i+1]) if i < 255 else greene[i]
-                    y_end = max(greene[i], greene[i+1]) if i < 255 else greene[i]
-                    output[i, y_start:min(y_end+1, 100), 1] = 255  # Vert
+                    y_start = min(int(greene[i] * scale_factor), int(greene[i+1] * scale_factor)) if i < 255 else int(greene[i] * scale_factor)
+                    y_end = max(int(greene[i] * scale_factor), int(greene[i+1] * scale_factor)) if i < 255 else int(greene[i] * scale_factor)
+                    output[i, y_start:min(y_end+1, hist_height), 1] = 255  # Vert
 
                 if bluee is not None and bluee[i] > 0:
-                    y_start = min(bluee[i], bluee[i+1]) if i < 255 else bluee[i]
-                    y_end = max(bluee[i], bluee[i+1]) if i < 255 else bluee[i]
-                    output[i, y_start:min(y_end+1, 100), 2] = 255  # Bleu
+                    y_start = min(int(bluee[i] * scale_factor), int(bluee[i+1] * scale_factor)) if i < 255 else int(bluee[i] * scale_factor)
+                    y_end = max(int(bluee[i] * scale_factor), int(bluee[i+1] * scale_factor)) if i < 255 else int(bluee[i] * scale_factor)
+                    output[i, y_start:min(y_end+1, hist_height), 2] = 255  # Bleu
 
             graph = pygame.surfarray.make_surface(output)
             graph = pygame.transform.flip(graph, 0, 1)
-            graph.set_alpha(160)
-            # Aligner avec le haut du bandeau noir (preview_height * 0.75)
-            hist_y = int(preview_height * 0.75) + 1
-            # Histogramme sur 2/3 de la largeur (587 pixels)
-            hist_width = int(preview_width * 2 / 3)
-            # Diviser en 4 sections égales
-            section_width = hist_width // 4
-            pygame.draw.rect(windowSurfaceObj, greyColor, Rect(9, hist_y-1, section_width-2, 102), 1)
-            pygame.draw.rect(windowSurfaceObj, greyColor, Rect(9+section_width, hist_y-1, section_width-2, 102), 1)
-            pygame.draw.rect(windowSurfaceObj, greyColor, Rect(9+section_width*2, hist_y-1, section_width-2, 102), 1)
-            pygame.draw.rect(windowSurfaceObj, greyColor, Rect(9+section_width*3, hist_y-1, section_width-2, 102), 1)
-            # Étirer le graphique pour remplir les 2/3
-            graph_stretched = pygame.transform.scale(graph, (hist_width-8, 100))
+            graph.set_alpha(180)  # Légèrement plus opaque pour meilleure lisibilité
+            # Étirer le graphique pour remplir toute la largeur du bandeau
+            graph_stretched = pygame.transform.scale(graph, (hist_width, hist_height))
+            # Ajouter un cadre élégant autour de l'histogramme
+            pygame.draw.rect(windowSurfaceObj, (80, 80, 80), Rect(9, hist_y-1, hist_width+2, hist_height+2), 2)
             windowSurfaceObj.blit(graph_stretched, (10, hist_y))
         
         # Nettoyage des variables numpy (array3d ne crée pas de verrou)
@@ -3187,29 +3423,46 @@ while True:
                 # Afficher "N/A" si pas d'étoile détectée
                 text(20, 3, 0, 2, 0, "FWHM: N/A", fv * 2, 0)
 
-            # Graphique HFR - dans le bandeau noir en bas, à droite de l'histogramme (1/3 restant)
+            # En mode focus : afficher 2 graphiques élégants dans le bandeau noir
+            # Graphique 1 (gauche) : HFR + FWHM combinés
+            # Graphique 2 (droite) : Focus (Laplacian variance)
             try:
-                graph_surface = update_hfr_graph(hfr_val)
-                if graph_surface is not None and alt_dis < 2:
-                    # Position : 1/3 restant du bandeau noir, à droite de l'histogramme (2/3)
-                    # Le haut du graphique doit être aligné avec le haut du bandeau noir (preview_height * 0.75)
-                    hist_width = int(preview_width * 2 / 3)
-                    graph_x = hist_width + 20  # À droite de l'histogramme avec marge
-                    graph_y = int(preview_height * 0.75) + 1  # Aligné avec le haut du bandeau noir
+                graph_y = int(preview_height * 0.75) + 1
+                graph_height = preview_height - graph_y - 2
 
-                    # Adapter la taille du graphique au 1/3 restant
-                    remaining_width = preview_width - hist_width - 30  # 30 = marges
-                    graph_resized = pygame.transform.scale(graph_surface, (remaining_width, 100))
+                # Largeur de chaque graphique = moitié du bandeau moins marges
+                graph_width = int((preview_width - 40) / 2)  # -40 pour marges (10+10+10+10)
 
-                    # Dessiner un cadre gris autour du graphique (même style que l'histogramme)
-                    pygame.draw.rect(windowSurfaceObj, greyColor,
-                                   Rect(graph_x - 1, graph_y - 1,
-                                        graph_resized.get_width() + 2,
-                                        graph_resized.get_height() + 2), 1)
+                # Graphique HFR+FWHM combiné (gauche)
+                hfr_fwhm_surface = update_combined_hfr_fwhm_graph(hfr_val, fwhm_val)
+                if hfr_fwhm_surface is not None and alt_dis < 2:
+                    graph1_x = 10
+                    graph1_resized = pygame.transform.scale(hfr_fwhm_surface, (graph_width, graph_height))
 
-                    windowSurfaceObj.blit(graph_resized, (graph_x, graph_y))
+                    # Cadre élégant avec couleur gradient
+                    pygame.draw.rect(windowSurfaceObj, (100, 255, 200),
+                                   Rect(graph1_x - 2, graph_y - 2,
+                                        graph1_resized.get_width() + 4,
+                                        graph1_resized.get_height() + 4), 2)
+
+                    windowSurfaceObj.blit(graph1_resized, (graph1_x, graph_y))
+
+                # Graphique Focus (droite)
+                focus_surface = update_focus_graph(foc)
+                if focus_surface is not None and alt_dis < 2:
+                    graph2_x = 10 + graph_width + 20  # Après le premier graphique + marge
+                    graph2_resized = pygame.transform.scale(focus_surface, (graph_width, graph_height))
+
+                    # Cadre élégant avec couleur gradient
+                    pygame.draw.rect(windowSurfaceObj, (100, 200, 255),
+                                   Rect(graph2_x - 2, graph_y - 2,
+                                        graph2_resized.get_width() + 4,
+                                        graph2_resized.get_height() + 4), 2)
+
+                    windowSurfaceObj.blit(graph2_resized, (graph2_x, graph_y))
+
             except Exception as e:
-                pass  # Ignorer les erreurs du graphique
+                pass  # Ignorer les erreurs des graphiques
 
             # Rectangle rouge et croix d'analyse
             pygame.draw.rect(windowSurfaceObj,redColor,Rect(xx-histarea,xy-histarea,histarea*2,histarea*2),1)
@@ -4724,26 +4977,99 @@ while True:
                     restart = 2 
                         
                 elif button_row == 3:
-                    # STRECH - Active le mode stretch astro pour le preview
-                    stretch_mode = 1
-                    # Passer en mode fullscreen pour couvrir aussi la barre de tâches
-                    modes = pygame.display.list_modes()
-                    if modes and modes != -1:
-                        max_width, max_height = modes[0]
+                    # LIVE STACK - Lance capture DNG continue + stacking
+                    livestack_mode = 1
+
+                    # Créer répertoires temporaires
+                    livestack_dir = Path("/run/shm/livestack")
+                    livestack_output = Path("/run/shm/livestack_result.png")
+
+                    # Nettoyer si existant
+                    if livestack_dir.exists():
+                        shutil.rmtree(livestack_dir)
+                    livestack_dir.mkdir(parents=True)
+
+                    # Lancer livestack.py en subprocess
+                    print("[LIVESTACK] Lancement livestack.py...")
+                    livestack_process = subprocess.Popen([
+                        "python3", "/home/admin/livestack.py",
+                        str(livestack_dir),
+                        str(livestack_output)
+                    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+                    # Construire commande capture DNG avec paramètres STILL actuels
+                    if lver != "bookwo" and lver != "trixie":
+                        cmd = "libcamera-still"
+                    else:
+                        cmd = "rpicam-still"
+
+                    cmd += " --camera " + str(camera)
+                    cmd += " -r -n"  # RAW (DNG), no preview
+                    cmd += " -t 0"   # Durée infinie
+                    cmd += " --timelapse 1000"  # Une photo par seconde
+                    cmd += " -o " + str(livestack_dir / "%06d.dng")
+                    cmd += " --brightness " + str(brightness/100)
+                    cmd += " --contrast " + str(contrast/100)
+
+                    if mode == 0:
+                        cmd += " --shutter " + str(sspeed)
+                    else:
+                        cmd += " --exposure " + str(modes[mode])
+
+                    if ev != 0:
+                        cmd += " --ev " + str(ev)
+
+                    cmd += " --gain " + str(gain)
+                    if awb == 0:
+                        cmd += " --awbgains " + str(red/10) + "," + str(blue/10)
+                    else:
+                        cmd += " --awb " + awbs[awb]
+
+                    cmd += " --metering " + meters[meter]
+                    cmd += " --saturation " + str(saturation/10)
+                    cmd += " --sharpness " + str(sharpness/10)
+                    cmd += " --denoise " + denoises[denoise]
+
+                    if vflip == 1:
+                        cmd += " --vflip"
+                    if hflip == 1:
+                        cmd += " --hflip"
+
+                    print(f"[LIVESTACK] Lancement capture: {cmd}")
+                    livestack_capture_process = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid)
+
+                    # Passer en mode fullscreen
+                    display_modes = pygame.display.list_modes()
+                    if display_modes and display_modes != -1:
+                        max_width, max_height = display_modes[0]
                     else:
                         screen_info = pygame.display.Info()
                         max_width, max_height = screen_info.current_w, screen_info.current_h
                     windowSurfaceObj = pygame.display.set_mode((max_width, max_height), pygame.FULLSCREEN, 24)
 
+                    print("[LIVESTACK] Mode activé - Cliquez pour quitter")
+
                 elif button_row == 4:
+                    # STRETCH - Active le mode stretch astro pour le preview
+                    stretch_mode = 1
+                    # Passer en mode fullscreen pour couvrir aussi la barre de tâches
+                    display_modes = pygame.display.list_modes()
+                    if display_modes and display_modes != -1:
+                        max_width, max_height = display_modes[0]
+                    else:
+                        screen_info = pygame.display.Info()
+                        max_width, max_height = screen_info.current_w, screen_info.current_h
+                    windowSurfaceObj = pygame.display.set_mode((max_width, max_height), pygame.FULLSCREEN, 24)
+
+                elif button_row == 5:
                     menu = 1
                     Menu()
 
-                elif button_row == 5:
+                elif button_row == 6:
                     menu = 2
                     Menu()
 
-                elif button_row == 6:
+                elif button_row == 7:
                     # EXIT
                     kill_preview_process()
                     if picam2 is not None:
@@ -5083,7 +5409,7 @@ while True:
                     else:
                         v3_f_speed +=1
                         v3_f_speed = min(v3_f_speed,pmax)
-                text(0,6,3,1,1,v3_f_speeds[v3_f_speed],fv,7)
+                text(0,7,3,1,1,v3_f_speeds[v3_f_speed],fv,7)
                 draw_bar(0,6,greyColor,'v3_f_speed',v3_f_speed)
                 restart = 1
                 time.sleep(.25)
@@ -5230,7 +5556,7 @@ while True:
                 hflip += 1
                 if hflip > 1:
                     hflip = 0
-                text(0,6,3,1,1,str(hflip),fv,7)
+                text(0,7,3,1,1,str(hflip),fv,7)
                 restart = 1
                 time.sleep(.25)
                         
@@ -5349,7 +5675,7 @@ while True:
                     text(0,3,3,1,1,"Auto",fv,10)
                     draw_bar(0,3,lgrnColor,'gain',gain)
                 text(0,1,3,1,1,modes[mode],fv,10)
-                draw_bar(0,1,lgrnColor,'mode',mode)
+                draw_bar(0,2,lgrnColor,'mode',mode)
                 td = timedelta(seconds=tinterval)
                 if tinterval > 0:
                     tduration = tinterval * tshots
@@ -5543,7 +5869,7 @@ while True:
                     else:
                         awb  +=1
                         awb = min(awb ,pmax)
-                text(0,6,3,1,1,awbs[awb],fv,10)
+                text(0,7,3,1,1,awbs[awb],fv,10)
                 draw_bar(0,6,lgrnColor,'awb',awb)
                 text(0,7,5,0,1,"Blue",ft,10)
                 text(0,8,5,0,1,"Red",ft,10)
@@ -5605,11 +5931,12 @@ while True:
                            
             # MENU 4
             elif menu == 4:
-              if button_row == 9:
+              if button_row == 1:
+                  # Page 1 - retour au menu 3
                   menu = 3
                   Menu()
-                  
-              elif button_row == 1:
+
+              elif button_row == 2:
                 # METER
                 for f in range(0,len(still_limits)-1,3):
                     if still_limits[f] == 'meter':
@@ -5628,12 +5955,12 @@ while True:
                     else:
                         meter  +=1
                         meter = min(meter ,pmax)
-                text(0,1,3,1,1,meters[meter],fv,10)
-                draw_bar(0,1,lgrnColor,'meter',meter)
+                text(0,2,3,1,1,meters[meter],fv,10)
+                draw_bar(0,2,lgrnColor,'meter',meter)
                 time.sleep(.25)
                 restart = 1
               
-              elif button_row == 2:
+              elif button_row == 3:
                 # QUALITY
                 for f in range(0,len(still_limits)-1,3):
                     if still_limits[f] == 'quality':
@@ -5652,12 +5979,12 @@ while True:
                     else:
                         quality  +=1
                         quality = min(quality ,pmax)
-                text(0,2,3,1,1,str(quality)[0:3],fv,10)
-                draw_bar(0,2,lgrnColor,'quality',quality)
+                text(0,3,3,1,1,str(quality)[0:3],fv,10)
+                draw_bar(0,3,lgrnColor,'quality',quality)
                 time.sleep(.25)
                 restart = 1
-                
-              elif button_row == 3:
+
+              elif button_row == 4:
                 # SATURATION
                 for f in range(0,len(still_limits)-1,3):
                     if still_limits[f] == 'saturation':
@@ -5676,12 +6003,12 @@ while True:
                     else:
                         saturation  +=1
                         saturation = min(saturation ,pmax)
-                text(0,3,3,1,1,str(saturation/10),fv,10)
-                draw_bar(0,3,lgrnColor,'saturation',saturation)
+                text(0,4,3,1,1,str(saturation/10),fv,10)
+                draw_bar(0,4,lgrnColor,'saturation',saturation)
                 time.sleep(.25)
                 restart = 1
-                           
-              elif button_row == 4:
+
+              elif button_row == 5:
                 # DENOISE
                 for f in range(0,len(still_limits)-1,3):
                     if still_limits[f] == 'denoise':
@@ -5700,12 +6027,12 @@ while True:
                     else:
                         denoise +=1
                         denoise = min(denoise,pmax)
-                text(0,4,3,1,1,denoises[denoise],fv,10)
-                draw_bar(0,4,lgrnColor,'denoise',denoise)
+                text(0,5,3,1,1,denoises[denoise],fv,10)
+                draw_bar(0,5,lgrnColor,'denoise',denoise)
                 time.sleep(.25)
                 restart = 1
-                
-              elif button_row == 5:
+
+              elif button_row == 6:
                 # SHARPNESS
                 for f in range(0,len(still_limits)-1,3):
                     if still_limits[f] == 'sharpness':
@@ -5724,13 +6051,13 @@ while True:
                     else:
                         sharpness +=1
                         sharpness = min(sharpness,pmax)
-                        
-                text(0,5,3,1,1,str(sharpness/10),fv,10)
-                draw_bar(0,5,lgrnColor,'sharpness',sharpness)
+
+                text(0,6,3,1,1,str(sharpness/10),fv,10)
+                draw_bar(0,6,lgrnColor,'sharpness',sharpness)
                 time.sleep(.25)
                 restart = 1
                 
-              elif button_row == 6 and Pi_Cam == 9:
+              elif button_row == 7 and Pi_Cam == 9:
                 # Waveshare imx290 IR Filter
                 if mousex < preview_width + (bw/2):
                     IRF -=1
@@ -5739,15 +6066,15 @@ while True:
                     IRF  +=1
                     IRF = min(IRF ,1)
                 if IRF == 0:
-                    text(0,6,3,1,1,"Off",fv,10)
+                    text(0,7,3,1,1,"Off",fv,10)
                     led_sw_ir.off()
                 else:
-                    text(0,6,3,1,1,"ON ",fv,10)
+                    text(0,7,3,1,1,"ON ",fv,10)
                     led_sw_ir.on()
                 time.sleep(0.25)
                 restart = 1
                    
-              elif button_row ==6 and Pi_Cam == 4 and scientif == 1:
+              elif button_row == 7 and Pi_Cam == 4 and scientif == 1:
                 # v4 (HQ) CAMERA Scientific.json
                 if alt_dis == 0 and mousex < preview_width + (bw/2):
                     scientific -=1
@@ -5755,16 +6082,16 @@ while True:
                 else:
                     scientific  +=1
                     scientific = min(scientific ,1)
-                text(0,6,5,0,1,"Scientific",fv,10)
+                text(0,7,5,0,1,"Scientific",fv,10)
                 if scientific == 0:
-                    text(0,6,3,1,1,"Off",fv,10)
+                    text(0,7,3,1,1,"Off",fv,10)
                 else:
-                    text(0,6,3,1,1,"ON ",fv,10)
+                    text(0,7,3,1,1,"ON ",fv,10)
                 time.sleep(0.25)
                 restart = 1
 
                             
-              elif button_row == 6 and Pi_Cam == 3:
+              elif button_row == 7 and Pi_Cam == 3:
                 # PI V3 CAMERA HDR
                 if alt_dis == 0 and mousex < preview_width + (bw/2):
                     v3_hdr -=1
@@ -5773,12 +6100,12 @@ while True:
                     v3_hdr  +=1
                     v3_hdr = min(v3_hdr ,3)
 
-                text(0,6,5,0,1,"HDR",fv,10)
-                text(0,6,3,1,1,v3_hdrs[v3_hdr],fv,10)
+                text(0,7,5,0,1,"HDR",fv,10)
+                text(0,7,3,1,1,v3_hdrs[v3_hdr],fv,10)
                 time.sleep(0.25)
                 restart = 1
 
-              elif button_row == 6 and Pi_Cam != 3 and Pi == 5:
+              elif button_row == 7 and Pi_Cam != 3 and Pi == 5:
                 # PI5 and NON V3 CAMERA HDR
                 if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
                     v3_hdr -=1
@@ -5787,14 +6114,13 @@ while True:
                     v3_hdr  +=1
                     v3_hdr = min(v3_hdr ,3)  # Correction: permettre tous les modes HDR (0-3) incluant "sensor"
 
-                text(0,6,5,0,1,"HDR",fv,10)
-                text(0,6,3,1,1,v3_hdrs[v3_hdr],fv,10)
+                text(0,7,5,0,1,"HDR",fv,10)
+                text(0,7,3,1,1,v3_hdrs[v3_hdr],fv,10)
                 time.sleep(0.25)
                 restart = 1
-                
-                              
-              elif button_row == 7:
-                # EXTENSION
+
+              elif button_row == 8:
+                # FILE FORMAT
                 for f in range(0,len(still_limits)-1,3):
                     if still_limits[f] == 'extn':
                         pmin = still_limits[f+1]
@@ -5811,14 +6137,15 @@ while True:
                         extn  = max(extn ,pmin)
                     else:
                         extn  +=1
-                        extn = min(extn ,pmax) 
-                text(0,7,3,1,1,extns[extn],fv,10)
-                draw_bar(0,7,lgrnColor,'extn',extn)
+                        extn = min(extn ,pmax)
+                text(0,8,3,1,1,extns[extn],fv,10)
+                draw_bar(0,8,lgrnColor,'extn',extn)
                 time.sleep(.25)
+                restart = 1
 
-              elif button_row == 8:
+              elif button_row == 9:
                    # SAVE CONFIG
-                   text(0,8,3,0,1,"SAVE Config",fv,10)
+                   text(0,9,3,0,1,"SAVE Config",fv,10)
                    config[0] = mode
                    config[1] = speed
                    config[2] = gain
@@ -6133,9 +6460,9 @@ while True:
                     vpreview = max(vpreview ,0)
 
                 if vpreview == 0:
-                    text(0,6,3,1,1,"Off",fv,11)
+                    text(0,7,3,1,1,"Off",fv,11)
                 else:
-                    text(0,6,3,1,1,"ON ",fv,11)
+                    text(0,7,3,1,1,"ON ",fv,11)
                 vwidth  = vwidths[vformat]
                 vheight = vheights[vformat]
                 if Pi_Cam == 3:
@@ -6394,7 +6721,7 @@ while True:
                     else:
                         stretch_p_low +=1
                         stretch_p_low = min(stretch_p_low,pmax)
-                stretch_preset = 0  # Retour à Custom si modification manuelle
+                # Note: modification manuelle des paramètres - le preset affiché reste inchangé
                 text(0,1,3,1,1,str(stretch_p_low/10)[0:4],fv,7)
                 draw_Vbar(0,1,greyColor,'stretch_p_low',stretch_p_low)
                 text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
@@ -6414,7 +6741,7 @@ while True:
                     else:
                         stretch_p_high +=1
                         stretch_p_high = min(stretch_p_high,pmax)
-                stretch_preset = 0  # Retour à Custom si modification manuelle
+                # Note: modification manuelle des paramètres - le preset affiché reste inchangé
                 text(0,2,3,1,1,str(stretch_p_high/10)[0:5],fv,7)
                 draw_Vbar(0,2,greyColor,'stretch_p_high',stretch_p_high)
                 text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
@@ -6434,7 +6761,7 @@ while True:
                     else:
                         stretch_factor +=5
                         stretch_factor = min(stretch_factor,pmax)
-                stretch_preset = 0  # Retour à Custom si modification manuelle
+                # Note: modification manuelle des paramètres - le preset affiché reste inchangé
                 text(0,3,3,1,1,str(stretch_factor/10)[0:4],fv,7)
                 draw_Vbar(0,3,greyColor,'stretch_factor',stretch_factor)
                 text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
@@ -6444,7 +6771,7 @@ while True:
               elif button_row == 4:
                 # STRETCH PRESET
                 pmin = 0
-                pmax = 4
+                pmax = 3
                 if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
                     stretch_preset = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 else:
@@ -6456,27 +6783,27 @@ while True:
                         stretch_preset = min(stretch_preset,pmax)
 
                 # Charger les valeurs du preset
-                if stretch_preset == 1:
-                    # Lune - moins agressif
-                    stretch_p_low = 20
-                    stretch_p_high = 980
-                    stretch_factor = 50
-                elif stretch_preset == 2:
-                    # Galaxie - très agressif
-                    stretch_p_low = 5
+                if stretch_preset == 0:
+                    # OFF - Pas de stretch, juste affichage full screen sans traitement
+                    # stretch_mode reste à 1 pour garder le fullscreen, mais stretch_preset=0
+                    # empêche l'application du traitement stretch dans le code de capture
+                    pass
+                elif stretch_preset == 1:
+                    # AUTO - Détection automatique basée sur l'histogramme
+                    # Analyse l'image pour adapter automatiquement les paramètres
+                    stretch_p_low = 10
                     stretch_p_high = 995
-                    stretch_factor = 150
-                elif stretch_preset == 3:
-                    # Nébuleuse - moyennement agressif
+                    stretch_factor = 100
+                elif stretch_preset == 2:
+                    # Nébuleuse - Moyennement agressif pour nébuleuses et amas
                     stretch_p_low = 10
                     stretch_p_high = 995
                     stretch_factor = 120
-                elif stretch_preset == 4:
-                    # Jour - peu agressif
-                    stretch_p_low = 10
-                    stretch_p_high = 990
-                    stretch_factor = 30
-                # Si Custom (0), ne rien changer
+                elif stretch_preset == 3:
+                    # Galaxie - Très agressif pour révéler les détails faibles
+                    stretch_p_low = 5
+                    stretch_p_high = 995
+                    stretch_factor = 150
 
                 # Mettre à jour l'affichage
                 text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
