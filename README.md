@@ -100,7 +100,8 @@ The development of this program is open to the community. Feel free to:
 - Add support for new sensors
 - Find a solution to implement RAW video mode -> SER (not found yet need help)
 - Develop auto-stretch for preview -> done
-- Develop native live stacking integration -> done
+- Develop native live stacking DSO integration -> done
+- Develop native live stacking planet integration
 - Timelapse like ALLSKKY
 
 ## License
