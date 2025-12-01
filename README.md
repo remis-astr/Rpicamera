@@ -95,7 +95,7 @@ Minimal Python dependencies:
 - gpiozero
 - pillow
 
-Additional dependencies discovered in the repository (notably in Rpicamera2/libastrostack/quality.py):
+Additional dependencies:
 - astropy (used: astropy.stats.sigma_clipped_stats)
 - scipy (used: scipy.ndimage)
 - scikit-image (used: skimage.feature.peak_local_max)
