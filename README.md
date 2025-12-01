@@ -10,18 +10,6 @@ This project is derived from Rpicamera.py developed by: Gordon999 (https://githu
 <img src="3.png" alt="Preview Mode" width="400">
 <img src="4.png" alt="Preview Mode" width="400">
 
-## Contents
-
-- Description
-- Key features
-- Requirements (system and Python)
-- Quick installation
-- File structure and configuration
-- Sensor tuning (IMX585)
-- Live stacking (ALS)
-- Contributing
-- License & useful links
-
 ---
 
 ## Description
@@ -34,7 +22,7 @@ RPiCamera provides:
 - Network streaming (TCP, UDP, RTSP).
 - GPIO support for external triggers and focus buttons.
 
-This release is optimized for the IMX585 sensor and tested with the custom libcamera build maintained at https://github.com/will12753/libcamera-imx585.
+This release is optimized for the IMX585.
 
 ---
 
