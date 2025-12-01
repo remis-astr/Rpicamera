@@ -133,7 +133,6 @@ pip install -r requirements.txt  # if a requirements file is present
 
 3. Install or prepare the IMX585 driver (if applicable):
 - Follow the instructions in `will12753/libcamera-imx585` to build and install the driver and configuration files.
-- Reboot and check that `libcamera-hello` runs correctly.
 
 4. Run the application (replace with actual entry script if different):
 ```bash
@@ -185,8 +184,6 @@ Contributions are welcome:
 - Improvements: auto-stretch / quality preview.
 - Native live stacking surface/planet integration.
 - Advanced timelapse features (ALLSKY video).
-
-If you want, I can also generate a requirements.txt, an installation script (setup.sh), and open a pull request with these changes.
 
 ---
 
