@@ -195,4 +195,4 @@ I don't own a smart telescope, but I caught mine thinking about what it wanted t
 
 <img src="5.jpg" alt="Preview Mode" width="400">
 
-This little guy is amazing; the only limit is his imagination.
+This little guy is amazing; the only limit is my imagination.
