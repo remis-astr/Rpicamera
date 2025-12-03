@@ -188,3 +188,11 @@ This project includes the original copyright header from Gordon999. Check the `L
 - IMX585 sensor: https://soho-enterprise.com/
 - Astro Live Stacker: https://als-app.org/
 - Picamera2 / Raspberry Pi documentation: https://www.raspberrypi.com/documentation/
+
+- ---------------------------------------------------------------------------
+
+I don't own a smart telescope, but I caught mine thinking about what it wanted to be. I managed to take a picture of it doing just that.
+
+<img src="5.jpg" alt="Preview Mode" width="400">
+
+This little guy is amazing; the only limit is his imagination.
