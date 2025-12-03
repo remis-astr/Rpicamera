@@ -58,6 +58,7 @@ from libcamera import controls, Transform
 
 # Import Live Stack module (dans le même répertoire)
 from rpicamera_livestack import create_livestack_session
+from rpicamera_livestack_advanced import create_advanced_livestack_session
 
 # ============================================================================
 # Helper pour tuer le subprocess rpicam-vid (mode non-Picamera2)
@@ -865,6 +866,7 @@ show_cmds   = 1  # Debug: afficher les commandes
 v3_af       = 1
 v5_af       = 1
 menu        = 0
+menu_page   = {}  # Suivi des pages pour les menus multi-pages (ex: menu_page[8] = 1 pour menu 8 page 1)
 alt_dis     = 0
 rotate      = 0
 still       = 0
@@ -901,6 +903,8 @@ use_picamera2 = True  # Flag pour activer Picamera2 (False = utiliser rpicam-vid
 # Live Stack variables
 livestack = None  # Instance RPiCameraLiveStack
 livestack_active = False  # Mode Live Stack actif
+luckystack = None  # Instance RPiCameraLiveStackAdvanced (mode Lucky)
+luckystack_active = False  # Mode Lucky Stack actif
 
 # Live Stack parameters
 ls_preview_refresh = 5  # Rafraîchir preview toutes les N images (1-10)
@@ -911,6 +915,40 @@ ls_max_fwhm = 170  # FWHM max x10 (0=OFF, 100-250 = 10.0-25.0)
 ls_min_sharpness = 70  # Netteté min x1000 (0=OFF, 30-150 = 0.030-0.150)
 ls_max_drift = 2500  # Dérive max en pixels (0=OFF, 500-5000)
 ls_min_stars = 10  # Nombre min d'étoiles (0=OFF, 1-20)
+
+# Stacker Advanced parameters
+ls_stack_method = 0  # 0=mean, 1=median, 2=kappa_sigma, 3=winsorized, 4=weighted
+ls_stack_kappa = 25  # Kappa x10 (valeur réelle: 2.5)
+ls_stack_iterations = 3  # Itérations sigma-clip
+stack_methods = ['Mean', 'Median', 'Kappa-Sigma', 'Winsorized', 'Weighted']
+
+# Planetary Alignment parameters
+ls_planetary_enable = 0  # 0=off, 1=on
+ls_planetary_mode = 1  # 0=disk, 1=surface, 2=hybrid
+ls_planetary_disk_min = 50  # Rayon min (pixels)
+ls_planetary_disk_max = 500  # Rayon max (pixels)
+ls_planetary_threshold = 30  # Seuil Canny
+ls_planetary_margin = 10  # Marge disque (pixels)
+ls_planetary_ellipse = 0  # 0=cercle, 1=ellipse
+ls_planetary_window = 1  # 0=128, 1=256, 2=512
+ls_planetary_upsample = 10  # Précision sub-pixel
+ls_planetary_highpass = 1  # Filtre passe-haut
+ls_planetary_roi_center = 1  # ROI au centre
+ls_planetary_corr = 30  # Corrélation min x100 (valeur réelle: 0.30)
+ls_planetary_max_shift = 100  # Décalage max
+planetary_modes = ['Disk', 'Surface', 'Hybrid']
+planetary_windows = [128, 256, 512]
+
+# Lucky Imaging parameters
+ls_lucky_enable = 0  # 0=off, 1=on
+ls_lucky_buffer = 100  # Taille buffer (50-500)
+ls_lucky_keep = 10  # % à garder (1-50)
+ls_lucky_score = 0  # 0=laplacian, 1=gradient, 2=sobel, 3=tenengrad
+ls_lucky_stack = 0  # 0=mean, 1=median, 2=sigma_clip
+ls_lucky_align = 1  # 0=off, 1=on
+ls_lucky_roi = 50  # % ROI scoring (20-100)
+lucky_score_methods = ['Laplacian', 'Gradient', 'Sobel', 'Tenengrad']
+lucky_stack_methods = ['Mean', 'Median', 'Sigma-Clip']
 
 # set button sizes
 bw = int(preview_width/5.66)
@@ -1098,15 +1136,56 @@ video_limits = ['vlen',0,3600,'fps',1,40,'v5_focus',10,2500,'vformat',0,7,'0',0,
                 'flicker',0,3,'codec',0,len(codecs)-1,'profile',0,len(h264profiles)-1,'v3_focus',10,2000,'histarea',10,300,'v3_f_range',0,len(v3_f_ranges)-1,
                 'str_cap',0,len(strs)-1,'v6_focus',10,1020,'stretch_p_low',0,2,'stretch_p_high',9995,10000,'stretch_factor',0,50,'stretch_preset',0,3]
 
-livestack_limits = ['ls_preview_refresh',1,10,'ls_alignment_mode',0,len(ls_alignment_modes)-1,'ls_enable_qc',0,1,'ls_max_fwhm',0,250,'ls_min_sharpness',0,150,'ls_max_drift',0,5000,'ls_min_stars',0,20]
+livestack_limits = [
+    # Existants
+    'ls_preview_refresh',1,10,
+    'ls_alignment_mode',0,len(ls_alignment_modes)-1,
+    'ls_enable_qc',0,1,
+    'ls_max_fwhm',0,250,
+    'ls_min_sharpness',0,150,
+    'ls_max_drift',0,5000,
+    'ls_min_stars',0,20,
+    # Stacker Advanced
+    'ls_stack_method',0,4,
+    'ls_stack_kappa',10,40,
+    'ls_stack_iterations',1,10,
+    # Planetary
+    'ls_planetary_enable',0,1,
+    'ls_planetary_mode',0,2,
+    'ls_planetary_disk_min',20,500,
+    'ls_planetary_disk_max',100,2000,
+    'ls_planetary_threshold',10,100,
+    'ls_planetary_margin',5,50,
+    'ls_planetary_ellipse',0,1,
+    'ls_planetary_window',0,2,
+    'ls_planetary_upsample',1,20,
+    'ls_planetary_highpass',0,1,
+    'ls_planetary_roi_center',0,1,
+    'ls_planetary_corr',10,90,
+    'ls_planetary_max_shift',10,200,
+    # Lucky Imaging
+    'ls_lucky_enable',0,1,
+    'ls_lucky_buffer',50,500,
+    'ls_lucky_keep',1,50,
+    'ls_lucky_score',0,3,
+    'ls_lucky_stack',0,2,
+    'ls_lucky_align',0,1,
+    'ls_lucky_roi',20,100
+]
 
 # check config_file exists, if not then write default values
 titles = ['mode','speed','gain','brightness','contrast','frame','red','blue','ev','vlen','fps','vformat','codec','tinterval','tshots','extn','zx','zy','zoom','saturation',
           'meter','awb','sharpness','denoise','quality','profile','level','histogram','histarea','v3_f_speed','v3_f_range','rotate','IRF','str_cap','v3_hdr','timet','vflip','hflip',
-          'stretch_p_low','stretch_p_high','stretch_factor','stretch_preset','ls_preview_refresh','ls_alignment_mode','ls_enable_qc','ls_max_fwhm','ls_min_sharpness','ls_max_drift','ls_min_stars']
+          'stretch_p_low','stretch_p_high','stretch_factor','stretch_preset','ls_preview_refresh','ls_alignment_mode','ls_enable_qc','ls_max_fwhm','ls_min_sharpness','ls_max_drift','ls_min_stars',
+          'ls_stack_method','ls_stack_kappa','ls_stack_iterations',
+          'ls_planetary_enable','ls_planetary_mode','ls_planetary_disk_min','ls_planetary_disk_max','ls_planetary_threshold','ls_planetary_margin','ls_planetary_ellipse','ls_planetary_window','ls_planetary_upsample','ls_planetary_highpass','ls_planetary_roi_center','ls_planetary_corr','ls_planetary_max_shift',
+          'ls_lucky_enable','ls_lucky_buffer','ls_lucky_keep','ls_lucky_score','ls_lucky_stack','ls_lucky_align','ls_lucky_roi']
 points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat,codec,tinterval,tshots,extn,zx,zy,zoom,saturation,
           meter,awb,sharpness,denoise,quality,profile,level,histogram,histarea,v3_f_speed,v3_f_range,rotate,IRF,str_cap,v3_hdr,timet,vflip,hflip,
-          stretch_p_low,stretch_p_high,stretch_factor,stretch_preset,ls_preview_refresh,ls_alignment_mode,ls_enable_qc,ls_max_fwhm,ls_min_sharpness,ls_max_drift,ls_min_stars]
+          stretch_p_low,stretch_p_high,stretch_factor,stretch_preset,ls_preview_refresh,ls_alignment_mode,ls_enable_qc,ls_max_fwhm,ls_min_sharpness,ls_max_drift,ls_min_stars,
+          ls_stack_method,ls_stack_kappa,ls_stack_iterations,
+          ls_planetary_enable,ls_planetary_mode,ls_planetary_disk_min,ls_planetary_disk_max,ls_planetary_threshold,ls_planetary_margin,ls_planetary_ellipse,ls_planetary_window,ls_planetary_upsample,ls_planetary_highpass,ls_planetary_roi_center,ls_planetary_corr,ls_planetary_max_shift,
+          ls_lucky_enable,ls_lucky_buffer,ls_lucky_keep,ls_lucky_score,ls_lucky_stack,ls_lucky_align,ls_lucky_roi]
 if not os.path.exists(config_file):
     with open(config_file, 'w') as f:
         for item in range(0,len(titles)):
@@ -1196,6 +1275,54 @@ if len(config) <= 47:
 if len(config) <= 48:
     config.append(10)    # ls_min_stars par défaut
 
+# Ajouter les nouveaux paramètres si le fichier de config est ancien
+if len(config) <= 49:
+    config.append(0)     # ls_stack_method par défaut (mean)
+if len(config) <= 50:
+    config.append(25)    # ls_stack_kappa par défaut (2.5)
+if len(config) <= 51:
+    config.append(3)     # ls_stack_iterations par défaut
+if len(config) <= 52:
+    config.append(0)     # ls_planetary_enable par défaut (off)
+if len(config) <= 53:
+    config.append(1)     # ls_planetary_mode par défaut (surface)
+if len(config) <= 54:
+    config.append(50)    # ls_planetary_disk_min
+if len(config) <= 55:
+    config.append(500)   # ls_planetary_disk_max
+if len(config) <= 56:
+    config.append(30)    # ls_planetary_threshold
+if len(config) <= 57:
+    config.append(10)    # ls_planetary_margin
+if len(config) <= 58:
+    config.append(0)     # ls_planetary_ellipse
+if len(config) <= 59:
+    config.append(1)     # ls_planetary_window (256)
+if len(config) <= 60:
+    config.append(10)    # ls_planetary_upsample
+if len(config) <= 61:
+    config.append(1)     # ls_planetary_highpass
+if len(config) <= 62:
+    config.append(1)     # ls_planetary_roi_center
+if len(config) <= 63:
+    config.append(30)    # ls_planetary_corr (0.30)
+if len(config) <= 64:
+    config.append(100)   # ls_planetary_max_shift
+if len(config) <= 65:
+    config.append(0)     # ls_lucky_enable par défaut (off)
+if len(config) <= 66:
+    config.append(100)   # ls_lucky_buffer
+if len(config) <= 67:
+    config.append(10)    # ls_lucky_keep (10%)
+if len(config) <= 68:
+    config.append(0)     # ls_lucky_score (laplacian)
+if len(config) <= 69:
+    config.append(0)     # ls_lucky_stack (mean)
+if len(config) <= 70:
+    config.append(1)     # ls_lucky_align (on)
+if len(config) <= 71:
+    config.append(50)    # ls_lucky_roi (50%)
+
 ls_preview_refresh = config[42]
 ls_alignment_mode  = config[43]
 ls_enable_qc       = config[44]
@@ -1203,6 +1330,32 @@ ls_max_fwhm        = config[45]
 ls_min_sharpness   = config[46]
 ls_max_drift       = config[47]
 ls_min_stars       = config[48]
+
+ls_stack_method    = config[49]
+ls_stack_kappa     = config[50]
+ls_stack_iterations = config[51]
+
+ls_planetary_enable = config[52]
+ls_planetary_mode   = config[53]
+ls_planetary_disk_min = config[54]
+ls_planetary_disk_max = config[55]
+ls_planetary_threshold = config[56]
+ls_planetary_margin = config[57]
+ls_planetary_ellipse = config[58]
+ls_planetary_window = config[59]
+ls_planetary_upsample = config[60]
+ls_planetary_highpass = config[61]
+ls_planetary_roi_center = config[62]
+ls_planetary_corr   = config[63]
+ls_planetary_max_shift = config[64]
+
+ls_lucky_enable    = config[65]
+ls_lucky_buffer    = config[66]
+ls_lucky_keep      = config[67]
+ls_lucky_score     = config[68]
+ls_lucky_stack     = config[69]
+ls_lucky_align     = config[70]
+ls_lucky_roi       = config[71]
 
 if codec > len(codecs)-1:
     codec = 0
@@ -1524,10 +1677,11 @@ purpleColor = pygame.Color(140, 100, 150)  # Violet sobre
 yellowColor = pygame.Color(200, 180,  80)  # Jaune moutarde
 blueColor =   pygame.Color(200, 100,  40)  # Orange foncé
 redColor =    pygame.Color(160,  70,  70)  # Rouge brique
+navyColor =   pygame.Color( 20,  40, 100)  # Bleu marine pour Lucky Stack
 
 def button(col,row,bkgnd_Color,border_Color):
     global preview_width,bw,bh,alt_dis,preview_height,menu
-    colors = [greyColor, dgryColor,yellowColor,purpleColor,greenColor,whiteColor,lgrnColor,lpurColor,lyelColor,blueColor]
+    colors = [greyColor, dgryColor,yellowColor,purpleColor,greenColor,whiteColor,lgrnColor,lpurColor,lyelColor,blueColor,navyColor]
     Color = colors[bkgnd_Color]
     bx = preview_width + (col * bw)
     by = row * bh
@@ -2741,12 +2895,14 @@ def Menu():
                 button(0,d,0,4)
             elif menu == 8:
                 button(0,d,0,4)
+            elif menu == 9:
+                button(0,d,0,4)
         text(0,0,1,0,1,"MAIN MENU ",ft,7)
       
     if menu == 0:
         # set button sizes
         bw = int(preview_width/5.66)
-        bh = int(preview_height/8)
+        bh = int(preview_height/9)  # 9 buttons instead of 8
         ft = int(preview_width/46)
         fv = int(preview_width/46)
         # Effacer la zone des boutons pour éviter les sliders résiduels
@@ -2755,20 +2911,22 @@ def Menu():
         button(0,1,2,4)
         button(0,2,3,4)
         button(0,3,9,4)
-        button(0,4,5,4)
-        button(0,5,0,4)
-        button(0,6,0,4)
-        button(0,7,0,4)
+        button(0,4,10,4)  # LUCKY STACK button - bleu marine avec texte rouge
+        button(0,5,5,4)  # STRETCH (décalé)
+        button(0,6,0,4)  # CAMERA Settings (décalé)
+        button(0,7,0,4)  # OTHER Settings (décalé)
+        button(0,8,0,4)  # EXIT (décalé)
         text(0,0,8,0,1,"         STILL ",ft,1)
         text(0,1,8,0,1,"         VIDEO",ft,2)
         text(0,2,8,0,1,"       TIMELAPSE",ft-1,4)
         text(0,3,1,0,1,"     LIVE STACK",ft,1)
-        text(0,4,1,0,1,"       STRETCH",ft,1)
-        text(0,5,1,0,1,"      CAMERA",ft,7)
-        text(0,5,1,1,1,"    Settings",ft,7)
-        text(0,6,1,0,1,"       OTHER",ft,7)
+        text(0,4,3,0,1,"    LUCKY STACK",ft,1)  # Texte rouge (fColor=3)
+        text(0,5,1,0,1,"       STRETCH",ft,1)
+        text(0,6,1,0,1,"      CAMERA",ft,7)
         text(0,6,1,1,1,"    Settings",ft,7)
-        text(0,7,2,0,1,"     EXIT",fv+10,7)
+        text(0,7,1,0,1,"       OTHER",ft,7)
+        text(0,7,1,1,1,"    Settings",ft,7)
+        text(0,8,2,0,1,"     EXIT",fv+10,7)
       
     elif menu == 1:
       text(0,1,1,0,1,"STILL",ft,7)
@@ -2779,8 +2937,10 @@ def Menu():
       text(0,3,1,1,1,"Settings",ft,7)
       text(0,6,1,0,1,"LIVE STACK",ft,7)
       text(0,6,1,1,1,"Settings",ft,7)
-      text(0,7,1,0,1,"STRETCH",ft,7)
+      text(0,7,1,0,1,"LUCKY STACK",ft,7)
       text(0,7,1,1,1,"Settings",ft,7)
+      text(0,8,1,0,1,"STRETCH",ft,7)
+      text(0,8,1,1,1,"Settings",ft,7)
       if zoom == 0:
           button(0,4,0,9)
           text(0,4,5,0,1,"Zoom",ft,7)
@@ -3036,56 +3196,143 @@ def Menu():
         text(0,9,1,1,1,"Settings",ft,7)
 
     elif menu == 8:
-        # LIVE STACK Settings
-        # Ligne 1 - Preview Refresh
-        text(0,1,5,0,1,"Preview Refresh",ft,7)
-        text(0,1,3,1,1,str(ls_preview_refresh),fv,7)
-        draw_Vbar(0,1,greyColor,'ls_preview_refresh',ls_preview_refresh)
+        # LIVE STACK Settings - Multi-pages
+        current_page = menu_page.get(8, 1)  # Page par défaut = 1
 
-        # Ligne 2 - Alignment Mode
-        text(0,2,5,0,1,"Alignment Mode",ft,7)
-        text(0,2,3,1,1,ls_alignment_modes[ls_alignment_mode],fv,7)
-        draw_Vbar(0,2,greyColor,'ls_alignment_mode',ls_alignment_mode)
+        if current_page == 1:
+            # PAGE 1 - Paramètres existants + Stack Method
+            text(0,1,5,0,1,"Preview Refresh",ft,7)
+            text(0,1,3,1,1,str(ls_preview_refresh),fv,7)
+            draw_Vbar(0,1,greyColor,'ls_preview_refresh',ls_preview_refresh)
 
-        # Ligne 3 - Max FWHM
-        text(0,3,5,0,1,"Max FWHM",ft,7)
-        if ls_max_fwhm == 0:
-            text(0,3,3,1,1,"OFF",fv,7)
-        else:
-            text(0,3,3,1,1,str(ls_max_fwhm/10)[0:4],fv,7)
-        draw_Vbar(0,3,greyColor,'ls_max_fwhm',ls_max_fwhm)
+            text(0,2,5,0,1,"Alignment Mode",ft,7)
+            text(0,2,3,1,1,ls_alignment_modes[ls_alignment_mode],fv,7)
+            draw_Vbar(0,2,greyColor,'ls_alignment_mode',ls_alignment_mode)
 
-        # Ligne 4 - Min Sharpness
-        text(0,4,5,0,1,"Min Sharpness",ft,7)
-        if ls_min_sharpness == 0:
-            text(0,4,3,1,1,"OFF",fv,7)
-        else:
-            text(0,4,3,1,1,str(ls_min_sharpness/1000)[0:5],fv,7)
-        draw_Vbar(0,4,greyColor,'ls_min_sharpness',ls_min_sharpness)
+            text(0,3,5,0,1,"Max FWHM",ft,7)
+            if ls_max_fwhm == 0:
+                text(0,3,3,1,1,"OFF",fv,7)
+            else:
+                text(0,3,3,1,1,str(ls_max_fwhm/10)[0:4],fv,7)
+            draw_Vbar(0,3,greyColor,'ls_max_fwhm',ls_max_fwhm)
 
-        # Ligne 5 - Max Drift
-        text(0,5,5,0,1,"Max Drift",ft,7)
-        if ls_max_drift == 0:
+            text(0,4,5,0,1,"Min Sharpness",ft,7)
+            if ls_min_sharpness == 0:
+                text(0,4,3,1,1,"OFF",fv,7)
+            else:
+                text(0,4,3,1,1,str(ls_min_sharpness/1000)[0:5],fv,7)
+            draw_Vbar(0,4,greyColor,'ls_min_sharpness',ls_min_sharpness)
+
+            text(0,5,5,0,1,"Max Drift",ft,7)
+            if ls_max_drift == 0:
+                text(0,5,3,1,1,"OFF",fv,7)
+            else:
+                text(0,5,3,1,1,str(ls_max_drift),fv,7)
+            draw_Vbar(0,5,greyColor,'ls_max_drift',ls_max_drift)
+
+            text(0,6,5,0,1,"Min Stars",ft,7)
+            if ls_min_stars == 0:
+                text(0,6,3,1,1,"OFF",fv,7)
+            else:
+                text(0,6,3,1,1,str(ls_min_stars),fv,7)
+            draw_Vbar(0,6,greyColor,'ls_min_stars',ls_min_stars)
+
+            text(0,7,5,0,1,"Quality Control",ft,7)
+            if ls_enable_qc == 0:
+                text(0,7,3,1,1,"OFF",fv,7)
+            else:
+                text(0,7,3,1,1,"ON",fv,7)
+            draw_Vbar(0,7,greyColor,'ls_enable_qc',ls_enable_qc)
+
+            # Ligne 8 - Stack Method (NOUVEAU)
+            text(0,8,5,0,1,"Stack Method",ft,7)
+            text(0,8,3,1,1,stack_methods[ls_stack_method],fv,7)
+            draw_Vbar(0,8,greyColor,'ls_stack_method',ls_stack_method)
+
+            # Ligne 9 - Navigation Page 2
+            button(0,9,0,9)
+            text(0,9,1,0,1,"Page 2",ft,7)
+            text(0,9,1,1,1,">>>",ft,7)
+
+        else:  # Page 2
+            # PAGE 2 - Stacker + Planetary
+            text(0,1,5,0,1,"Stack Kappa",ft,7)
+            text(0,1,3,1,1,str(ls_stack_kappa/10.0)[0:4],fv,7)
+            draw_Vbar(0,1,greyColor,'ls_stack_kappa',ls_stack_kappa)
+
+            text(0,2,5,0,1,"Stack Iterations",ft,7)
+            text(0,2,3,1,1,str(ls_stack_iterations),fv,7)
+            draw_Vbar(0,2,greyColor,'ls_stack_iterations',ls_stack_iterations)
+
+            text(0,3,5,0,1,"Planetary Enable",ft,7)
+            if ls_planetary_enable == 0:
+                text(0,3,3,1,1,"OFF",fv,7)
+            else:
+                text(0,3,3,1,1,"ON",fv,7)
+            draw_Vbar(0,3,greyColor,'ls_planetary_enable',ls_planetary_enable)
+
+            text(0,4,5,0,1,"Planetary Mode",ft,7)
+            text(0,4,3,1,1,planetary_modes[ls_planetary_mode],fv,7)
+            draw_Vbar(0,4,greyColor,'ls_planetary_mode',ls_planetary_mode)
+
+            text(0,5,5,0,1,"Planet Disk Min",ft,7)
+            text(0,5,3,1,1,str(ls_planetary_disk_min),fv,7)
+            draw_Vbar(0,5,greyColor,'ls_planetary_disk_min',ls_planetary_disk_min)
+
+            text(0,6,5,0,1,"Planet Disk Max",ft,7)
+            text(0,6,3,1,1,str(ls_planetary_disk_max),fv,7)
+            draw_Vbar(0,6,greyColor,'ls_planetary_disk_max',ls_planetary_disk_max)
+
+            text(0,7,5,0,1,"Planet Correl.",ft,7)
+            text(0,7,3,1,1,str(ls_planetary_corr/100.0)[0:4],fv,7)
+            draw_Vbar(0,7,greyColor,'ls_planetary_corr',ls_planetary_corr)
+
+            # Ligne 8 - SAVE CONFIG
+            text(0,8,2,0,1,"SAVE CONFIG",fv,7)
+
+            # Ligne 9 - Retour Page 1
+            button(0,9,0,9)
+            text(0,9,1,0,1,"<<< Page 1",ft,7)
+            text(0,9,1,1,1,"",ft,7)
+
+    elif menu == 9:
+        # LUCKY STACK Settings - Complet
+        # (Lucky Enable géré par le bouton LUCKY STACK lui-même)
+
+        # Ligne 1 - Lucky Buffer
+        text(0,1,5,0,1,"Buffer Size",ft,7)
+        text(0,1,3,1,1,str(ls_lucky_buffer),fv,7)
+        draw_Vbar(0,1,greyColor,'ls_lucky_buffer',ls_lucky_buffer)
+
+        # Ligne 2 - Lucky Keep %
+        text(0,2,5,0,1,"Keep Best %",ft,7)
+        text(0,2,3,1,1,str(ls_lucky_keep)+"%",fv,7)
+        draw_Vbar(0,2,greyColor,'ls_lucky_keep',ls_lucky_keep)
+
+        # Ligne 3 - Lucky Score Method
+        text(0,3,5,0,1,"Score Method",ft,7)
+        text(0,3,3,1,1,lucky_score_methods[ls_lucky_score],fv,7)
+        draw_Vbar(0,3,greyColor,'ls_lucky_score',ls_lucky_score)
+
+        # Ligne 4 - Lucky Stack Method
+        text(0,4,5,0,1,"Stack Method",ft,7)
+        text(0,4,3,1,1,lucky_stack_methods[ls_lucky_stack],fv,7)
+        draw_Vbar(0,4,greyColor,'ls_lucky_stack',ls_lucky_stack)
+
+        # Ligne 5 - Lucky Align
+        text(0,5,5,0,1,"Align Images",ft,7)
+        if ls_lucky_align == 0:
             text(0,5,3,1,1,"OFF",fv,7)
         else:
-            text(0,5,3,1,1,str(ls_max_drift),fv,7)
-        draw_Vbar(0,5,greyColor,'ls_max_drift',ls_max_drift)
+            text(0,5,3,1,1,"ON",fv,7)
+        draw_Vbar(0,5,greyColor,'ls_lucky_align',ls_lucky_align)
 
-        # Ligne 6 - Min Stars
-        text(0,6,5,0,1,"Min Stars",ft,7)
-        if ls_min_stars == 0:
-            text(0,6,3,1,1,"OFF",fv,7)
-        else:
-            text(0,6,3,1,1,str(ls_min_stars),fv,7)
-        draw_Vbar(0,6,greyColor,'ls_min_stars',ls_min_stars)
+        # Ligne 6 - Lucky ROI %
+        text(0,6,5,0,1,"ROI %",ft,7)
+        text(0,6,3,1,1,str(ls_lucky_roi)+"%",fv,7)
+        draw_Vbar(0,6,greyColor,'ls_lucky_roi',ls_lucky_roi)
 
-        # Ligne 7 - Enable QC
-        text(0,7,5,0,1,"Quality Control",ft,7)
-        if ls_enable_qc == 0:
-            text(0,7,3,1,1,"OFF",fv,7)
-        else:
-            text(0,7,3,1,1,"ON",fv,7)
-        draw_Vbar(0,7,greyColor,'ls_enable_qc',ls_enable_qc)
+        # Ligne 7 - (vide pour l'instant)
 
         # Ligne 8 - SAVE CONFIG
         text(0,8,2,0,1,"SAVE CONFIG",fv,7)
@@ -3236,16 +3483,16 @@ while True:
        
     # ===== CAPTURE AVEC PICAMERA2 =====
     if use_picamera2 and picam2 is not None:
-        # DEBUG: afficher une fois qu'on rentre dans cette section
-        if not hasattr(pygame, '_picam2_section_debug'):
+        # DEBUG: afficher une fois qu'on rentre dans cette section (si show_cmds activé)
+        if show_cmds == 1 and not hasattr(pygame, '_picam2_section_debug'):
             print("DEBUG: Entering Picamera2 capture section")
             pygame._picam2_section_debug = True
         try:
             # Capturer l'image directement depuis Picamera2
             array = picam2.capture_array("main")
 
-            # DEBUG: afficher une fois au démarrage
-            if not hasattr(pygame, '_picam2_debug_done'):
+            # DEBUG: afficher une fois au démarrage (si show_cmds activé)
+            if show_cmds == 1 and not hasattr(pygame, '_picam2_debug_done'):
                 print(f"DEBUG: Array shape: {array.shape}, dtype: {array.dtype}")
                 # Sauvegarder une frame de test pour vérifier
                 import cv2
@@ -3308,7 +3555,111 @@ while True:
                         # Marquer que l'affichage est fait
                         livestack_display_done = True
 
-            # Traitement normal seulement si LiveStack n'a pas déjà affiché
+            # ===== LUCKY STACK PROCESSING =====
+            elif luckystack_active and luckystack is not None:
+                # Traiter la frame avec Lucky Stack
+                # process_frame retourne directement l'image stackée (array) ou None
+                stacked_array = luckystack.process_frame(array)
+
+                # Toujours afficher les statistiques Lucky Stack (2 lignes pour éviter débordement)
+                stats = luckystack.get_stats()
+                buffer_fill = stats.get('lucky_buffer_fill', 0)
+                buffer_size = stats.get('lucky_buffer_size', 0)
+                stacks_done = stats.get('lucky_stacks_done', 0)
+                total_frames = stats.get('total_frames', 0)
+                avg_score = stats.get('lucky_avg_score', 0)
+                stats_text1 = f"Lucky: Buffer {buffer_fill}/{buffer_size} | Frames: {total_frames}"
+                stats_text2 = f"Stacks: {stacks_done} | Score moy: {avg_score:.1f}"
+
+                # Si un résultat est disponible, l'afficher
+                if stacked_array is not None:
+                    # Debug: vérifier le type et la plage de valeurs
+                    if show_cmds == 1:
+                        print(f"[DEBUG] Lucky Stack result: shape={stacked_array.shape}, dtype={stacked_array.dtype}, min={stacked_array.min():.2f}, max={stacked_array.max():.2f}")
+
+                    # Convertir selon le type de données reçu
+                    if stacked_array.dtype == np.float32 or stacked_array.dtype == np.float64:
+                        # Float (0-1 ou 0-65535) -> uint8
+                        if stacked_array.max() <= 1.0:
+                            # Déjà normalisé 0-1
+                            stacked_array = (stacked_array * 255).astype(np.uint8)
+                        else:
+                            # Plage 0-65535
+                            stacked_array = (stacked_array / 256).astype(np.uint8)
+                    elif stacked_array.dtype != np.uint8:
+                        # Autre type -> convertir en uint8
+                        stacked_array = stacked_array.astype(np.uint8)
+
+                    # Appliquer le stretch du programme principal si activé
+                    if stretch_mode == 1 and stretch_preset != 0:
+                        stacked_array = astro_stretch(stacked_array)
+
+                    # Convertir en surface pygame
+                    if len(stacked_array.shape) == 3:
+                        # RGB: transposer et échanger R/B pour pygame
+                        image = pygame.surfarray.make_surface(
+                            np.swapaxes(stacked_array, 0, 1)[:,:,[2,1,0]]
+                        )
+                    else:
+                        # MONO
+                        image = pygame.surfarray.make_surface(stacked_array.T)
+
+                    # Redimensionner en fullscreen si stretch activé, sinon preview normal
+                    if stretch_mode == 1:
+                        # Mode fullscreen (comme pour stretch normal)
+                        display_modes = pygame.display.list_modes()
+                        if display_modes and display_modes != -1:
+                            max_width, max_height = display_modes[0]
+                        else:
+                            screen_info = pygame.display.Info()
+                            max_width, max_height = screen_info.current_w, screen_info.current_h
+                        image = pygame.transform.scale(image, (max_width, max_height))
+                    elif image.get_width() != preview_width or image.get_height() != preview_height:
+                        image = pygame.transform.scale(image, (preview_width, preview_height))
+
+                    # Afficher l'image stackée
+                    windowSurfaceObj.blit(image, (0, 0))
+
+                    # Afficher les stats (2 lignes) - top=2 pour mode fullscreen
+                    text(0, 0, 2, 2, 1, stats_text1, ft, 1)
+                    text(0, 1, 2, 2, 1, stats_text2, ft, 1)
+
+                    # Marquer que l'affichage est fait
+                    livestack_display_done = True
+                else:
+                    # Pas encore de résultat - afficher le preview normal avec stats
+                    # Appliquer le stretch si activé
+                    if stretch_mode == 1 and stretch_preset != 0:
+                        display_array = astro_stretch(array)
+                    else:
+                        display_array = array
+
+                    # Convertir en surface pygame
+                    image = pygame.surfarray.make_surface(np.swapaxes(display_array, 0, 1)[:,:,[2,1,0]])
+
+                    # Redimensionner en fullscreen
+                    if stretch_mode == 1:
+                        display_modes = pygame.display.list_modes()
+                        if display_modes and display_modes != -1:
+                            max_width, max_height = display_modes[0]
+                        else:
+                            screen_info = pygame.display.Info()
+                            max_width, max_height = screen_info.current_w, screen_info.current_h
+                        image = pygame.transform.scale(image, (max_width, max_height))
+                    elif image.get_width() != preview_width or image.get_height() != preview_height:
+                        image = pygame.transform.scale(image, (preview_width, preview_height))
+
+                    # Afficher le preview normal
+                    windowSurfaceObj.blit(image, (0, 0))
+
+                    # Afficher les stats (avec indication "En attente...") - top=2 pour mode fullscreen
+                    text(0, 0, 2, 2, 1, stats_text1, ft, 1)
+                    text(0, 1, 2, 2, 1, stats_text2 + " | Attente...", ft, 1)
+
+                    # Marquer que l'affichage est fait
+                    livestack_display_done = True
+
+            # Traitement normal seulement si LiveStack/LuckyStack n'a pas déjà affiché
             if not livestack_display_done:
                 # Appliquer le stretch astro si le mode est activé ET que le preset n'est pas OFF
                 if stretch_mode == 1 and stretch_preset != 0:
@@ -3771,8 +4122,42 @@ while True:
             livestack_active = False
             stretch_mode = 0  # Désactiver aussi le stretch
             if livestack is not None:
+                # Sauvegarder le résultat final avant de stopper
+                try:
+                    livestack.save()
+                    print("[LIVESTACK] Image finale sauvegardée")
+                except Exception as e:
+                    print(f"[LIVESTACK] Erreur sauvegarde: {e}")
                 livestack.stop()
             print("[LIVESTACK] Mode désactivé (clic)")
+            # Restaurer le mode d'affichage normal (avec l'interface)
+            if frame == 1:
+                if fullscreen == 1:
+                    windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.FULLSCREEN, 24)
+                else:
+                    windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), 0, 24)
+            else:
+                windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.NOFRAME, 24)
+            # Effacer l'écran (remplir de noir)
+            windowSurfaceObj.fill((0, 0, 0))
+            # Redessiner le menu pour restaurer l'affichage normal
+            Menu()
+            pygame.display.update()
+            continue
+
+        # Si on est en mode LuckyStack actif, un clic quitte ce mode
+        if luckystack_active:
+            luckystack_active = False
+            stretch_mode = 0  # Désactiver aussi le stretch
+            if luckystack is not None:
+                # Sauvegarder le résultat final avant de stopper
+                try:
+                    luckystack.save()
+                    print("[LUCKYSTACK] Image finale sauvegardée")
+                except Exception as e:
+                    print(f"[LUCKYSTACK] Erreur sauvegarde: {e}")
+                luckystack.stop()
+            print("[LUCKYSTACK] Mode désactivé (clic)")
             # Restaurer le mode d'affichage normal (avec l'interface)
             if frame == 1:
                 if fullscreen == 1:
@@ -5198,6 +5583,12 @@ while True:
                         
                 elif button_row == 3:
                     # LIVE STACK - Active/désactive le mode Live Stacking
+                    # Désactiver Lucky Stack si actif (mutuellement exclusif)
+                    if luckystack_active:
+                        luckystack_active = False
+                        if luckystack is not None:
+                            luckystack.stop()
+
                     if not livestack_active:
                         # Activer Live Stack
                         livestack_active = True
@@ -5252,6 +5643,12 @@ while True:
                         livestack_active = False
                         stretch_mode = 0  # Désactiver aussi le stretch
                         if livestack is not None:
+                            # Sauvegarder le résultat final avant de stopper
+                            try:
+                                livestack.save()
+                                print("[LIVESTACK] Image finale sauvegardée")
+                            except Exception as e:
+                                print(f"[LIVESTACK] Erreur sauvegarde: {e}")
                             livestack.stop()
 
                         # Restaurer le mode d'affichage normal (avec l'interface)
@@ -5270,6 +5667,114 @@ while True:
                         print("[LIVESTACK] Mode désactivé")
 
                 elif button_row == 4:
+                    # LUCKY STACK - Active/désactive le mode Lucky Imaging
+                    # Désactiver Live Stack si actif (mutuellement exclusif)
+                    if livestack_active:
+                        livestack_active = False
+                        if livestack is not None:
+                            livestack.stop()
+
+                    if not luckystack_active:
+                        # Activer Lucky Stack
+                        luckystack_active = True
+
+                        # Activer le mode stretch pour affichage fullscreen
+                        stretch_mode = 1
+
+                        # Passer en mode fullscreen (comme pour LIVE STACK)
+                        display_modes = pygame.display.list_modes()
+                        if display_modes and display_modes != -1:
+                            max_width, max_height = display_modes[0]
+                        else:
+                            screen_info = pygame.display.Info()
+                            max_width, max_height = screen_info.current_w, screen_info.current_h
+                        windowSurfaceObj = pygame.display.set_mode((max_width, max_height), pygame.FULLSCREEN, 24)
+
+                        # Créer l'instance luckystack si nécessaire
+                        if luckystack is None:
+                            # Récupérer les paramètres actuels de la caméra
+                            camera_params = {
+                                'exposure': sspeed,  # Déjà en microsecondes
+                                'gain': gain,
+                                'red': red / 10,  # Divisé par 10 pour ColourGains
+                                'blue': blue / 10
+                            }
+                            luckystack = create_advanced_livestack_session(camera_params)
+
+                            # Configurer avec paramètres Lucky Imaging
+                            luckystack.configure(
+                                # Stacker avancé
+                                stacking_method=['mean', 'median', 'kappa_sigma', 'winsorized', 'weighted'][ls_stack_method],
+                                kappa=ls_stack_kappa / 10.0,
+                                iterations=ls_stack_iterations,
+
+                                # Contrôle qualité DÉSACTIVÉ pour Lucky Imaging
+                                # (Lucky fait déjà sa propre sélection via scoring)
+                                enable_qc=False,
+
+                                # Planétaire (peut être activé avec Lucky)
+                                planetary_enable=bool(ls_planetary_enable),
+                                planetary_mode=ls_planetary_mode,
+                                planetary_disk_min=ls_planetary_disk_min,
+                                planetary_disk_max=ls_planetary_disk_max,
+                                planetary_disk_threshold=ls_planetary_threshold,
+                                planetary_disk_margin=ls_planetary_margin,
+                                planetary_disk_ellipse=bool(ls_planetary_ellipse),
+                                planetary_window=planetary_windows[ls_planetary_window],
+                                planetary_upsample=ls_planetary_upsample,
+                                planetary_highpass=bool(ls_planetary_highpass),
+                                planetary_roi_center=bool(ls_planetary_roi_center),
+                                planetary_corr=ls_planetary_corr / 100.0,
+                                planetary_max_shift=float(ls_planetary_max_shift),
+
+                                # Lucky Imaging (activé)
+                                lucky_enable=True,  # Toujours activé en mode Lucky Stack
+                                lucky_buffer_size=ls_lucky_buffer,
+                                lucky_keep_percent=float(ls_lucky_keep),
+                                lucky_score_method=['laplacian', 'gradient', 'sobel', 'tenengrad'][ls_lucky_score],
+                                lucky_stack_method=['mean', 'median', 'sigma_clip'][ls_lucky_stack],
+                                lucky_align_enabled=bool(ls_lucky_align),
+                                lucky_score_roi_percent=float(ls_lucky_roi),
+
+                                # Autres paramètres (pas de stretch dans libastrostack)
+                                png_stretch="linear",
+                                png_factor=1.0,
+                                preview_refresh=ls_preview_refresh,
+                                save_dng="none"
+                            )
+
+                        # Démarrer la session
+                        luckystack.start()
+                        print("[LUCKYSTACK] Mode activé")
+                    else:
+                        # Désactiver Lucky Stack
+                        luckystack_active = False
+                        stretch_mode = 0  # Désactiver aussi le stretch
+                        if luckystack is not None:
+                            # Sauvegarder le résultat final avant de stopper
+                            try:
+                                luckystack.save()
+                                print("[LUCKYSTACK] Image finale sauvegardée")
+                            except Exception as e:
+                                print(f"[LUCKYSTACK] Erreur sauvegarde: {e}")
+                            luckystack.stop()
+
+                        # Restaurer le mode d'affichage normal (avec l'interface)
+                        if frame == 1:
+                            if fullscreen == 1:
+                                windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.FULLSCREEN, 24)
+                            else:
+                                windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), 0, 24)
+                        else:
+                            windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.NOFRAME, 24)
+
+                        # Effacer l'écran et redessiner le menu
+                        windowSurfaceObj.fill((0, 0, 0))
+                        Menu()
+                        pygame.display.update()
+                        print("[LUCKYSTACK] Mode désactivé")
+
+                elif button_row == 5:
                     # STRETCH - Active le mode stretch astro pour le preview
                     stretch_mode = 1
                     # Passer en mode fullscreen pour couvrir aussi la barre de tâches
@@ -5281,15 +5786,15 @@ while True:
                         max_width, max_height = screen_info.current_w, screen_info.current_h
                     windowSurfaceObj = pygame.display.set_mode((max_width, max_height), pygame.FULLSCREEN, 24)
 
-                elif button_row == 5:
+                elif button_row == 6:
                     menu = 1
                     Menu()
 
-                elif button_row == 6:
+                elif button_row == 7:
                     menu = 2
                     Menu()
 
-                elif button_row == 7:
+                elif button_row == 8:
                     # EXIT
                     kill_preview_process()
                     if picam2 is not None:
@@ -5317,7 +5822,11 @@ while True:
                   menu = 8
                   Menu()
               elif button_row == 7:
-                  menu = 7
+                  # LUCKY STACK Settings - menu placeholder
+                  menu = 9  # Nouveau menu pour LUCKY STACK Settings
+                  Menu()
+              elif button_row == 8:
+                  menu = 7  # STRETCH Settings (décalé)
                   Menu()
 
               elif button_row == 4:
@@ -7086,7 +7595,136 @@ while True:
 
             elif menu == 8:
               # LIVE STACK Settings - Gestion des clics
-              if button_row == 1:
+              current_page = menu_page.get(8, 1)
+
+              # Page 2 : Gestion des paramètres Stacker + Planetary
+              if current_page == 2 and button_row >= 1 and button_row <= 7:
+                  if button_row == 1:
+                      # STACK KAPPA (10-40 affiché 1.0-4.0)
+                      for f in range(0,len(livestack_limits)-1,3):
+                          if livestack_limits[f] == 'ls_stack_kappa':
+                              pmin = livestack_limits[f+1]
+                              pmax = livestack_limits[f+2]
+                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                          ls_stack_kappa = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
+                      else:
+                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                              ls_stack_kappa -=5
+                              ls_stack_kappa = max(ls_stack_kappa,pmin)
+                          else:
+                              ls_stack_kappa +=5
+                              ls_stack_kappa = min(ls_stack_kappa,pmax)
+                      text(0,1,3,1,1,str(ls_stack_kappa/10.0)[0:4],fv,7)
+                      draw_Vbar(0,1,greyColor,'ls_stack_kappa',ls_stack_kappa)
+                      time.sleep(.05)
+
+                  elif button_row == 2:
+                      # STACK ITERATIONS (1-10)
+                      for f in range(0,len(livestack_limits)-1,3):
+                          if livestack_limits[f] == 'ls_stack_iterations':
+                              pmin = livestack_limits[f+1]
+                              pmax = livestack_limits[f+2]
+                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                          ls_stack_iterations = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
+                      else:
+                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                              ls_stack_iterations -=1
+                              ls_stack_iterations = max(ls_stack_iterations,pmin)
+                          else:
+                              ls_stack_iterations +=1
+                              ls_stack_iterations = min(ls_stack_iterations,pmax)
+                      text(0,2,3,1,1,str(ls_stack_iterations),fv,7)
+                      draw_Vbar(0,2,greyColor,'ls_stack_iterations',ls_stack_iterations)
+                      time.sleep(.05)
+
+                  elif button_row == 3:
+                      # PLANETARY ENABLE (toggle)
+                      ls_planetary_enable = 1 - ls_planetary_enable
+                      if ls_planetary_enable == 0:
+                          text(0,3,3,1,1,"OFF",fv,7)
+                      else:
+                          text(0,3,3,1,1,"ON",fv,7)
+                      draw_Vbar(0,3,greyColor,'ls_planetary_enable',ls_planetary_enable)
+                      time.sleep(.05)
+
+                  elif button_row == 4:
+                      # PLANETARY MODE (0-2: disk/surface/hybrid)
+                      for f in range(0,len(livestack_limits)-1,3):
+                          if livestack_limits[f] == 'ls_planetary_mode':
+                              pmin = livestack_limits[f+1]
+                              pmax = livestack_limits[f+2]
+                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                          ls_planetary_mode = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                      else:
+                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                              ls_planetary_mode -=1
+                              ls_planetary_mode = max(ls_planetary_mode,pmin)
+                          else:
+                              ls_planetary_mode +=1
+                              ls_planetary_mode = min(ls_planetary_mode,pmax)
+                      text(0,4,3,1,1,planetary_modes[ls_planetary_mode],fv,7)
+                      draw_Vbar(0,4,greyColor,'ls_planetary_mode',ls_planetary_mode)
+                      time.sleep(.05)
+
+                  elif button_row == 5:
+                      # PLANETARY DISK MIN (20-500)
+                      for f in range(0,len(livestack_limits)-1,3):
+                          if livestack_limits[f] == 'ls_planetary_disk_min':
+                              pmin = livestack_limits[f+1]
+                              pmax = livestack_limits[f+2]
+                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                          ls_planetary_disk_min = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
+                      else:
+                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                              ls_planetary_disk_min -=10
+                              ls_planetary_disk_min = max(ls_planetary_disk_min,pmin)
+                          else:
+                              ls_planetary_disk_min +=10
+                              ls_planetary_disk_min = min(ls_planetary_disk_min,pmax)
+                      text(0,5,3,1,1,str(ls_planetary_disk_min),fv,7)
+                      draw_Vbar(0,5,greyColor,'ls_planetary_disk_min',ls_planetary_disk_min)
+                      time.sleep(.05)
+
+                  elif button_row == 6:
+                      # PLANETARY DISK MAX (100-2000)
+                      for f in range(0,len(livestack_limits)-1,3):
+                          if livestack_limits[f] == 'ls_planetary_disk_max':
+                              pmin = livestack_limits[f+1]
+                              pmax = livestack_limits[f+2]
+                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                          ls_planetary_disk_max = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
+                      else:
+                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                              ls_planetary_disk_max -=50
+                              ls_planetary_disk_max = max(ls_planetary_disk_max,pmin)
+                          else:
+                              ls_planetary_disk_max +=50
+                              ls_planetary_disk_max = min(ls_planetary_disk_max,pmax)
+                      text(0,6,3,1,1,str(ls_planetary_disk_max),fv,7)
+                      draw_Vbar(0,6,greyColor,'ls_planetary_disk_max',ls_planetary_disk_max)
+                      time.sleep(.05)
+
+                  elif button_row == 7:
+                      # PLANETARY CORR (10-90 affiché 0.10-0.90)
+                      for f in range(0,len(livestack_limits)-1,3):
+                          if livestack_limits[f] == 'ls_planetary_corr':
+                              pmin = livestack_limits[f+1]
+                              pmax = livestack_limits[f+2]
+                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                          ls_planetary_corr = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
+                      else:
+                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                              ls_planetary_corr -=5
+                              ls_planetary_corr = max(ls_planetary_corr,pmin)
+                          else:
+                              ls_planetary_corr +=5
+                              ls_planetary_corr = min(ls_planetary_corr,pmax)
+                      text(0,7,3,1,1,str(ls_planetary_corr/100.0)[0:4],fv,7)
+                      draw_Vbar(0,7,greyColor,'ls_planetary_corr',ls_planetary_corr)
+                      time.sleep(.05)
+
+              # Page 1 : Gestion des paramètres originaux
+              elif current_page == 1 and button_row == 1:
                 # PREVIEW REFRESH (3-10)
                 for f in range(0,len(livestack_limits)-1,3):
                     if livestack_limits[f] == 'ls_preview_refresh':
@@ -7108,7 +7746,7 @@ while True:
                     livestack.configure(preview_refresh=ls_preview_refresh)
                 time.sleep(.05)
 
-              elif button_row == 2:
+              elif current_page == 1 and button_row == 2:
                 # ALIGNMENT MODE (0-2: translation/rotation/affine)
                 for f in range(0,len(livestack_limits)-1,3):
                     if livestack_limits[f] == 'ls_alignment_mode':
@@ -7130,7 +7768,7 @@ while True:
                     livestack.configure(alignment_mode=ls_alignment_modes[ls_alignment_mode])
                 time.sleep(.05)
 
-              elif button_row == 3:
+              elif current_page == 1 and button_row == 3:
                 # MAX FWHM (0=OFF, 100-250 affiché 10.0-25.0)
                 for f in range(0,len(livestack_limits)-1,3):
                     if livestack_limits[f] == 'ls_max_fwhm':
@@ -7155,7 +7793,7 @@ while True:
                     livestack.configure(max_fwhm=ls_max_fwhm / 10.0 if ls_max_fwhm > 0 else 999.0)
                 time.sleep(.05)
 
-              elif button_row == 4:
+              elif current_page == 1 and button_row == 4:
                 # MIN SHARPNESS (0=OFF, 30-150 affiché 0.030-0.150)
                 for f in range(0,len(livestack_limits)-1,3):
                     if livestack_limits[f] == 'ls_min_sharpness':
@@ -7180,7 +7818,7 @@ while True:
                     livestack.configure(min_sharpness=ls_min_sharpness / 1000.0 if ls_min_sharpness > 0 else 0.0)
                 time.sleep(.05)
 
-              elif button_row == 5:
+              elif current_page == 1 and button_row == 5:
                 # MAX DRIFT (0=OFF, 500-5000 pixels)
                 for f in range(0,len(livestack_limits)-1,3):
                     if livestack_limits[f] == 'ls_max_drift':
@@ -7205,7 +7843,7 @@ while True:
                     livestack.configure(max_drift=float(ls_max_drift) if ls_max_drift > 0 else 999999.0)
                 time.sleep(.05)
 
-              elif button_row == 6:
+              elif current_page == 1 and button_row == 6:
                 # MIN STARS (0=OFF, 1-20 étoiles)
                 for f in range(0,len(livestack_limits)-1,3):
                     if livestack_limits[f] == 'ls_min_stars':
@@ -7230,7 +7868,7 @@ while True:
                     livestack.configure(min_stars=int(ls_min_stars))
                 time.sleep(.05)
 
-              elif button_row == 7:
+              elif current_page == 1 and button_row == 7:
                 # QUALITY CONTROL (0=OFF, 1=ON)
                 for f in range(0,len(livestack_limits)-1,3):
                     if livestack_limits[f] == 'ls_enable_qc':
@@ -7252,7 +7890,231 @@ while True:
                 time.sleep(.05)
 
               elif button_row == 8:
-                   # SAVE CONFIG
+                   # PAGE 1 : Stack Method | PAGE 2 : SAVE CONFIG
+                   current_page = menu_page.get(8, 1)
+
+                   if current_page == 1:
+                       # STACK METHOD (0-4)
+                       for f in range(0,len(livestack_limits)-1,3):
+                           if livestack_limits[f] == 'ls_stack_method':
+                               pmin = livestack_limits[f+1]
+                               pmax = livestack_limits[f+2]
+                       if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                           ls_stack_method = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                       else:
+                           if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                               ls_stack_method -=1
+                               ls_stack_method = max(ls_stack_method,pmin)
+                           else:
+                               ls_stack_method +=1
+                               ls_stack_method = min(ls_stack_method,pmax)
+                       text(0,8,3,1,1,stack_methods[ls_stack_method],fv,7)
+                       draw_Vbar(0,8,greyColor,'ls_stack_method',ls_stack_method)
+                       time.sleep(.05)
+
+                   else:  # Page 2
+                       # SAVE CONFIG
+                       text(0,8,3,0,1,"SAVE Config",fv,7)
+                       config[0] = mode
+                   config[1] = speed
+                   config[2] = gain
+                   config[3] = int(brightness)
+                   config[4] = int(contrast)
+                   config[5] = frame
+                   config[6] = int(red)
+                   config[7] = int(blue)
+                   config[8] = ev
+                   config[9] = vlen
+                   config[10] = fps
+                   config[11] = vformat
+                   config[12] = codec
+                   config[13] = tinterval
+                   config[14] = tshots
+                   config[15] = extn
+                   config[16] = zx
+                   config[17] = zy
+                   config[18] = zoom
+                   config[19] = saturation
+                   config[20] = meter
+                   config[21] = awb
+                   config[22] = sharpness
+                   config[23] = denoise
+                   config[24] = quality
+                   config[25] = profile
+                   config[26] = level
+                   config[27] = histogram
+                   config[28] = histarea
+                   config[29] = v3_f_speed
+                   config[30] = v3_f_range
+                   config[31] = rotate
+                   config[32] = IRF
+                   config[33] = str_cap
+                   config[34] = v3_hdr
+                   config[35] = timet
+                   config[36] = vflip
+                   config[37] = hflip
+                   config[38] = stretch_p_low
+                   config[39] = stretch_p_high
+                   config[40] = stretch_factor
+                   config[41] = stretch_preset
+                   config[42] = ls_preview_refresh
+                   config[43] = ls_alignment_mode
+                   config[44] = ls_enable_qc
+                   config[45] = ls_max_fwhm
+                   config[46] = ls_min_sharpness
+                   config[47] = ls_max_drift
+                   config[48] = ls_min_stars
+                   config[49] = ls_stack_method
+                   config[50] = ls_stack_kappa
+                   config[51] = ls_stack_iterations
+                   config[52] = ls_planetary_enable
+                   config[53] = ls_planetary_mode
+                   config[54] = ls_planetary_disk_min
+                   config[55] = ls_planetary_disk_max
+                   config[56] = ls_planetary_threshold
+                   config[57] = ls_planetary_margin
+                   config[58] = ls_planetary_ellipse
+                   config[59] = ls_planetary_window
+                   config[60] = ls_planetary_upsample
+                   config[61] = ls_planetary_highpass
+                   config[62] = ls_planetary_roi_center
+                   config[63] = ls_planetary_corr
+                   config[64] = ls_planetary_max_shift
+                   config[65] = ls_lucky_enable
+                   config[66] = ls_lucky_buffer
+                   config[67] = ls_lucky_keep
+                   config[68] = ls_lucky_score
+                   config[69] = ls_lucky_stack
+                   config[70] = ls_lucky_align
+                   config[71] = ls_lucky_roi
+                   with open(config_file, 'w') as f:
+                       for item in range(0,len(titles)):
+                           f.write(titles[item] + " : " + str(config[item]) + "\n")
+                   time.sleep(1)
+                   text(0,8,2,0,1,"SAVE CONFIG",fv,7)
+
+              elif button_row == 9:
+                  # Navigation entre pages ou retour
+                  current_page = menu_page.get(8, 1)
+
+                  if current_page == 1:
+                      # Page 1 -> Page 2
+                      menu_page[8] = 2
+                      Menu()
+                  else:
+                      # Page 2 -> Page 1
+                      menu_page[8] = 1
+                      Menu()
+
+            elif menu == 9:
+              # LUCKY STACK Settings - Gestion complète
+              if button_row == 1:
+                # LUCKY BUFFER (50-500)
+                for f in range(0,len(livestack_limits)-1,3):
+                    if livestack_limits[f] == 'ls_lucky_buffer':
+                        pmin = livestack_limits[f+1]
+                        pmax = livestack_limits[f+2]
+                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    ls_lucky_buffer = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
+                else:
+                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                        ls_lucky_buffer -=10
+                        ls_lucky_buffer = max(ls_lucky_buffer,pmin)
+                    else:
+                        ls_lucky_buffer +=10
+                        ls_lucky_buffer = min(ls_lucky_buffer,pmax)
+                text(0,1,3,1,1,str(ls_lucky_buffer),fv,7)
+                draw_Vbar(0,1,greyColor,'ls_lucky_buffer',ls_lucky_buffer)
+                time.sleep(.05)
+
+              elif button_row == 2:
+                # LUCKY KEEP % (1-50)
+                for f in range(0,len(livestack_limits)-1,3):
+                    if livestack_limits[f] == 'ls_lucky_keep':
+                        pmin = livestack_limits[f+1]
+                        pmax = livestack_limits[f+2]
+                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    ls_lucky_keep = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
+                else:
+                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                        ls_lucky_keep -=1
+                        ls_lucky_keep = max(ls_lucky_keep,pmin)
+                    else:
+                        ls_lucky_keep +=1
+                        ls_lucky_keep = min(ls_lucky_keep,pmax)
+                text(0,2,3,1,1,str(ls_lucky_keep)+"%",fv,7)
+                draw_Vbar(0,2,greyColor,'ls_lucky_keep',ls_lucky_keep)
+                time.sleep(.05)
+
+              elif button_row == 3:
+                # LUCKY SCORE METHOD (0-3)
+                for f in range(0,len(livestack_limits)-1,3):
+                    if livestack_limits[f] == 'ls_lucky_score':
+                        pmin = livestack_limits[f+1]
+                        pmax = livestack_limits[f+2]
+                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    ls_lucky_score = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                else:
+                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                        ls_lucky_score -=1
+                        ls_lucky_score = max(ls_lucky_score,pmin)
+                    else:
+                        ls_lucky_score +=1
+                        ls_lucky_score = min(ls_lucky_score,pmax)
+                text(0,3,3,1,1,lucky_score_methods[ls_lucky_score],fv,7)
+                draw_Vbar(0,3,greyColor,'ls_lucky_score',ls_lucky_score)
+                time.sleep(.05)
+
+              elif button_row == 4:
+                # LUCKY STACK METHOD (0-2)
+                for f in range(0,len(livestack_limits)-1,3):
+                    if livestack_limits[f] == 'ls_lucky_stack':
+                        pmin = livestack_limits[f+1]
+                        pmax = livestack_limits[f+2]
+                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    ls_lucky_stack = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                else:
+                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                        ls_lucky_stack -=1
+                        ls_lucky_stack = max(ls_lucky_stack,pmin)
+                    else:
+                        ls_lucky_stack +=1
+                        ls_lucky_stack = min(ls_lucky_stack,pmax)
+                text(0,4,3,1,1,lucky_stack_methods[ls_lucky_stack],fv,7)
+                draw_Vbar(0,4,greyColor,'ls_lucky_stack',ls_lucky_stack)
+                time.sleep(.05)
+
+              elif button_row == 5:
+                # LUCKY ALIGN (toggle)
+                ls_lucky_align = 1 - ls_lucky_align
+                if ls_lucky_align == 0:
+                    text(0,5,3,1,1,"OFF",fv,7)
+                else:
+                    text(0,5,3,1,1,"ON",fv,7)
+                draw_Vbar(0,5,greyColor,'ls_lucky_align',ls_lucky_align)
+                time.sleep(.05)
+
+              elif button_row == 6:
+                # LUCKY ROI % (20-100)
+                for f in range(0,len(livestack_limits)-1,3):
+                    if livestack_limits[f] == 'ls_lucky_roi':
+                        pmin = livestack_limits[f+1]
+                        pmax = livestack_limits[f+2]
+                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    ls_lucky_roi = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
+                else:
+                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                        ls_lucky_roi -=5
+                        ls_lucky_roi = max(ls_lucky_roi,pmin)
+                    else:
+                        ls_lucky_roi +=5
+                        ls_lucky_roi = min(ls_lucky_roi,pmax)
+                text(0,6,3,1,1,str(ls_lucky_roi)+"%",fv,7)
+                draw_Vbar(0,6,greyColor,'ls_lucky_roi',ls_lucky_roi)
+                time.sleep(.05)
+
+              elif button_row == 8:
+                   # SAVE CONFIG (même code que menu 8)
                    text(0,8,3,0,1,"SAVE Config",fv,7)
                    config[0] = mode
                    config[1] = speed
@@ -7303,6 +8165,29 @@ while True:
                    config[46] = ls_min_sharpness
                    config[47] = ls_max_drift
                    config[48] = ls_min_stars
+                   config[49] = ls_stack_method
+                   config[50] = ls_stack_kappa
+                   config[51] = ls_stack_iterations
+                   config[52] = ls_planetary_enable
+                   config[53] = ls_planetary_mode
+                   config[54] = ls_planetary_disk_min
+                   config[55] = ls_planetary_disk_max
+                   config[56] = ls_planetary_threshold
+                   config[57] = ls_planetary_margin
+                   config[58] = ls_planetary_ellipse
+                   config[59] = ls_planetary_window
+                   config[60] = ls_planetary_upsample
+                   config[61] = ls_planetary_highpass
+                   config[62] = ls_planetary_roi_center
+                   config[63] = ls_planetary_corr
+                   config[64] = ls_planetary_max_shift
+                   config[65] = ls_lucky_enable
+                   config[66] = ls_lucky_buffer
+                   config[67] = ls_lucky_keep
+                   config[68] = ls_lucky_score
+                   config[69] = ls_lucky_stack
+                   config[70] = ls_lucky_align
+                   config[71] = ls_lucky_roi
                    with open(config_file, 'w') as f:
                        for item in range(0,len(titles)):
                            f.write(titles[item] + " : " + str(config[item]) + "\n")
