@@ -849,6 +849,20 @@ class LuckyImagingStacker:
         if 'sigma_clip_kappa' in kwargs:
             self.config.sigma_clip_kappa = float(kwargs['sigma_clip_kappa'])
     
+    def update_alignment_reference(self, reference_image: np.ndarray):
+        """
+        Met à jour la référence d'alignement sans réinitialiser le stacker
+
+        Utilisé pour aligner les stacks successifs sur le résultat cumulatif
+        au lieu de réinitialiser la référence à chaque buffer.
+
+        Args:
+            reference_image: Nouvelle image de référence (résultat cumulatif)
+        """
+        if self.config.align_enabled:
+            self.aligner.set_reference(reference_image)
+            print(f"[LUCKY] Référence d'alignement mise à jour (dérive compensée)")
+
     def reset(self):
         """Réinitialise le stacker (garde la config)"""
         self.buffer.clear()

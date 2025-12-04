@@ -902,6 +902,7 @@ p = None  # Subprocess rpicam-vid (None en mode Picamera2)
 # Picamera2 variables
 picam2 = None  # Instance Picamera2
 use_picamera2 = True  # Flag pour activer Picamera2 (False = utiliser rpicam-vid)
+use_native_sensor_mode = 0  # 0=binning rapide (1080p), 1=résolution native complète du capteur
 
 # Live Stack variables
 livestack = None  # Instance RPiCameraLiveStack
@@ -1138,7 +1139,7 @@ still_limits = ['mode',0,len(modes)-1,'speed',0,len(shutters)-1,'gain',0,30,'bri
 video_limits = ['vlen',0,3600,'fps',1,40,'v5_focus',10,2500,'vformat',0,7,'0',0,0,'zoom',0,5,'Focus',0,1,'tduration',1,86400,'tinterval',0.01,10,'tshots',1,999,
                 'flicker',0,3,'codec',0,len(codecs)-1,'profile',0,len(h264profiles)-1,'v3_focus',10,2000,'histarea',10,300,'v3_f_range',0,len(v3_f_ranges)-1,
                 'str_cap',0,len(strs)-1,'v6_focus',10,1020,'stretch_p_low',0,2,'stretch_p_high',9995,10000,'stretch_factor',0,50,'stretch_preset',0,2,
-                'ghs_D',-10,10,'ghs_B',-300,100,'ghs_SP',0,100]
+                'ghs_D',-10,10,'ghs_B',-300,100,'ghs_SP',0,100,'use_native_sensor_mode',0,1]
 
 livestack_limits = [
     # Existants
@@ -1184,14 +1185,14 @@ titles = ['mode','speed','gain','brightness','contrast','frame','red','blue','ev
           'ls_preview_refresh','ls_alignment_mode','ls_enable_qc','ls_max_fwhm','ls_min_sharpness','ls_max_drift','ls_min_stars',
           'ls_stack_method','ls_stack_kappa','ls_stack_iterations',
           'ls_planetary_enable','ls_planetary_mode','ls_planetary_disk_min','ls_planetary_disk_max','ls_planetary_threshold','ls_planetary_margin','ls_planetary_ellipse','ls_planetary_window','ls_planetary_upsample','ls_planetary_highpass','ls_planetary_roi_center','ls_planetary_corr','ls_planetary_max_shift',
-          'ls_lucky_enable','ls_lucky_buffer','ls_lucky_keep','ls_lucky_score','ls_lucky_stack','ls_lucky_align','ls_lucky_roi']
+          'ls_lucky_enable','ls_lucky_buffer','ls_lucky_keep','ls_lucky_score','ls_lucky_stack','ls_lucky_align','ls_lucky_roi','use_native_sensor_mode']
 points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat,codec,tinterval,tshots,extn,zx,zy,zoom,saturation,
           meter,awb,sharpness,denoise,quality,profile,level,histogram,histarea,v3_f_speed,v3_f_range,rotate,IRF,str_cap,v3_hdr,timet,vflip,hflip,
           stretch_p_low,stretch_p_high,stretch_factor,stretch_preset,ghs_D,ghs_B,ghs_SP,
           ls_preview_refresh,ls_alignment_mode,ls_enable_qc,ls_max_fwhm,ls_min_sharpness,ls_max_drift,ls_min_stars,
           ls_stack_method,ls_stack_kappa,ls_stack_iterations,
           ls_planetary_enable,ls_planetary_mode,ls_planetary_disk_min,ls_planetary_disk_max,ls_planetary_threshold,ls_planetary_margin,ls_planetary_ellipse,ls_planetary_window,ls_planetary_upsample,ls_planetary_highpass,ls_planetary_roi_center,ls_planetary_corr,ls_planetary_max_shift,
-          ls_lucky_enable,ls_lucky_buffer,ls_lucky_keep,ls_lucky_score,ls_lucky_stack,ls_lucky_align,ls_lucky_roi]
+          ls_lucky_enable,ls_lucky_buffer,ls_lucky_keep,ls_lucky_score,ls_lucky_stack,ls_lucky_align,ls_lucky_roi,use_native_sensor_mode]
 if not os.path.exists(config_file):
     with open(config_file, 'w') as f:
         for item in range(0,len(titles)):
@@ -1371,6 +1372,12 @@ ls_lucky_score     = config[71]
 ls_lucky_stack     = config[72]
 ls_lucky_align     = config[73]
 ls_lucky_roi       = config[74]
+use_native_sensor_mode = config[75] if len(config) > 75 else 0  # Compatibilité avec anciens fichiers config
+
+# Étendre config à 76 éléments si nécessaire (pour use_native_sensor_mode)
+while len(config) < 76:
+    config.append(0)
+config[75] = use_native_sensor_mode
 
 if codec > len(codecs)-1:
     codec = 0
@@ -2407,7 +2414,7 @@ def preview():
     global use_ard,lver,Pi,scientif,scientific,fxx,fxy,fxz,v3_focus,v3_hdr,v3_f_mode,v3_f_modes,prev_fps,focus_fps,focus_mode,restart,datastr
     global count,p, brightness,contrast,modes,mode,red,blue,gain,sspeed,ev,preview_width,preview_height,zoom,igw,igh,zx,zy,awbs,awb,saturations
     global saturation,meters,meter,flickers,flicker,sharpnesss,sharpness,rotate,v3_hdrs,mjpeg_extractor
-    global picam2, use_picamera2, Pi_Cam, camera, v3_af, v5_af, vflip, hflip, denoise, denoises, quality
+    global picam2, use_picamera2, Pi_Cam, camera, v3_af, v5_af, vflip, hflip, denoise, denoises, quality, use_native_sensor_mode, zfs
 
     # Variables statiques pour mémoriser la configuration précédente
     if not hasattr(preview, 'prev_config'):
@@ -2416,8 +2423,24 @@ def preview():
     # ===== MODE PICAMERA2 =====
     if use_picamera2:
         # Déterminer la taille de capture pour détecter si changement
-        # Si zoom actif, utiliser la résolution correspondante au niveau de zoom
-        if zoom > 0:
+        # Mode natif avec zoom : calculer la taille ROI native
+        if use_native_sensor_mode == 1 and zoom > 0:
+            # Calculer la taille du ROI en pixels natifs du capteur
+            # zfs[zoom] donne la fraction de la résolution native
+            roi_width = int(igw * zfs[zoom])
+            roi_height = int(igh * zfs[zoom])
+            # Arrondir à des nombres pairs
+            if roi_width % 2 != 0:
+                roi_width -= 1
+            if roi_height % 2 != 0:
+                roi_height -= 1
+            capture_size = (roi_width, roi_height)
+        # Mode natif sans zoom : utiliser la résolution native complète
+        elif use_native_sensor_mode == 1:
+            # Utiliser la résolution native complète du capteur
+            capture_size = (igw, igh)
+        # Si zoom actif en mode binning, utiliser la résolution correspondante au niveau de zoom
+        elif zoom > 0:
             # Résolutions correspondant aux niveaux de zoom
             zoom_capture_sizes = {
                 1: (1920, 1080),  # 2x zoom
@@ -2444,7 +2467,8 @@ def preview():
             preview.prev_config.get('capture_size') != capture_size or
             preview.prev_config.get('vflip') != vflip or
             preview.prev_config.get('hflip') != hflip or
-            preview.prev_config.get('mode_type') != (0 if mode == 0 or sspeed > 80000 else 1)
+            preview.prev_config.get('mode_type') != (0 if mode == 0 or sspeed > 80000 else 1) or
+            preview.prev_config.get('use_native_sensor_mode') != use_native_sensor_mode
         )
 
         # Calculer speed2 et autres paramètres (avant le if/else)
@@ -2522,8 +2546,24 @@ def preview():
             picam2 = Picamera2(camera)
 
         # Déterminer la taille de capture selon caméra (pour les deux chemins)
-        # Si zoom actif, utiliser la résolution correspondante au niveau de zoom
-        if zoom > 0:
+        # Mode natif avec zoom : calculer la taille ROI native
+        if use_native_sensor_mode == 1 and zoom > 0:
+            # Calculer la taille du ROI en pixels natifs du capteur
+            # zfs[zoom] donne la fraction de la résolution native
+            roi_width = int(igw * zfs[zoom])
+            roi_height = int(igh * zfs[zoom])
+            # Arrondir à des nombres pairs
+            if roi_width % 2 != 0:
+                roi_width -= 1
+            if roi_height % 2 != 0:
+                roi_height -= 1
+            capture_size = (roi_width, roi_height)
+        # Mode natif sans zoom : utiliser la résolution native complète
+        elif use_native_sensor_mode == 1:
+            # Utiliser la résolution native complète du capteur
+            capture_size = (igw, igh)
+        # Si zoom actif en mode binning, utiliser la résolution correspondante au niveau de zoom
+        elif zoom > 0:
             zoom_capture_sizes = {
                 1: (1920, 1080),  # 2x zoom
                 2: (1280, 720),   # 3x zoom
@@ -2791,7 +2831,8 @@ def preview():
             'capture_size': capture_size,
             'vflip': vflip,
             'hflip': hflip,
-            'mode_type': 0 if mode == 0 or sspeed > 80000 else 1
+            'mode_type': 0 if mode == 0 or sspeed > 80000 else 1,
+            'use_native_sensor_mode': use_native_sensor_mode
         }
 
         restart = 0
@@ -2954,7 +2995,7 @@ def preview():
     time.sleep(0.2)
 
 def Menu():
-    global vwidths2,vheights2,Pi_Cam,scientif,mode,v3_hdr,scientific,tinterval,zoom,vwidth,vheight,preview_width,preview_height,ft,fv,focus,fxz,v3_hdr,v3_hdrs,bw,bh,ft,fv,cam1,v3_f_mode,v3_af,button_row,xx,xy
+    global vwidths2,vheights2,Pi_Cam,scientif,mode,v3_hdr,scientific,tinterval,zoom,vwidth,vheight,preview_width,preview_height,ft,fv,focus,fxz,v3_hdr,v3_hdrs,bw,bh,ft,fv,cam1,v3_f_mode,v3_af,button_row,xx,xy,use_native_sensor_mode
     pygame.draw.rect(windowSurfaceObj,(0,0,0),Rect(preview_width,0,bw,preview_height))
     if menu > 0: 
         # set button sizes
@@ -3087,7 +3128,13 @@ def Menu():
         text(0,6,3,1,1,str(hflip),fv,7)
         text(0,7,5,0,1," STILL -t time ",fv,7)
         text(0,7,3,1,1,str(timet),fv,7)
-        text(0,8,2,0,1,"SAVE CONFIG",fv,7)
+        text(0,8,2,0,1,"Sensor Mode",ft,7)
+        if use_native_sensor_mode == 0:
+            text(0,8,3,1,1,"Binning",fv,7)
+        else:
+            text(0,8,3,1,1,"Native",fv,7)
+        draw_Vbar(0,8,greyColor,'use_native_sensor_mode',use_native_sensor_mode)
+        text(0,9,2,0,1,"SAVE CONFIG",fv,7)
         draw_Vbar(0,2,greyColor,'str_cap',str_cap)
         draw_bar(0,3,greyColor,'histogram',histogram)
         draw_Vbar(0,4,greyColor,'histarea',histarea)
@@ -3821,9 +3868,10 @@ while True:
                 # Si aucun stack n'est disponible, le flux vidéo sera affiché par le code normal
                 # (livestack_display_done reste False)
 
-                # Afficher les stats Lucky par-dessus (toujours, même si flux vidéo)
-                text(0, 0, 2, 2, 1, stats_text1, ft, 1)
-                text(0, 1, 2, 2, 1, stats_text2, ft, 1)
+                # Afficher les stats Lucky par-dessus avec fond noir stable (évite le clignotement)
+                # Le paramètre top=2 dessine à la position absolue, bkgnd_Color=1 dessine fond noir
+                text(0, 0, 2, 2, 1, stats_text1, ft, 1)  # top=2 position absolue, bkgnd_Color=1 fond noir
+                text(0, 1, 2, 2, 1, stats_text2, ft, 1)  # upd=1 force update
 
             # Traitement normal seulement si LiveStack/LuckyStack n'a pas déjà affiché
             if not livestack_display_done:
@@ -4678,18 +4726,16 @@ while True:
                             else:
                                 datastr += "  --roi " + str(zxo) + "," + str(zyo) + "," + str(preview_width/igw) + "," + str(preview_height/igh)
 
-                        # Résolution et dimensions - Utiliser résolutions STANDARDS pour compatibilité SER
-                        # Stratégie: ROI pour zoom (crop capteur) + rescale vers résolution standard
+                        # Résolution et dimensions
                         if zoom > 0 and zoom <= 5 and zoom != 3:  # Zoom fixe avec ROI (zoom 3 désactivé)
-                            # Choisir une résolution standard compatible SER
-                            # IMPORTANT: Utiliser uniquement des résolutions testées et validées pour SER
+                            # Toujours utiliser résolutions standards pour les vidéos (compatibilité rpicam-vid)
+                            # Le mode natif s'applique uniquement au livestack/luckystack
                             zoom_resolutions = {
                                 1: (1920, 1080),  # 2x zoom -> Full HD (16:9, standard)
                                 2: (1280, 720),   # 3x zoom -> HD (16:9, standard)
                                 4: (640, 480),    # 5x zoom -> VGA (4:3, confirmé compatible SER)
                                 5: (640, 368),    # 6x zoom -> nHD (16:9, confirmé compatible SER)
                             }
-
                             if zoom in zoom_resolutions:
                                 actual_vwidth, actual_vheight = zoom_resolutions[zoom]
                             else:
@@ -4697,7 +4743,7 @@ while True:
                                 actual_vwidth = zws
                                 actual_vheight = zhs
 
-                            # Ajouter --width et --height pour rescaler vers résolution standard
+                            # Ajouter --width et --height
                             datastr += " --width " + str(actual_vwidth) + " --height " + str(actual_vheight)
                         # Supprimé: ancien zoom manuel (zoom == 5)
                         elif False and zoom == 5:
@@ -6516,11 +6562,22 @@ while True:
                     timet  +=100
                     timet = min(timet ,10000)
                 text(0,7,3,1,1,str(timet),fv,7)
-                time.sleep(0.05) 
-                
+                time.sleep(0.05)
+
               elif button_row == 8:
+                # SENSOR MODE (Native/Binning)
+                use_native_sensor_mode = 1 - use_native_sensor_mode  # Toggle 0/1
+                if use_native_sensor_mode == 0:
+                    text(0,8,3,1,1,"Binning",fv,7)
+                else:
+                    text(0,8,3,1,1,"Native",fv,7)
+                draw_Vbar(0,8,greyColor,'use_native_sensor_mode',use_native_sensor_mode)
+                restart = 1  # Forcer recréation de la caméra
+                time.sleep(.25)
+
+              elif button_row == 9:
                    # SAVE CONFIG
-                   text(0,8,3,0,1,"SAVE Config",fv,7)
+                   text(0,9,3,0,1,"SAVE Config",fv,7)
                    config[0] = mode
                    config[1] = speed
                    config[2] = gain
@@ -6563,11 +6620,45 @@ while True:
                    config[39] = stretch_p_high
                    config[40] = stretch_factor
                    config[41] = stretch_preset
+                   config[42] = ghs_D
+                   config[43] = ghs_B
+                   config[44] = ghs_SP
+                   config[45] = ls_preview_refresh
+                   config[46] = ls_alignment_mode
+                   config[47] = ls_enable_qc
+                   config[48] = ls_max_fwhm
+                   config[49] = ls_min_sharpness
+                   config[50] = ls_max_drift
+                   config[51] = ls_min_stars
+                   config[52] = ls_stack_method
+                   config[53] = ls_stack_kappa
+                   config[54] = ls_stack_iterations
+                   config[55] = ls_planetary_enable
+                   config[56] = ls_planetary_mode
+                   config[57] = ls_planetary_disk_min
+                   config[58] = ls_planetary_disk_max
+                   config[59] = ls_planetary_threshold
+                   config[60] = ls_planetary_margin
+                   config[61] = ls_planetary_ellipse
+                   config[62] = ls_planetary_window
+                   config[63] = ls_planetary_upsample
+                   config[64] = ls_planetary_highpass
+                   config[65] = ls_planetary_roi_center
+                   config[66] = ls_planetary_corr
+                   config[67] = ls_planetary_max_shift
+                   config[68] = ls_lucky_enable
+                   config[69] = ls_lucky_buffer
+                   config[70] = ls_lucky_keep
+                   config[71] = ls_lucky_score
+                   config[72] = ls_lucky_stack
+                   config[73] = ls_lucky_align
+                   config[74] = ls_lucky_roi
+                   config[75] = use_native_sensor_mode
                    with open(config_file, 'w') as f:
                       for item in range(0,len(titles)):
                           f.write(titles[item] + " : " + str(config[item]) + "\n")
                    time.sleep(1)
-                   text(0,8,2,0,1,"SAVE CONFIG",fv,7)
+                   text(0,9,2,0,1,"SAVE CONFIG",fv,7)
 
             # MENU 3    
             elif menu == 3: 
@@ -7875,6 +7966,10 @@ while True:
                               ls_stack_method = min(ls_stack_method,pmax)
                       text(0,1,3,1,1,stack_methods[ls_stack_method],fv,7)
                       draw_Vbar(0,1,greyColor,'ls_stack_method',ls_stack_method)
+                      # Mettre à jour la config livestack en temps réel
+                      if livestack_active and livestack is not None:
+                          method_names = ['mean', 'median', 'kappa_sigma', 'winsorized', 'weighted']
+                          livestack.configure(stacking_method=method_names[ls_stack_method])
                       time.sleep(.05)
 
                   elif button_row == 2:
@@ -7894,6 +7989,9 @@ while True:
                               ls_stack_kappa = min(ls_stack_kappa,pmax)
                       text(0,2,3,1,1,str(ls_stack_kappa/10.0)[0:4],fv,7)
                       draw_Vbar(0,2,greyColor,'ls_stack_kappa',ls_stack_kappa)
+                      # Mettre à jour la config livestack en temps réel
+                      if livestack_active and livestack is not None:
+                          livestack.configure(kappa=ls_stack_kappa / 10.0)
                       time.sleep(.05)
 
                   elif button_row == 3:
@@ -7913,6 +8011,9 @@ while True:
                               ls_stack_iterations = min(ls_stack_iterations,pmax)
                       text(0,3,3,1,1,str(ls_stack_iterations),fv,7)
                       draw_Vbar(0,3,greyColor,'ls_stack_iterations',ls_stack_iterations)
+                      # Mettre à jour la config livestack en temps réel
+                      if livestack_active and livestack is not None:
+                          livestack.configure(iterations=ls_stack_iterations)
                       time.sleep(.05)
 
                   elif button_row == 4:
@@ -7923,6 +8024,9 @@ while True:
                       else:
                           text(0,4,3,1,1,"ON",fv,7)
                       draw_Vbar(0,4,greyColor,'ls_planetary_enable',ls_planetary_enable)
+                      # Mettre à jour la config livestack en temps réel
+                      if livestack_active and livestack is not None:
+                          livestack.configure(planetary_enable=bool(ls_planetary_enable))
                       time.sleep(.05)
 
                   elif button_row == 5:
@@ -7942,6 +8046,10 @@ while True:
                               ls_planetary_mode = min(ls_planetary_mode,pmax)
                       text(0,5,3,1,1,planetary_modes[ls_planetary_mode],fv,7)
                       draw_Vbar(0,5,greyColor,'ls_planetary_mode',ls_planetary_mode)
+                      # Mettre à jour la config livestack en temps réel
+                      if livestack_active and livestack is not None:
+                          mode_names = ['disk', 'surface', 'hybrid']
+                          livestack.configure(planetary_mode=mode_names[ls_planetary_mode])
                       time.sleep(.05)
 
                   elif button_row == 6:
@@ -7961,6 +8069,9 @@ while True:
                               ls_planetary_disk_min = min(ls_planetary_disk_min,pmax)
                       text(0,6,3,1,1,str(ls_planetary_disk_min),fv,7)
                       draw_Vbar(0,6,greyColor,'ls_planetary_disk_min',ls_planetary_disk_min)
+                      # Mettre à jour la config livestack en temps réel
+                      if livestack_active and livestack is not None:
+                          livestack.configure(planetary_disk_min=ls_planetary_disk_min)
                       time.sleep(.05)
 
                   elif button_row == 7:
@@ -7980,6 +8091,9 @@ while True:
                               ls_planetary_disk_max = min(ls_planetary_disk_max,pmax)
                       text(0,7,3,1,1,str(ls_planetary_disk_max),fv,7)
                       draw_Vbar(0,7,greyColor,'ls_planetary_disk_max',ls_planetary_disk_max)
+                      # Mettre à jour la config livestack en temps réel
+                      if livestack_active and livestack is not None:
+                          livestack.configure(planetary_disk_max=ls_planetary_disk_max)
                       time.sleep(.05)
 
                   elif button_row == 8:
@@ -8239,6 +8353,9 @@ while True:
                    else:
                        text(0,8,3,1,1,"ON",fv,7)
                    draw_Vbar(0,8,greyColor,'ls_lucky_enable',ls_lucky_enable)
+                   # Mettre à jour la config livestack en temps réel
+                   if livestack_active and livestack is not None:
+                       livestack.configure(lucky_enable=bool(ls_lucky_enable))
                    time.sleep(.05)
 
               elif current_page == 2 and button_row == 8:
@@ -8357,6 +8474,11 @@ while True:
                         ls_lucky_buffer = min(ls_lucky_buffer,pmax)
                 text(0,1,3,1,1,str(ls_lucky_buffer),fv,7)
                 draw_Vbar(0,1,greyColor,'ls_lucky_buffer',ls_lucky_buffer)
+                # Mettre à jour la config en temps réel (luckystack ou livestack si lucky activé)
+                if luckystack_active and luckystack is not None:
+                    luckystack.configure(lucky_buffer_size=ls_lucky_buffer)
+                elif livestack_active and livestack is not None and ls_lucky_enable:
+                    livestack.configure(lucky_buffer_size=ls_lucky_buffer)
                 time.sleep(.05)
 
               elif button_row == 2:
@@ -8376,6 +8498,11 @@ while True:
                         ls_lucky_keep = min(ls_lucky_keep,pmax)
                 text(0,2,3,1,1,str(ls_lucky_keep)+"%",fv,7)
                 draw_Vbar(0,2,greyColor,'ls_lucky_keep',ls_lucky_keep)
+                # Mettre à jour la config en temps réel
+                if luckystack_active and luckystack is not None:
+                    luckystack.configure(lucky_keep_percent=float(ls_lucky_keep))
+                elif livestack_active and livestack is not None and ls_lucky_enable:
+                    livestack.configure(lucky_keep_percent=float(ls_lucky_keep))
                 time.sleep(.05)
 
               elif button_row == 3:
@@ -8395,6 +8522,13 @@ while True:
                         ls_lucky_score = min(ls_lucky_score,pmax)
                 text(0,3,3,1,1,lucky_score_methods[ls_lucky_score],fv,7)
                 draw_Vbar(0,3,greyColor,'ls_lucky_score',ls_lucky_score)
+                # Mettre à jour la config en temps réel
+                if luckystack_active and luckystack is not None:
+                    score_names = ['laplacian', 'gradient', 'sobel', 'tenengrad']
+                    luckystack.configure(lucky_score_method=score_names[ls_lucky_score])
+                elif livestack_active and livestack is not None and ls_lucky_enable:
+                    score_names = ['laplacian', 'gradient', 'sobel', 'tenengrad']
+                    livestack.configure(lucky_score_method=score_names[ls_lucky_score])
                 time.sleep(.05)
 
               elif button_row == 4:
@@ -8414,6 +8548,13 @@ while True:
                         ls_lucky_stack = min(ls_lucky_stack,pmax)
                 text(0,4,3,1,1,lucky_stack_methods[ls_lucky_stack],fv,7)
                 draw_Vbar(0,4,greyColor,'ls_lucky_stack',ls_lucky_stack)
+                # Mettre à jour la config en temps réel
+                if luckystack_active and luckystack is not None:
+                    stack_names = ['mean', 'median', 'sigma_clip']
+                    luckystack.configure(lucky_stack_method=stack_names[ls_lucky_stack])
+                elif livestack_active and livestack is not None and ls_lucky_enable:
+                    stack_names = ['mean', 'median', 'sigma_clip']
+                    livestack.configure(lucky_stack_method=stack_names[ls_lucky_stack])
                 time.sleep(.05)
 
               elif button_row == 5:
@@ -8424,6 +8565,11 @@ while True:
                 else:
                     text(0,5,3,1,1,"ON",fv,7)
                 draw_Vbar(0,5,greyColor,'ls_lucky_align',ls_lucky_align)
+                # Mettre à jour la config en temps réel
+                if luckystack_active and luckystack is not None:
+                    luckystack.configure(lucky_align=bool(ls_lucky_align))
+                elif livestack_active and livestack is not None and ls_lucky_enable:
+                    livestack.configure(lucky_align=bool(ls_lucky_align))
                 time.sleep(.05)
 
               elif button_row == 6:
@@ -8443,6 +8589,11 @@ while True:
                         ls_lucky_roi = min(ls_lucky_roi,pmax)
                 text(0,6,3,1,1,str(ls_lucky_roi)+"%",fv,7)
                 draw_Vbar(0,6,greyColor,'ls_lucky_roi',ls_lucky_roi)
+                # Mettre à jour la config en temps réel
+                if luckystack_active and luckystack is not None:
+                    luckystack.configure(lucky_roi_percent=float(ls_lucky_roi))
+                elif livestack_active and livestack is not None and ls_lucky_enable:
+                    livestack.configure(lucky_roi_percent=float(ls_lucky_roi))
                 time.sleep(.05)
 
               elif button_row == 8:

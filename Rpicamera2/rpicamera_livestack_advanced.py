@@ -45,10 +45,11 @@ from libastrostack.stacker_advanced import AdvancedStacker, StackMethod
 from libastrostack.drizzle import DrizzleStacker, DrizzleStackerFast
 from libastrostack.aligner_planetary import PlanetaryAligner, PlanetaryMode, PlanetaryConfig
 from libastrostack.lucky_imaging import (
-    LuckyImagingStacker, LuckyConfig, 
+    LuckyImagingStacker, LuckyConfig,
     ScoreMethod as LuckyScoreMethod,
     StackMethod as LuckyStackMethod,
-    RPiCameraLuckyImaging, create_lucky_session
+    RPiCameraLuckyImaging, create_lucky_session,
+    QualityScorer
 )
 from libastrostack.config_advanced import (
     AdvancedStackingConfig, 
@@ -332,13 +333,35 @@ class RPiCameraLiveStackAdvanced:
                 self.use_advanced_stacking = True
                 self.config.stacking.streaming_mode = True
         if 'lucky_buffer_size' in kwargs:
-            self.config.lucky.buffer_size = int(kwargs['lucky_buffer_size'])
+            new_size = int(kwargs['lucky_buffer_size'])
+            old_size = self.config.lucky.buffer_size
+            self.config.lucky.buffer_size = new_size
+            # NOTE: buffer_size ne peut pas être changé dynamiquement (nécessite restart)
+            print(f"[LUCKY] Buffer size: {old_size} → {new_size}")
+            if self.lucky_stacker and self.is_running:
+                print(f"[LUCKY] ⚠️  AVERTISSEMENT: Le buffer est déjà créé avec {old_size} images")
+                print(f"[LUCKY] ⚠️  Arrêtez et redémarrez Lucky Stack pour appliquer la nouvelle taille ({new_size})")
+
         if 'lucky_keep_percent' in kwargs:
-            self.config.lucky.keep_percent = float(kwargs['lucky_keep_percent'])
+            new_percent = float(kwargs['lucky_keep_percent'])
+            self.config.lucky.keep_percent = new_percent
+            # Mise à jour dynamique : modifier config du stacker actif
+            if self.lucky_stacker and self.is_running:
+                self.lucky_stacker.config.keep_percent = new_percent
+                print(f"[LUCKY] keep_percent mis à jour: {new_percent}%")
+
         if 'lucky_keep_count' in kwargs:
-            self.config.lucky.keep_count = int(kwargs['lucky_keep_count'])
+            new_count = int(kwargs['lucky_keep_count'])
+            self.config.lucky.keep_count = new_count
+            if self.lucky_stacker and self.is_running:
+                self.lucky_stacker.config.keep_count = new_count
+
         if 'lucky_min_score' in kwargs:
-            self.config.lucky.min_score = float(kwargs['lucky_min_score'])
+            new_score = float(kwargs['lucky_min_score'])
+            self.config.lucky.min_score = new_score
+            if self.lucky_stacker and self.is_running:
+                self.lucky_stacker.config.min_score = new_score
+
         if 'lucky_score_method' in kwargs:
             method = kwargs['lucky_score_method'].lower()
             from libastrostack.config_advanced import LuckyScoreMethod
@@ -348,7 +371,15 @@ class RPiCameraLiveStackAdvanced:
                 'sobel': LuckyScoreMethod.SOBEL,
                 'tenengrad': LuckyScoreMethod.TENENGRAD,
             }
-            self.config.lucky.score_method = method_map.get(method, LuckyScoreMethod.LAPLACIAN)
+            new_method = method_map.get(method, LuckyScoreMethod.LAPLACIAN)
+            self.config.lucky.score_method = new_method
+            # Mise à jour dynamique : recréer le scorer
+            if self.lucky_stacker and self.is_running:
+                self.lucky_stacker.config.score_method = new_method
+                # Recréer le scorer avec la nouvelle méthode
+                self.lucky_stacker.scorer = QualityScorer(self.lucky_stacker.config)
+                print(f"[LUCKY] score_method mis à jour: {method}")
+
         if 'lucky_stack_method' in kwargs:
             method = kwargs['lucky_stack_method'].lower()
             from libastrostack.config_advanced import LuckyStackMethod
@@ -357,11 +388,27 @@ class RPiCameraLiveStackAdvanced:
                 'median': LuckyStackMethod.MEDIAN,
                 'sigma_clip': LuckyStackMethod.SIGMA_CLIP,
             }
-            self.config.lucky.stack_method = method_map.get(method, LuckyStackMethod.MEAN)
+            new_method = method_map.get(method, LuckyStackMethod.MEAN)
+            self.config.lucky.stack_method = new_method
+            if self.lucky_stacker and self.is_running:
+                self.lucky_stacker.config.stack_method = new_method
+                print(f"[LUCKY] stack_method mis à jour: {method}")
+
         if 'lucky_align_enabled' in kwargs:
-            self.config.lucky.align_enabled = bool(kwargs['lucky_align_enabled'])
+            new_align = bool(kwargs['lucky_align_enabled'])
+            self.config.lucky.align_enabled = new_align
+            if self.lucky_stacker and self.is_running:
+                self.lucky_stacker.config.align_enabled = new_align
+                print(f"[LUCKY] align_enabled mis à jour: {new_align}")
+
         if 'lucky_score_roi_percent' in kwargs:
-            self.config.lucky.score_roi_percent = float(kwargs['lucky_score_roi_percent'])
+            new_roi = float(kwargs['lucky_score_roi_percent'])
+            self.config.lucky.score_roi_percent = new_roi
+            if self.lucky_stacker and self.is_running:
+                self.lucky_stacker.config.score_roi_percent = new_roi
+                # Recréer le scorer pour mettre à jour le ROI
+                self.lucky_stacker.scorer = QualityScorer(self.lucky_stacker.config)
+                print(f"[LUCKY] score_roi_percent mis à jour: {new_roi}%")
         
         # Contrôle qualité
         if 'enable_qc' in kwargs:
@@ -601,6 +648,11 @@ class RPiCameraLiveStackAdvanced:
                         master_stack = self.advanced_stacker.combine()
                         if master_stack is not None:
                             self.last_lucky_result = master_stack.copy()
+
+                            # SOLUTION 2: Mettre à jour la référence d'alignement Lucky
+                            # avec le résultat cumulatif pour compenser la dérive
+                            self.lucky_stacker.update_alignment_reference(master_stack)
+
                             self._update_memory_stats()
                             self.frame_count += 1
                             return master_stack
