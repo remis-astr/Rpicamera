@@ -194,26 +194,29 @@ class LiveStackSession:
     def get_preview_png(self):
         """
         Génère preview PNG étiré pour affichage
-        
+
         Returns:
             Array uint8 (0-255) pour affichage direct
         """
         result = self.stacker.get_result()
         if result is None:
             return None
-        
+
         # Appliquer étirement
         is_color = len(result.shape) == 3
-        
+
         if is_color:
-            stretched = np.zeros_like(result)
+            stretched = np.zeros_like(result, dtype=np.float32)
             for i in range(3):
                 stretched[:, :, i] = apply_stretch(
                     result[:, :, i],
                     method=self.config.png_stretch_method,
                     factor=self.config.png_stretch_factor,
                     clip_low=self.config.png_clip_low,
-                    clip_high=self.config.png_clip_high
+                    clip_high=self.config.png_clip_high,
+                    ghs_D=getattr(self.config, 'ghs_D', 0.0),
+                    ghs_B=getattr(self.config, 'ghs_B', 0.0),
+                    ghs_SP=getattr(self.config, 'ghs_SP', 0.5)
                 )
         else:
             stretched = apply_stretch(
@@ -221,12 +224,15 @@ class LiveStackSession:
                 method=self.config.png_stretch_method,
                 factor=self.config.png_stretch_factor,
                 clip_low=self.config.png_clip_low,
-                clip_high=self.config.png_clip_high
+                clip_high=self.config.png_clip_high,
+                ghs_D=getattr(self.config, 'ghs_D', 0.0),
+                ghs_B=getattr(self.config, 'ghs_B', 0.0),
+                ghs_SP=getattr(self.config, 'ghs_SP', 0.5)
             )
-        
+
         # Convertir en uint8
         preview = (stretched * 255).astype(np.uint8)
-        
+
         return preview
     
     def save_result(self, output_path, generate_png=None):
@@ -304,17 +310,19 @@ class LiveStackSession:
         preview = self.get_preview_png()
         if preview is None:
             return
-        
-        # Sauvegarder image pure
+
         import cv2
-        
+
         if len(preview.shape) == 3:
-            # Convertir RGB en BGR pour OpenCV
-            preview_bgr = cv2.cvtColor(preview, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(str(png_path), preview_bgr)
-        else:
+            # CORRECTION: Les données sont en RGB (de Picamera2)
+            # Les fichiers PNG stockent RGB, donc écrire directement
+            # Note: cv2.imwrite() n'effectue PAS de conversion BGR->RGB pour les PNG!
+            # Il écrit les données telles quelles. Donc RGB→RGB = correct!
             cv2.imwrite(str(png_path), preview)
-        
+        else:
+            # Grayscale image
+            cv2.imwrite(str(png_path), preview)
+
         print(f"[OK] PNG: {png_path}")
     
     def _save_quality_report(self, report_path):

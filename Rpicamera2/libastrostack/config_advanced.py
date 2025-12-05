@@ -83,12 +83,14 @@ class LuckyStackMethod(Enum):
 
 class StretchMethod(Enum):
     """Méthodes d'étirement (copie de config.py)"""
+    OFF = "off"                     # Pas de stretch
     LINEAR = "linear"
     ASINH = "asinh"
     LOG = "log"
     SQRT = "sqrt"
     HISTOGRAM = "histogram"
     AUTO = "auto"
+    GHS = "ghs"                     # Generalized Hyperbolic Stretch
 
 
 # =============================================================================
@@ -339,21 +341,26 @@ class QualityConfig:
 @dataclass
 class OutputConfig:
     """Configuration des sorties"""
-    
+
     # Répertoire
     output_directory: str = "/media/admin/THKAILAR/Stacks/"
-    
+
     # FITS
     auto_fits: bool = True
     fits_compress: bool = False
-    
+
     # PNG
     auto_png: bool = True
     png_stretch_method: StretchMethod = StretchMethod.ASINH
     png_stretch_factor: float = 10.0
     png_clip_low: float = 1.0           # Percentile bas (%)
     png_clip_high: float = 99.5         # Percentile haut (%)
-    
+
+    # Paramètres GHS (Generalized Hyperbolic Stretch)
+    ghs_D: float = 0.0                  # Linked stretching parameter (-1.0 à 1.0)
+    ghs_B: float = 0.0                  # Blackpoint parameter
+    ghs_SP: float = 0.5                 # Symmetry point (0-1)
+
     # Rapports
     save_rejected_list: bool = True
     save_quality_report: bool = True
@@ -453,6 +460,11 @@ class AdvancedStackingConfig:
         legacy.png_stretch_factor = self.output.png_stretch_factor
         legacy.png_clip_low = self.output.png_clip_low
         legacy.png_clip_high = self.output.png_clip_high
+
+        # GHS
+        legacy.ghs_D = self.output.ghs_D
+        legacy.ghs_B = self.output.ghs_B
+        legacy.ghs_SP = self.output.ghs_SP
         
         # Autres
         legacy.preview_refresh_interval = self.preview_refresh_interval
@@ -587,7 +599,7 @@ class LegacyQualityConfig:
 
 class LegacyStackingConfig:
     """Ancien format StackingConfig (pour compatibilité)"""
-    
+
     def __init__(self):
         self.alignment_mode = "rotation"
         self.quality = LegacyQualityConfig()
@@ -596,6 +608,10 @@ class LegacyStackingConfig:
         self.png_stretch_factor = 10.0
         self.png_clip_low = 1.0
         self.png_clip_high = 99.5
+        # Paramètres GHS
+        self.ghs_D = 0.0
+        self.ghs_B = 0.0
+        self.ghs_SP = 0.5
         self.preview_refresh_interval = 5
         self.save_dng_mode = "accepted"
         self.output_directory = "/media/admin/THKAILAR/Stacks/"

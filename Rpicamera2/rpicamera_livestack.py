@@ -335,14 +335,18 @@ class RPiCameraLiveStack:
         """Worker thread pour sauvegarde DNG asynchrone"""
         while True:
             item = self.save_queue.get()
-            
+
             if item is None:  # Signal stop
                 break
-            
+
             # Sauvegarder DNG (placeholder)
             # TODO: Implémenter sauvegarde DNG réelle
             pass
-    
+
+    def save(self, filename=None):
+        """Alias pour save_result() (compatibilité RPiCamera2.py)"""
+        return self.save_result(filename)
+
     def get_config_summary(self):
         """Retourne résumé config pour affichage"""
         return {

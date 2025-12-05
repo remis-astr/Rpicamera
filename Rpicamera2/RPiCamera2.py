@@ -5870,9 +5870,14 @@ while True:
                                 lucky_align_enabled=bool(ls_lucky_align),
                                 lucky_score_roi_percent=float(ls_lucky_roi),
 
-                                # PNG sans stretch pour post-processing
-                                png_stretch="none",
-                                png_factor=1.0,
+                                # PNG avec stretch selon paramètres interface
+                                png_stretch=['off', 'ghs', 'asinh'][stretch_preset],
+                                png_factor=stretch_factor / 10.0,
+                                png_clip_low=stretch_p_low / 10.0,
+                                png_clip_high=stretch_p_high / 100.0,
+                                ghs_D=ghs_D / 10.0,
+                                ghs_B=ghs_B / 10.0,
+                                ghs_SP=ghs_SP / 100.0,
                                 preview_refresh=ls_preview_refresh,
                                 save_dng="none"
                             )
@@ -5987,10 +5992,14 @@ while True:
                                 lucky_align_enabled=bool(ls_lucky_align),
                                 lucky_score_roi_percent=float(ls_lucky_roi),
 
-                                # Autres paramètres (pas de stretch dans libastrostack)
-                                # NOTE: PNG sauvegardé SANS stretch pour post-processing
-                                png_stretch="none",  # Pas de stretch sur PNG final
-                                png_factor=1.0,
+                                # PNG avec stretch selon paramètres interface
+                                png_stretch=['off', 'ghs', 'asinh'][stretch_preset],
+                                png_factor=stretch_factor / 10.0,
+                                png_clip_low=stretch_p_low / 10.0,
+                                png_clip_high=stretch_p_high / 100.0,
+                                ghs_D=ghs_D / 10.0,
+                                ghs_B=ghs_B / 10.0,
+                                ghs_SP=ghs_SP / 100.0,
                                 preview_refresh=ls_preview_refresh,
                                 save_dng="none"
                             )

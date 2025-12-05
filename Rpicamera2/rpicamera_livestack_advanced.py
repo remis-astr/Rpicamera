@@ -466,12 +466,14 @@ class RPiCameraLiveStackAdvanced:
         if 'png_stretch' in kwargs:
             from libastrostack.config_advanced import StretchMethod
             stretch_map = {
+                'off': StretchMethod.OFF,
                 'linear': StretchMethod.LINEAR,
                 'asinh': StretchMethod.ASINH,
                 'log': StretchMethod.LOG,
                 'sqrt': StretchMethod.SQRT,
                 'histogram': StretchMethod.HISTOGRAM,
                 'auto': StretchMethod.AUTO,
+                'ghs': StretchMethod.GHS,
             }
             self.config.output.png_stretch_method = stretch_map.get(
                 kwargs['png_stretch'],
@@ -479,6 +481,18 @@ class RPiCameraLiveStackAdvanced:
             )
         if 'png_factor' in kwargs:
             self.config.output.png_stretch_factor = float(kwargs['png_factor'])
+        if 'png_clip_low' in kwargs:
+            self.config.output.png_clip_low = float(kwargs['png_clip_low'])
+        if 'png_clip_high' in kwargs:
+            self.config.output.png_clip_high = float(kwargs['png_clip_high'])
+
+        # Paramètres GHS
+        if 'ghs_D' in kwargs:
+            self.config.output.ghs_D = float(kwargs['ghs_D'])
+        if 'ghs_B' in kwargs:
+            self.config.output.ghs_B = float(kwargs['ghs_B'])
+        if 'ghs_SP' in kwargs:
+            self.config.output.ghs_SP = float(kwargs['ghs_SP'])
         if 'preview_refresh' in kwargs:
             self.config.preview_refresh_interval = int(kwargs['preview_refresh'])
         if 'save_dng' in kwargs:

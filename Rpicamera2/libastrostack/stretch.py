@@ -137,54 +137,113 @@ def stretch_histogram(data, clip_low=1.0, clip_high=99.5):
 def stretch_auto(data, clip_low=0.1, clip_high=99.9):
     """
     Auto-stretch adaptatif (type SIRIL)
-    
+
     Args:
         data: Image (float array)
         clip_low: Percentile bas (%)
         clip_high: Percentile haut (%)
-    
+
     Returns:
         Image étirée (0-1)
     """
     # Estimer fond du ciel
     background = np.percentile(data, 5)
     data_clean = np.maximum(data - background, 0)
-    
+
     # Percentiles adaptatifs
     vmin = np.percentile(data_clean, clip_low)
     vmax = np.percentile(data_clean, clip_high)
-    
+
     if vmax == vmin:
         return np.zeros_like(data)
-    
+
     normalized = np.clip((data_clean - vmin) / (vmax - vmin), 0, 1)
-    
+
     # Appliquer asinh doux
     factor = 5.0
     stretched = np.arcsinh(normalized * factor) / np.arcsinh(factor)
-    
+
     return stretched
+
+
+def stretch_ghs(data, D=0.0, B=0.0, SP=0.5, clip_low=0.01, clip_high=99.98):
+    """
+    Generalized Hyperbolic Stretch (GHS)
+
+    Args:
+        data: Image (float array)
+        D: Paramètre de linked stretching (-1.0 à 1.0)
+        B: Blackpoint parameter
+        SP: Symmetry point (0-1)
+        clip_low: Percentile bas (%)
+        clip_high: Percentile haut (%)
+
+    Returns:
+        Image étirée (0-1)
+    """
+    # Normaliser avec percentiles
+    vmin = np.percentile(data, clip_low)
+    vmax = np.percentile(data, clip_high)
+
+    if vmax == vmin:
+        return np.zeros_like(data)
+
+    img_normalized = np.clip((data - vmin) / (vmax - vmin), 0, 1)
+
+    # Calcul de l'exposant (exponent)
+    exponent = 1.0 / (1.0 + D) if D != -1 else 1.0
+
+    # Calcul du facteur d'étirement inverse
+    inv_stretchFactor = 1.0 / (1.0 + np.exp(-B))
+
+    # Appliquer GHS
+    img_stretched = np.zeros_like(img_normalized)
+
+    # Pixels au-dessus du point de symétrie
+    mask_high = img_normalized >= SP
+    if np.any(mask_high):
+        diff_high = img_normalized[mask_high] - SP
+        img_stretched[mask_high] = inv_stretchFactor * np.power(diff_high, exponent) + SP
+
+    # Pixels en-dessous du point de symétrie
+    mask_low = img_normalized < SP
+    if np.any(mask_low):
+        diff_low = SP - img_normalized[mask_low]
+        img_stretched[mask_low] = SP - inv_stretchFactor * np.power(diff_low, exponent)
+
+    # Clipper pour éviter les valeurs hors limites
+    img_stretched = np.clip(img_stretched, 0, 1)
+
+    return img_stretched
 
 
 def apply_stretch(data, method=StretchMethod.ASINH, **params):
     """
     Applique la méthode d'étirement spécifiée
-    
+
     Args:
         data: Image à étirer (float array)
-        method: Méthode ('linear', 'asinh', 'log', 'sqrt', 'histogram', 'auto')
-        **params: Paramètres (factor, clip_low, clip_high)
-    
+        method: Méthode ('off', 'linear', 'asinh', 'log', 'sqrt', 'histogram', 'auto', 'ghs')
+        **params: Paramètres (factor, clip_low, clip_high, ghs_D, ghs_B, ghs_SP)
+
     Returns:
         Image étirée (0-1)
     """
-    if method == StretchMethod.LINEAR:
+    if method == StretchMethod.OFF:
+        # Pas de stretch non-linéaire - juste normalisation linéaire avec percentiles
+        return stretch_linear(
+            data,
+            clip_low=params.get('clip_low', 0.0),
+            clip_high=params.get('clip_high', 100.0)
+        )
+
+    elif method == StretchMethod.LINEAR:
         return stretch_linear(
             data,
             clip_low=params.get('clip_low', 1.0),
             clip_high=params.get('clip_high', 99.5)
         )
-    
+
     elif method == StretchMethod.ASINH:
         return stretch_asinh(
             data,
@@ -192,7 +251,7 @@ def apply_stretch(data, method=StretchMethod.ASINH, **params):
             clip_low=params.get('clip_low', 1.0),
             clip_high=params.get('clip_high', 99.5)
         )
-    
+
     elif method == StretchMethod.LOG:
         return stretch_log(
             data,
@@ -200,21 +259,31 @@ def apply_stretch(data, method=StretchMethod.ASINH, **params):
             clip_low=params.get('clip_low', 1.0),
             clip_high=params.get('clip_high', 99.5)
         )
-    
+
     elif method == StretchMethod.SQRT:
         return stretch_sqrt(
             data,
             clip_low=params.get('clip_low', 1.0),
             clip_high=params.get('clip_high', 99.5)
         )
-    
+
     elif method == StretchMethod.HISTOGRAM:
         return stretch_histogram(
             data,
             clip_low=params.get('clip_low', 1.0),
             clip_high=params.get('clip_high', 99.5)
         )
-    
+
+    elif method == StretchMethod.GHS:
+        return stretch_ghs(
+            data,
+            D=params.get('ghs_D', 0.0),
+            B=params.get('ghs_B', 0.0),
+            SP=params.get('ghs_SP', 0.5),
+            clip_low=params.get('clip_low', 0.01),
+            clip_high=params.get('clip_high', 99.98)
+        )
+
     else:  # AUTO
         return stretch_auto(
             data,

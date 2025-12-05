@@ -15,12 +15,14 @@ class AlignmentMode:
 
 class StretchMethod:
     """Méthodes d'étirement PNG"""
+    OFF = "off"                     # Pas de stretch
     LINEAR = "linear"
     ASINH = "asinh"
     LOG = "log"
     SQRT = "sqrt"
     HISTOGRAM = "histogram"
     AUTO = "auto"
+    GHS = "ghs"                     # Generalized Hyperbolic Stretch
 
 
 class QualityConfig:
@@ -68,6 +70,11 @@ class StackingConfig:
         self.png_stretch_factor = 10.0
         self.png_clip_low = 1.0           # Percentile bas (%)
         self.png_clip_high = 99.5         # Percentile haut (%)
+
+        # Paramètres GHS (Generalized Hyperbolic Stretch)
+        self.ghs_D = 0.0                  # Linked stretching parameter (-1.0 à 1.0)
+        self.ghs_B = 0.0                  # Blackpoint parameter
+        self.ghs_SP = 0.5                 # Symmetry point (0-1)
         
         # Paramètres affichage (RPiCamera)
         self.preview_refresh_interval = 5  # Rafraîchir preview toutes les N images
