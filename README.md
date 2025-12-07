@@ -12,20 +12,6 @@ This project is derived from Rpicamera.py developed by: Gordon999 (https://githu
 
 ---
 
-## Description
-
-RPiCamera provides:
-- A Pygame graphical interface for full camera control and live preview (via Picamera2).
-- Manual and automatic control of exposure, gain, white balance, gamma, noise reduction, HDR, etc.
-- Astrophotography-oriented features: long exposures (several seconds), focusing aids (HFR, FWHM, Laplacian), histograms and SNR metrics.
-- Multiple capture modes (RAW/JPG/PNG/RGB/YUV images, videos in H.264/MJPEG/YUV; YUV -> SER export for planetary imaging where supported).
-- Network streaming (TCP, UDP, RTSP).
-- GPIO support for external triggers and focus buttons.
-
-This release is optimized for the IMX585.
-
----
-
 ## Key features
 
 - Interactive Pygame GUI + Picamera2 preview
@@ -68,12 +54,6 @@ Notes:
 
 ### Python dependencies (pip)
 
-Use a virtual environment:
-```bash
-python3 -m venv ~/rpicam-venv
-source ~/rpicam-venv/bin/activate
-pip install --upgrade pip
-```
 
 Minimal Python dependencies:
 - pygame
@@ -151,7 +131,7 @@ To take full advantage of the IMX585:
 ## Live stacking (Astro Live Stacker)
 
 RPiCamera can produce image sequences (timelapse or continuous captures) compatible with Astro Live Stacker (ALS). To use ALS:
-- Configure ALS to monitor the folder where RPiCamera writes images (prefer a USB drive for performance).
+- Configure ALS to monitor the folder where RPiCamera writes images (prefer a USB drive for edit the photos in software).
 - Use TIMELAPSE or continuous capture modes depending on your workflow.
 
 ---
@@ -159,7 +139,7 @@ RPiCamera can produce image sequences (timelapse or continuous captures) compati
 ## Astrophotography / SER format
 
 - SER is commonly used for planetary imaging. The project provides YUV->SER export for certain capture modes and resolutions where applicable.
-- 87 FPS acquisition mode is available in zoom/ROI mode. Use fast storage (SD/USB/SSD) to avoid dropped frames.
+- 87 FPS acquisition mode is available in zoom/ROI mode. Use fast storage (SD/SSD) to avoid dropped frames.
 
 ---
 
@@ -195,4 +175,4 @@ I don't own a smart telescope, but I caught mine thinking about what it wanted t
 
 <img src="5.jpg" alt="Preview Mode" width="400">
 
-This little guy is amazing; the only limit is my imagination.
+This little guy is amazing;
