@@ -171,7 +171,7 @@ This project includes the original copyright header from Gordon999. Check the `L
 
 - ---------------------------------------------------------------------------
 
-I don't own a smart telescope, but I caught mine thinking about what it wanted to be. I managed to take a picture of it doing just that.
+I don't own a smart telescope, but I caught mine thinking about what he wanted to be. I managed to take a picture of him doing just that.
 
 <img src="5.jpg" alt="Preview Mode" width="400">
 
