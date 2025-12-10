@@ -336,11 +336,15 @@ class RPiCameraLiveStackAdvanced:
             new_size = int(kwargs['lucky_buffer_size'])
             old_size = self.config.lucky.buffer_size
             self.config.lucky.buffer_size = new_size
-            # NOTE: buffer_size ne peut pas être changé dynamiquement (nécessite restart)
-            print(f"[LUCKY] Buffer size: {old_size} → {new_size}")
+            # Mise à jour dynamique : recréer le buffer avec la nouvelle taille
+            print(f"[DEBUG LIVESTACK] lucky_buffer_size reçu: {old_size} → {new_size}")
+            print(f"[DEBUG LIVESTACK] self.lucky_stacker={self.lucky_stacker}, self.is_running={self.is_running}")
             if self.lucky_stacker and self.is_running:
-                print(f"[LUCKY] ⚠️  AVERTISSEMENT: Le buffer est déjà créé avec {old_size} images")
-                print(f"[LUCKY] ⚠️  Arrêtez et redémarrez Lucky Stack pour appliquer la nouvelle taille ({new_size})")
+                print(f"[DEBUG LIVESTACK] Appel self.lucky_stacker.configure(buffer_size={new_size})")
+                self.lucky_stacker.configure(buffer_size=new_size)
+                print(f"[LUCKY] ✓ Buffer recréé avec {new_size} images (anciennes données perdues)")
+            else:
+                print(f"[DEBUG LIVESTACK] ÉCHEC - lucky_stacker non actif ou non running")
 
         if 'lucky_keep_percent' in kwargs:
             new_percent = float(kwargs['lucky_keep_percent'])

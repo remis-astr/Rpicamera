@@ -800,9 +800,15 @@ class LuckyImagingStacker:
         """
         if 'buffer_size' in kwargs:
             new_size = int(kwargs['buffer_size'])
+            print(f"[DEBUG LUCKY_IMAGING] buffer_size reçu: {self.config.buffer_size} → {new_size}")
             if new_size != self.config.buffer_size:
+                old_buffer_size = self.config.buffer_size
                 self.config.buffer_size = new_size
                 self.buffer = FrameBuffer(new_size)
+                print(f"[DEBUG LUCKY_IMAGING] ✓ Buffer recréé: {old_buffer_size} → {new_size} images")
+                print(f"[DEBUG LUCKY_IMAGING] Nouveau buffer capacity: {self.buffer.capacity}")
+            else:
+                print(f"[DEBUG LUCKY_IMAGING] Taille inchangée ({new_size}), buffer non recréé")
         
         if 'keep_percent' in kwargs:
             self.config.keep_percent = float(kwargs['keep_percent'])

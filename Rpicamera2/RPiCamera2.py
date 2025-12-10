@@ -36,6 +36,9 @@ from gpiozero import Button
 from gpiozero import LED
 import struct
 from collections import deque
+
+# Cache global pour les polices pygame (optimisation performance)
+_font_cache = {}
 import threading
 import matplotlib
 matplotlib.use('Agg')  # Backend sans affichage pour éviter conflits avec pygame
@@ -205,129 +208,6 @@ def resume_picamera2():
             return False
     print("[DEBUG] Picamera2 not resumed (not in use)")
     return False
-
-# ============================================================================
-# Extracteur MJPEG intégré - Gère le flux continu en arrière-plan
-# ============================================================================
-class MJPEGExtractor:
-    """
-    Extracteur de frames MJPEG en thread - Version simplifiée
-    Lit un flux MJPEG continu et extrait chaque JPEG dans des fichiers séparés
-    Gère automatiquement la rotation des fichiers stream.mjpeg
-    Le nettoyage des anciennes frames est fait par la boucle principale
-    """
-    def __init__(self, input_file, output_pattern, max_files=10):
-        self.input_file = input_file
-        self.output_pattern = output_pattern
-        self.max_files = max_files
-        self.running = False
-        self.thread = None
-        self.frame_counter = 0
-        
-    def start(self):
-        """Démarre l'extraction en arrière-plan"""
-        if self.running:
-            return
-        self.running = True
-        self.thread = threading.Thread(target=self._extract_loop, daemon=True)
-        self.thread.start()
-        
-    def stop(self):
-        """Arrête l'extraction"""
-        self.running = False
-        if self.thread:
-            self.thread.join(timeout=1.0)
-            
-    def _extract_loop(self):
-        """Boucle d'extraction principale"""
-        # Marqueurs JPEG
-        JPEG_START = b'\xff\xd8'
-        JPEG_END = b'\xff\xd9'
-        
-        buffer = b''
-        last_inode = None
-        f = None
-        consecutive_empty_reads = 0
-        
-        while self.running:
-            try:
-                # Vérifier si le fichier existe et a été recréé (nouveau inode)
-                if os.path.exists(self.input_file):
-                    current_inode = os.stat(self.input_file).st_ino
-                    
-                    # Rouvrir le fichier si nouveau ou première ouverture
-                    if last_inode is None or current_inode != last_inode:
-                        if f:
-                            f.close()
-                        f = open(self.input_file, 'rb')
-                        last_inode = current_inode
-                        consecutive_empty_reads = 0
-                        buffer = b''  # Réinitialiser le buffer
-                else:
-                    # Fichier n'existe pas encore, attendre
-                    time.sleep(0.1)
-                    continue
-                    
-                # Lire par blocs
-                chunk = f.read(131072)
-                if not chunk:
-                    consecutive_empty_reads += 1
-                    # Si trop de lectures vides, revérifier si fichier a changé
-                    if consecutive_empty_reads > 100:
-                        consecutive_empty_reads = 0
-                        last_inode = None  # Forcer réouverture au prochain tour
-                    time.sleep(0.001)
-                    continue
-                
-                consecutive_empty_reads = 0
-                buffer += chunk
-                
-                # Chercher et extraire tous les JPEG complets dans le buffer
-                while self.running:
-                    start = buffer.find(JPEG_START)
-                    if start == -1:
-                        # Garder les derniers octets au cas où le marqueur est coupé
-                        buffer = buffer[-2:] if len(buffer) > 2 else buffer
-                        break
-                    
-                    end = buffer.find(JPEG_END, start + 2)
-                    if end == -1:
-                        # JPEG incomplet, attendre plus de données
-                        break
-                    
-                    # Extraire le JPEG complet
-                    jpeg_data = buffer[start:end+2]
-
-                    # Numérotation séquentielle (évite les boucles d'images)
-                    output_file = self.output_pattern % self.frame_counter
-                    temp_file = output_file + ".tmp"
-                    try:
-                        # Double buffering: écrire dans un fichier temporaire
-                        with open(temp_file, 'wb') as out:
-                            out.write(jpeg_data)
-                        # Rename atomique pour garantir qu'on ne lit jamais une image partielle
-                        os.rename(temp_file, output_file)
-
-                        # Le nettoyage des anciennes images est maintenant fait par la boucle principale
-                        # Cela évite les race conditions et garantit qu'on ne supprime jamais
-                        # l'image en cours d'affichage
-                    except:
-                        pass
-
-                    self.frame_counter += 1
-                    
-                    # Enlever ce JPEG du buffer
-                    buffer = buffer[end+2:]
-                    
-            except Exception as e:
-                # En cas d'erreur, attendre un peu et réessayer
-                time.sleep(0.1)
-                continue
-        
-        # Nettoyage à l'arrêt
-        if f:
-            f.close()
-
 
 
 def create_ser_header(width, height, pixel_depth=8, color_id=100):
@@ -677,6 +557,49 @@ def calculate_snr(image):
     except:
         return 0.0
 
+def calculate_focus(gray_image, method):
+    """
+    Calcule le focus selon différentes méthodes
+
+    Args:
+        gray_image: image en niveaux de gris (numpy array)
+        method: 0=OFF, 1=Laplacian, 2=Gradient, 3=Sobel, 4=Tenengrad
+
+    Returns:
+        valeur de focus (float) ou 0.0 si erreur/OFF
+    """
+    if method == 0:  # OFF
+        return 0.0
+
+    try:
+        if method == 1:  # Laplacian variance
+            return cv2.Laplacian(gray_image, cv2.CV_64F).var()
+
+        elif method == 2:  # Gradient magnitude variance
+            gx = cv2.Sobel(gray_image, cv2.CV_64F, 1, 0, ksize=3)
+            gy = cv2.Sobel(gray_image, cv2.CV_64F, 0, 1, ksize=3)
+            gradient_mag = np.sqrt(gx**2 + gy**2)
+            return gradient_mag.var()
+
+        elif method == 3:  # Sobel variance
+            sobelx = cv2.Sobel(gray_image, cv2.CV_64F, 1, 0, ksize=3)
+            sobely = cv2.Sobel(gray_image, cv2.CV_64F, 0, 1, ksize=3)
+            sobel = np.abs(sobelx) + np.abs(sobely)
+            return sobel.var()
+
+        elif method == 4:  # Tenengrad (normalized)
+            gx = cv2.Sobel(gray_image, cv2.CV_64F, 1, 0, ksize=3)
+            gy = cv2.Sobel(gray_image, cv2.CV_64F, 0, 1, ksize=3)
+            tenengrad = gx**2 + gy**2
+            # Pour cohérence avec les autres méthodes qui utilisent .var(),
+            # on calcule la variance de sqrt(tenengrad) = variance de la magnitude
+            return np.sqrt(tenengrad).var()
+
+        else:
+            return 0.0
+    except:
+        return 0.0
+
 def calculate_hfr(image_surface, center_x, center_y, area_size):
     """
     Calcule le HFR (Half Flux Radius) - rayon contenant 50% du flux
@@ -802,6 +725,7 @@ vlen        = 10   # video length in seconds
 fps         = 15   # video fps - Réduit pour IMX585
 vformat     = 10   # set video format (10 = 1920x1080), see vwidths & vheights below
 codec       = 0    # set video codec  (0 = h264), see codecs below
+flicker     = 0    # anti-flicker mode (0=OFF, 1=50Hz, 2=60Hz, 3=AUTO)
 tinterval   = 5.0   # time between timelapse shots in seconds
 tshots      = 10   # number of timelapse shots
 saturation  = 10   # picture colour saturation
@@ -878,9 +802,22 @@ stretch_p_low = 0    # Percentile bas pour stretch (0% à 0.2%, stocké x10 pour
 stretch_p_high = 9998 # Percentile haut pour stretch (99.95% à 100%, stocké x100 pour slider)
 stretch_factor = 25 # Facteur de stretch (0 à 5, stocké x10 pour slider)
 stretch_preset = 0   # Préréglage stretch: 0=OFF, 1=GHS, 2=Arcsinh
-ghs_D = 0      # GHS: Linked stretching parameter D (-1.0 à 1.0, stocké x10 pour slider)
-ghs_B = 0      # GHS: Highlights/Shadows balance B (-30.0 à 10.0, stocké x10 pour slider)
-ghs_SP = 0     # GHS: Symmetry Point SP (0.0 à 1.0, stocké x100 pour slider)
+# GHS Parameters (conforme Siril/PixInsight) - Phase 2
+ghs_D = 20     # Stretch factor: 0-50 -> 0.0-5.0 (défaut 2.0 pour galaxies)
+ghs_b = 60     # Local intensity: -50 à 150 -> -5.0 à 15.0 (défaut 6.0)
+ghs_SP = 15    # Symmetry point: 0-100 -> 0.0-1.0 (défaut 0.15)
+ghs_LP = 0     # Protect shadows: 0-100 -> 0.0-1.0 (défaut 0.0)
+ghs_HP = 85    # Protect highlights: 0-100 -> 0.0-1.0 (défaut 0.85)
+ghs_preset = 1 # 0=Manual, 1=Galaxies, 2=Nébuleuses, 3=Étirement initial
+ghs_presets = ['Manual', 'Galaxies', 'Nebulae', 'Initial']
+# METRICS Settings - Phase 2 Demande 5 et 6
+focus_method = 1        # 0=OFF, 1=Laplacian, 2=Gradient, 3=Sobel, 4=Tenengrad
+star_metric = 1         # 0=OFF, 1=HFR, 2=FWHM
+snr_display = 0         # 0=OFF, 1=ON
+metrics_interval = 3    # 1-10 frames (calcul métriques tous les N frames)
+focus_methods = ['OFF', 'Laplacian', 'Gradient', 'Sobel', 'Tenengrad']
+star_metrics = ['OFF', 'HFR', 'FWHM']
+metrics_frame_counter = 0  # Compteur pour calcul métriques tous les N frames
 fwhm_history = deque(maxlen=240)
 fwhm_times = deque(maxlen=240)
 fwhm_start_time = 0
@@ -896,7 +833,10 @@ focus_times = deque(maxlen=240)
 focus_start_time = 0
 focus_fig = None
 focus_ax = None
-mjpeg_extractor = None  # Instance de l'extracteur MJPEG
+# Optimisation matplotlib - Phase 2 Demande 7
+_focus_frame_counter = 0
+_hfr_fwhm_frame_counter = 0
+_graphs_update_interval = 2  # Mettre à jour 1 frame sur 2 (réduction mémoire ~80%)
 p = None  # Subprocess rpicam-vid (None en mode Picamera2)
 
 # Picamera2 variables
@@ -944,8 +884,7 @@ planetary_modes = ['Disk', 'Surface', 'Hybrid']
 planetary_windows = [128, 256, 512]
 
 # Lucky Imaging parameters
-ls_lucky_enable = 0  # 0=off, 1=on
-ls_lucky_buffer = 100  # Taille buffer (50-500)
+ls_lucky_buffer = 10  # Taille buffer (10-200)
 ls_lucky_keep = 10  # % à garder (1-50)
 ls_lucky_score = 0  # 0=laplacian, 1=gradient, 2=sobel, 3=tenengrad
 ls_lucky_stack = 0  # 0=mean, 1=median, 2=sigma_clip
@@ -1135,11 +1074,12 @@ if Pi == 5:
 
 still_limits = ['mode',0,len(modes)-1,'speed',0,len(shutters)-1,'gain',0,30,'brightness',-100,100,'contrast',0,200,'ev',-10,10,'blue',1,80,'sharpness',0,30,
                 'denoise',0,len(denoises)-1,'quality',0,100,'red',1,80,'extn',0,len(extns)-1,'saturation',0,20,'meter',0,len(meters)-1,'awb',0,len(awbs)-1,
-                'histogram',0,len(histograms)-1,'v3_f_speed',0,len(v3_f_speeds)-1]
+                'histogram',0,len(histograms)-1,'v3_f_speed',0,len(v3_f_speeds)-1,'focus_method',0,4,'star_metric',0,2,'snr_display',0,1,'metrics_interval',1,10]
 video_limits = ['vlen',0,3600,'fps',1,40,'v5_focus',10,2500,'vformat',0,7,'0',0,0,'zoom',0,5,'Focus',0,1,'tduration',1,86400,'tinterval',0.01,10,'tshots',1,999,
                 'flicker',0,3,'codec',0,len(codecs)-1,'profile',0,len(h264profiles)-1,'v3_focus',10,2000,'histarea',10,300,'v3_f_range',0,len(v3_f_ranges)-1,
                 'str_cap',0,len(strs)-1,'v6_focus',10,1020,'stretch_p_low',0,2,'stretch_p_high',9995,10000,'stretch_factor',0,50,'stretch_preset',0,2,
-                'ghs_D',-10,10,'ghs_B',-300,100,'ghs_SP',0,100,'use_native_sensor_mode',0,1]
+                'ghs_D',-10,10,'ghs_b',-300,100,'ghs_SP',0,100,'ghs_LP',0,100,'ghs_HP',0,100,'ghs_preset',0,3,'use_native_sensor_mode',0,1,
+                'focus_method',0,4,'star_metric',0,2,'snr_display',0,1,'metrics_interval',1,10]
 
 livestack_limits = [
     # Existants
@@ -1169,8 +1109,7 @@ livestack_limits = [
     'ls_planetary_corr',10,90,
     'ls_planetary_max_shift',10,200,
     # Lucky Imaging
-    'ls_lucky_enable',0,1,
-    'ls_lucky_buffer',50,500,
+    'ls_lucky_buffer',10,200,
     'ls_lucky_keep',1,50,
     'ls_lucky_score',0,3,
     'ls_lucky_stack',0,2,
@@ -1181,18 +1120,20 @@ livestack_limits = [
 # check config_file exists, if not then write default values
 titles = ['mode','speed','gain','brightness','contrast','frame','red','blue','ev','vlen','fps','vformat','codec','tinterval','tshots','extn','zx','zy','zoom','saturation',
           'meter','awb','sharpness','denoise','quality','profile','level','histogram','histarea','v3_f_speed','v3_f_range','rotate','IRF','str_cap','v3_hdr','timet','vflip','hflip',
-          'stretch_p_low','stretch_p_high','stretch_factor','stretch_preset','ghs_D','ghs_B','ghs_SP',
+          'stretch_p_low','stretch_p_high','stretch_factor','stretch_preset','ghs_D','ghs_b','ghs_SP','ghs_LP','ghs_HP','ghs_preset',
           'ls_preview_refresh','ls_alignment_mode','ls_enable_qc','ls_max_fwhm','ls_min_sharpness','ls_max_drift','ls_min_stars',
           'ls_stack_method','ls_stack_kappa','ls_stack_iterations',
           'ls_planetary_enable','ls_planetary_mode','ls_planetary_disk_min','ls_planetary_disk_max','ls_planetary_threshold','ls_planetary_margin','ls_planetary_ellipse','ls_planetary_window','ls_planetary_upsample','ls_planetary_highpass','ls_planetary_roi_center','ls_planetary_corr','ls_planetary_max_shift',
-          'ls_lucky_enable','ls_lucky_buffer','ls_lucky_keep','ls_lucky_score','ls_lucky_stack','ls_lucky_align','ls_lucky_roi','use_native_sensor_mode']
+          'ls_lucky_buffer','ls_lucky_keep','ls_lucky_score','ls_lucky_stack','ls_lucky_align','ls_lucky_roi','use_native_sensor_mode',
+          'focus_method','star_metric','snr_display','metrics_interval']
 points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat,codec,tinterval,tshots,extn,zx,zy,zoom,saturation,
           meter,awb,sharpness,denoise,quality,profile,level,histogram,histarea,v3_f_speed,v3_f_range,rotate,IRF,str_cap,v3_hdr,timet,vflip,hflip,
-          stretch_p_low,stretch_p_high,stretch_factor,stretch_preset,ghs_D,ghs_B,ghs_SP,
+          stretch_p_low,stretch_p_high,stretch_factor,stretch_preset,ghs_D,ghs_b,ghs_SP,ghs_LP,ghs_HP,ghs_preset,
           ls_preview_refresh,ls_alignment_mode,ls_enable_qc,ls_max_fwhm,ls_min_sharpness,ls_max_drift,ls_min_stars,
           ls_stack_method,ls_stack_kappa,ls_stack_iterations,
           ls_planetary_enable,ls_planetary_mode,ls_planetary_disk_min,ls_planetary_disk_max,ls_planetary_threshold,ls_planetary_margin,ls_planetary_ellipse,ls_planetary_window,ls_planetary_upsample,ls_planetary_highpass,ls_planetary_roi_center,ls_planetary_corr,ls_planetary_max_shift,
-          ls_lucky_enable,ls_lucky_buffer,ls_lucky_keep,ls_lucky_score,ls_lucky_stack,ls_lucky_align,ls_lucky_roi,use_native_sensor_mode]
+          ls_lucky_buffer,ls_lucky_keep,ls_lucky_score,ls_lucky_stack,ls_lucky_align,ls_lucky_roi,use_native_sensor_mode,
+          focus_method,star_metric,snr_display,metrics_interval]
 if not os.path.exists(config_file):
     with open(config_file, 'w') as f:
         for item in range(0,len(titles)):
@@ -1263,121 +1204,192 @@ if len(config) <= 41:
 if len(config) <= 42:
     config.append(0)     # ghs_D par défaut (0.0)
 if len(config) <= 43:
-    config.append(0)     # ghs_B par défaut (0.0)
+    config.append(0)     # ghs_b par défaut (0.0)
 if len(config) <= 44:
     config.append(0)     # ghs_SP par défaut (0.0)
+if len(config) <= 45:
+    config.append(0)     # ghs_LP par défaut (0.0)
+if len(config) <= 46:
+    config.append(85)    # ghs_HP par défaut (0.85)
+if len(config) <= 47:
+    config.append(1)     # ghs_preset par défaut (Galaxies)
 
 stretch_p_low    = config[38]
 stretch_p_high   = config[39]
 stretch_factor   = config[40]
 stretch_preset   = config[41]
 ghs_D            = config[42]
-ghs_B            = config[43]
+ghs_b            = config[43]
 ghs_SP           = config[44]
+ghs_LP           = config[45]
+ghs_HP           = config[46]
+ghs_preset       = config[47]
 
-# Ajouter les paramètres livestack si le fichier de config est ancien (indices décalés de +3)
-if len(config) <= 45:
-    config.append(5)     # ls_preview_refresh par défaut
-if len(config) <= 46:
-    config.append(2)     # ls_alignment_mode par défaut (rotation)
-if len(config) <= 47:
-    config.append(0)     # ls_enable_qc par défaut (désactivé)
+# Ajouter les paramètres livestack si le fichier de config est ancien (indices décalés de +3 à cause de ghs_LP, ghs_HP, ghs_preset)
 if len(config) <= 48:
-    config.append(170)   # ls_max_fwhm par défaut (17.0)
+    config.append(5)     # ls_preview_refresh par défaut
 if len(config) <= 49:
-    config.append(70)    # ls_min_sharpness par défaut (0.070)
+    config.append(2)     # ls_alignment_mode par défaut (rotation)
 if len(config) <= 50:
-    config.append(2500)  # ls_max_drift par défaut
+    config.append(0)     # ls_enable_qc par défaut (désactivé)
 if len(config) <= 51:
+    config.append(170)   # ls_max_fwhm par défaut (17.0)
+if len(config) <= 52:
+    config.append(70)    # ls_min_sharpness par défaut (0.070)
+if len(config) <= 53:
+    config.append(2500)  # ls_max_drift par défaut
+if len(config) <= 54:
     config.append(10)    # ls_min_stars par défaut
 
 # Ajouter les nouveaux paramètres si le fichier de config est ancien
-if len(config) <= 52:
-    config.append(0)     # ls_stack_method par défaut (mean)
-if len(config) <= 53:
-    config.append(25)    # ls_stack_kappa par défaut (2.5)
-if len(config) <= 54:
-    config.append(3)     # ls_stack_iterations par défaut
 if len(config) <= 55:
-    config.append(0)     # ls_planetary_enable par défaut (off)
+    config.append(0)     # ls_stack_method par défaut (mean)
 if len(config) <= 56:
-    config.append(1)     # ls_planetary_mode par défaut (surface)
+    config.append(25)    # ls_stack_kappa par défaut (2.5)
 if len(config) <= 57:
-    config.append(50)    # ls_planetary_disk_min
+    config.append(3)     # ls_stack_iterations par défaut
 if len(config) <= 58:
-    config.append(500)   # ls_planetary_disk_max
+    config.append(0)     # ls_planetary_enable par défaut (off)
 if len(config) <= 59:
-    config.append(30)    # ls_planetary_threshold
+    config.append(1)     # ls_planetary_mode par défaut (surface)
 if len(config) <= 60:
-    config.append(10)    # ls_planetary_margin
+    config.append(50)    # ls_planetary_disk_min
 if len(config) <= 61:
-    config.append(0)     # ls_planetary_ellipse
+    config.append(500)   # ls_planetary_disk_max
 if len(config) <= 62:
-    config.append(1)     # ls_planetary_window (256)
+    config.append(30)    # ls_planetary_threshold
 if len(config) <= 63:
-    config.append(10)    # ls_planetary_upsample
+    config.append(10)    # ls_planetary_margin
 if len(config) <= 64:
-    config.append(1)     # ls_planetary_highpass
+    config.append(0)     # ls_planetary_ellipse
 if len(config) <= 65:
-    config.append(1)     # ls_planetary_roi_center
+    config.append(1)     # ls_planetary_window (256)
 if len(config) <= 66:
-    config.append(30)    # ls_planetary_corr (0.30)
+    config.append(10)    # ls_planetary_upsample
 if len(config) <= 67:
-    config.append(100)   # ls_planetary_max_shift
+    config.append(1)     # ls_planetary_highpass
 if len(config) <= 68:
-    config.append(0)     # ls_lucky_enable par défaut (off)
+    config.append(1)     # ls_planetary_roi_center
 if len(config) <= 69:
-    config.append(100)   # ls_lucky_buffer
+    config.append(30)    # ls_planetary_corr (0.30)
 if len(config) <= 70:
-    config.append(10)    # ls_lucky_keep (10%)
+    config.append(100)   # ls_planetary_max_shift
 if len(config) <= 71:
-    config.append(0)     # ls_lucky_score (laplacian)
+    config.append(10)    # ls_lucky_buffer (10 images)
 if len(config) <= 72:
-    config.append(0)     # ls_lucky_stack (mean)
+    config.append(10)    # ls_lucky_keep (10%)
 if len(config) <= 73:
-    config.append(1)     # ls_lucky_align (on)
+    config.append(0)     # ls_lucky_score (laplacian)
 if len(config) <= 74:
+    config.append(0)     # ls_lucky_stack (mean)
+if len(config) <= 75:
+    config.append(1)     # ls_lucky_align (on)
+if len(config) <= 76:
     config.append(50)    # ls_lucky_roi (50%)
+if len(config) <= 77:
+    config.append(0)     # use_native_sensor_mode par défaut (binning)
 
-ls_preview_refresh = config[45]
-ls_alignment_mode  = config[46]
-ls_enable_qc       = config[47]
-ls_max_fwhm        = config[48]
-ls_min_sharpness   = config[49]
-ls_max_drift       = config[50]
-ls_min_stars       = config[51]
+# Ajouter les paramètres METRICS si le fichier de config est ancien
+if len(config) <= 78:
+    config.append(1)     # focus_method par défaut (Laplacian)
+if len(config) <= 79:
+    config.append(1)     # star_metric par défaut (HFR)
+if len(config) <= 80:
+    config.append(0)     # snr_display par défaut (OFF)
+if len(config) <= 81:
+    config.append(3)     # metrics_interval par défaut (3 frames)
 
-ls_stack_method    = config[52]
-ls_stack_kappa     = config[53]
-ls_stack_iterations = config[54]
+ls_preview_refresh = config[48]
+ls_alignment_mode  = config[49]
+ls_enable_qc       = config[50]
+ls_max_fwhm        = config[51]
+ls_min_sharpness   = config[52]
+ls_max_drift       = config[53]
+ls_min_stars       = config[54]
 
-ls_planetary_enable = config[55]
-ls_planetary_mode   = config[56]
-ls_planetary_disk_min = config[57]
-ls_planetary_disk_max = config[58]
-ls_planetary_threshold = config[59]
-ls_planetary_margin = config[60]
-ls_planetary_ellipse = config[61]
-ls_planetary_window = config[62]
-ls_planetary_upsample = config[63]
-ls_planetary_highpass = config[64]
-ls_planetary_roi_center = config[65]
-ls_planetary_corr   = config[66]
-ls_planetary_max_shift = config[67]
+ls_stack_method    = config[55]
+ls_stack_kappa     = config[56]
+ls_stack_iterations = config[57]
 
-ls_lucky_enable    = config[68]
-ls_lucky_buffer    = config[69]
-ls_lucky_keep      = config[70]
-ls_lucky_score     = config[71]
-ls_lucky_stack     = config[72]
-ls_lucky_align     = config[73]
-ls_lucky_roi       = config[74]
-use_native_sensor_mode = config[75] if len(config) > 75 else 0  # Compatibilité avec anciens fichiers config
+ls_planetary_enable = config[58]
+ls_planetary_mode   = config[59]
+ls_planetary_disk_min = config[60]
+ls_planetary_disk_max = config[61]
+ls_planetary_threshold = config[62]
+ls_planetary_margin = config[63]
+ls_planetary_ellipse = config[64]
+ls_planetary_window = config[65]
+ls_planetary_upsample = config[66]
+ls_planetary_highpass = config[67]
+ls_planetary_roi_center = config[68]
+ls_planetary_corr   = config[69]
+ls_planetary_max_shift = config[70]
 
-# Étendre config à 76 éléments si nécessaire (pour use_native_sensor_mode)
-while len(config) < 76:
+ls_lucky_buffer    = config[71]
+ls_lucky_keep      = config[72]
+ls_lucky_score     = config[73]
+ls_lucky_stack     = config[74]
+ls_lucky_align     = config[75]
+ls_lucky_roi       = config[76]
+use_native_sensor_mode = config[77] if len(config) > 77 else 0
+
+focus_method       = config[78] if len(config) > 78 else 1
+star_metric        = config[79] if len(config) > 79 else 1
+snr_display        = config[80] if len(config) > 80 else 0
+metrics_interval   = config[81] if len(config) > 81 else 3
+
+# VALIDATION GLOBALE - S'assurer que TOUTES les valeurs sont dans les limites correctes
+# pour éviter les IndexError et les valeurs invalides
+
+# Live Stack parameters
+ls_preview_refresh = max(1, min(ls_preview_refresh, 10))
+ls_alignment_mode = max(0, min(ls_alignment_mode, 2))
+ls_enable_qc = max(0, min(ls_enable_qc, 1))
+ls_max_fwhm = max(0, min(ls_max_fwhm, 300))
+ls_min_sharpness = max(0, min(ls_min_sharpness, 200))
+ls_max_drift = max(0, min(ls_max_drift, 5000))
+ls_min_stars = max(0, min(ls_min_stars, 20))
+
+# Stacking parameters
+ls_stack_method = max(0, min(ls_stack_method, 4))  # 0-4: mean/median/kappa/winsorized/weighted
+ls_stack_kappa = max(10, min(ls_stack_kappa, 40))
+ls_stack_iterations = max(1, min(ls_stack_iterations, 10))
+
+# Planetary parameters
+ls_planetary_enable = max(0, min(ls_planetary_enable, 1))
+ls_planetary_mode = max(0, min(ls_planetary_mode, 2))  # 0-2: disk/surface/hybrid
+ls_planetary_disk_min = max(10, min(ls_planetary_disk_min, 200))
+ls_planetary_disk_max = max(50, min(ls_planetary_disk_max, 1000))
+ls_planetary_threshold = max(10, min(ls_planetary_threshold, 100))
+ls_planetary_margin = max(5, min(ls_planetary_margin, 50))
+ls_planetary_ellipse = max(0, min(ls_planetary_ellipse, 1))
+ls_planetary_window = max(0, min(ls_planetary_window, 2))  # 0-2: index dans planetary_windows
+ls_planetary_upsample = max(5, min(ls_planetary_upsample, 20))
+ls_planetary_highpass = max(0, min(ls_planetary_highpass, 1))
+ls_planetary_roi_center = max(0, min(ls_planetary_roi_center, 1))
+ls_planetary_corr = max(10, min(ls_planetary_corr, 100))
+ls_planetary_max_shift = max(10, min(ls_planetary_max_shift, 500))
+
+# Lucky Imaging parameters
+ls_lucky_buffer = max(10, min(ls_lucky_buffer, 200))
+ls_lucky_keep = max(1, min(ls_lucky_keep, 50))
+ls_lucky_score = max(0, min(ls_lucky_score, 3))  # 0-3: laplacian/gradient/sobel/tenengrad
+ls_lucky_stack = max(0, min(ls_lucky_stack, 2))  # 0-2: mean/median/sigma_clip
+ls_lucky_align = max(0, min(ls_lucky_align, 1))
+ls_lucky_roi = max(20, min(ls_lucky_roi, 100))
+
+# Metrics parameters
+focus_method = max(0, min(focus_method, 4))  # 0-4: OFF/Laplacian/Gradient/Sobel/Tenengrad
+star_metric = max(0, min(star_metric, 2))    # 0-2: OFF/HFR/FWHM
+snr_display = max(0, min(snr_display, 1))    # 0-1: OFF/ON
+metrics_interval = max(1, min(metrics_interval, 10))  # 1-10 frames
+
+# Sensor mode
+use_native_sensor_mode = max(0, min(use_native_sensor_mode, 1))  # 0-1: Binning/Native
+
+# Étendre config à 82 éléments si nécessaire
+while len(config) < 82:
     config.append(0)
-config[75] = use_native_sensor_mode
 
 if codec > len(codecs)-1:
     codec = 0
@@ -1727,22 +1739,28 @@ def text(col,row,fColor,top,upd,msg,fsize,bkgnd_Color):
     by = row * bh
     if menu == 0 and row < 3:
         by +=10
-    # Polices modernes en ordre de préférence
-    modern_fonts = [
-        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',           # Police sans-serif moderne et lisible
-        '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',  # Alternative clean
-        '/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf',  # Version condensée
-        '/usr/share/fonts/truetype/freefont/FreeSerif.ttf'           # Fallback original
-    ]
+    global _font_cache
     
-    fontObj = None
-    for font_path in modern_fonts:
-        if os.path.exists(font_path):
-            fontObj = pygame.font.Font(font_path, int(fsize))
-            break
+    # Utiliser le cache des polices (clé = taille) - optimisation performance
+    cache_key = int(fsize)
+    if cache_key not in _font_cache:
+        # Polices modernes en ordre de préférence
+        modern_fonts = [
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+            '/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf',
+            '/usr/share/fonts/truetype/freefont/FreeSerif.ttf'
+        ]
+        
+        for font_path in modern_fonts:
+            if os.path.exists(font_path):
+                _font_cache[cache_key] = pygame.font.Font(font_path, cache_key)
+                break
+        
+        if cache_key not in _font_cache:
+            _font_cache[cache_key] = pygame.font.Font(None, cache_key)
     
-    if fontObj is None:
-        fontObj = pygame.font.Font(None, int(fsize))  # Police système par défaut
+    fontObj = _font_cache[cache_key]
     msgSurfaceObj = fontObj.render(msg, False, Color)
     msgRectobj = msgSurfaceObj.get_rect()
     if top == 0:
@@ -2125,6 +2143,7 @@ def init_focus_graph():
 def update_focus_graph(focus_val):
     """Met à jour le graphique Focus et retourne une surface pygame"""
     global focus_history, focus_times, focus_start_time, focus_fig, focus_ax
+    global _focus_frame_counter, _graphs_update_interval
 
     if focus_val is None or focus_val == 0:
         return None
@@ -2139,7 +2158,17 @@ def update_focus_graph(focus_val):
     if len(focus_history) < 2:
         return None
 
-    fig, ax = init_focus_graph()
+    # Optimisation Phase 2 Demande 7 : Limiter la fréquence de mise à jour
+    _focus_frame_counter += 1
+    if _focus_frame_counter < _graphs_update_interval:
+        return None
+    _focus_frame_counter = 0
+
+    # Optimisation Phase 2 Demande 7 : Réutiliser fig/ax au lieu de recréer
+    if focus_fig is None or focus_ax is None:
+        fig, ax = init_focus_graph()
+    else:
+        fig, ax = focus_fig, focus_ax
     ax.clear()
 
     # Zones de qualité Focus avec gradients subtils
@@ -2197,6 +2226,8 @@ def update_combined_hfr_fwhm_graph(hfr_val, fwhm_val):
     """Met à jour un graphique combiné HFR+FWHM et retourne une surface pygame"""
     global hfr_history, hfr_times, hfr_start_time
     global fwhm_history, fwhm_times, fwhm_start_time
+    global hfr_fig, hfr_ax, fwhm_fig, fwhm_ax
+    global _hfr_fwhm_frame_counter, _graphs_update_interval
 
     # Synchroniser les temps de départ
     if hfr_start_time == 0 and fwhm_start_time == 0:
@@ -2220,10 +2251,22 @@ def update_combined_hfr_fwhm_graph(hfr_val, fwhm_val):
     if len(hfr_history) < 2 and len(fwhm_history) < 2:
         return None
 
-    # Créer le graphique avec double axe Y
-    fig, ax1 = plt.subplots(figsize=(6, 3), dpi=100)
-    fig.patch.set_facecolor('#1a1a1a')
-    ax1.set_facecolor('#0a0a0a')
+    # Optimisation Phase 2 Demande 7 : Limiter la fréquence de mise à jour
+    _hfr_fwhm_frame_counter += 1
+    if _hfr_fwhm_frame_counter < _graphs_update_interval:
+        return None
+    _hfr_fwhm_frame_counter = 0
+
+    # Optimisation Phase 2 Demande 7 : Réutiliser fig/ax au lieu de recréer
+    if hfr_fig is None or hfr_ax is None:
+        fig, ax1 = plt.subplots(figsize=(6, 3), dpi=100)
+        hfr_fig, hfr_ax = fig, ax1
+        fig.patch.set_facecolor('#1a1a1a')
+        ax1.set_facecolor('#0a0a0a')
+    else:
+        fig, ax1 = hfr_fig, hfr_ax
+        ax1.clear()
+        ax1.set_facecolor('#0a0a0a')
 
     # Axe pour HFR (gauche)
     if len(hfr_history) >= 2:
@@ -2301,54 +2344,210 @@ def reset_focus_history():
     focus_times.clear()
     focus_start_time = 0
 
-def ghs_stretch(array, D=0, B=0, SP=0.5):
+def ghs_stretch(array, D, b, SP, LP, HP):
     """
-    Applique le Generalized Hyperbolic Stretch (GHS) sur une image
-
+    Generalized Hyperbolic Stretch (GHS) - Algorithme conforme Siril/PixInsight
+    
+    Basé sur les travaux de Dave Payne et Mike Cranfield (ghsastro.co.uk)
+    Implémentation conforme à la documentation officielle GHS.
+    
     Args:
-        array: numpy array de l'image (H, W, 3) en RGB uint8
-        D: Paramètre de linked stretching (-1 à 1)
-        B: Balance highlights/shadows (-30 à 10)
-        SP: Symmetry point (0 à 1)
-
+        array: numpy array de l'image (H, W, 3) ou (H, W) en uint8
+        D: Stretch factor (0.0 à 5.0) - force de l'étirement
+        b: Local intensity (-5.0 à 15.0) - concentration du contraste autour de SP
+        SP: Symmetry point (0.0 à 1.0) - point focal du contraste maximum
+        LP: Protect shadows (0.0 à SP) - protection des basses lumières (linéaire)
+        HP: Protect highlights (SP à 1.0) - protection des hautes lumières (linéaire)
+    
     Returns:
         numpy array étiré de même dimension uint8
+    
+    Notes:
+        - D = 0 : pas de transformation (identité)
+        - b = 0 : transformation exponentielle
+        - b = 1 : transformation harmonique (similaire Histogram Transform)
+        - b > 1 : transformation hyperbolique (recommandé pour stretch initial)
+        - b < 0 : transformation intégrale/logarithmique
+        - LP protège les shadows en appliquant une transformation linéaire sous LP
+        - HP protège les highlights en appliquant une transformation linéaire au-dessus de HP
+    
+    Exemple d'utilisation pour galaxie:
+        ghs_stretch(img, D=2.0, b=6.0, SP=0.15, LP=0.0, HP=0.85)
+    
+    Exemple pour stretch initial (linéaire -> non-linéaire):
+        ghs_stretch(img, D=3.5, b=12.0, SP=0.08, LP=0.0, HP=1.0)
     """
+    
     # Normaliser l'image entre 0 et 1
-    img_float = array.astype(np.float32) / 255.0
-
-    # Éviter les valeurs exactement 0 ou 1 pour la stabilité numérique
+    img_float = array.astype(np.float64) / 255.0
+    
+    # Constante pour éviter divisions par zéro
     epsilon = 1e-10
-    img_float = np.clip(img_float, epsilon, 1 - epsilon)
-
-    # Calcul GHS selon la formule
-    # GHS(x) = (1/(1+exp(-B))) * (x-SP)^(2^-D) + SP  pour x >= SP
-    # GHS(x) = SP - (1/(1+exp(-B))) * (SP-x)^(2^-D)  pour x < SP
-
-    # Précalculer les facteurs
-    inv_stretchFactor = 1.0 / (1.0 + np.exp(-B))
-    exponent = np.power(2.0, -D)
-
-    # Appliquer la transformation
+    img_float = np.clip(img_float, epsilon, 1.0 - epsilon)
+    
+    # Si D = 0, pas de transformation (identité)
+    if abs(D) < epsilon:
+        return array
+    
+    # Assurer les contraintes : 0 <= LP <= SP <= HP <= 1
+    LP = max(0.0, min(LP, SP))
+    HP = max(SP, min(HP, 1.0))
+    
+    # =========================================================================
+    # FONCTIONS DE TRANSFORMATION DE BASE T(x) selon la valeur de b
+    # Source: Documentation GHSAstro - ghsastro.co.uk
+    # =========================================================================
+    
+    def T_base(x, D, b):
+        """
+        Transformation de base T(x) selon le type déterminé par b
+        
+        | b value    | Type        | Formula                                    |
+        |------------|-------------|---------------------------------------------|
+        | b = -1     | Logarithmic | ln(1 + D*x)                                |
+        | b < 0      | Integral    | (1 - (1-b*D*x)^((b+1)/b)) / (D*(b+1))     |
+        | b = 0      | Exponential | 1 - exp(-D*x)                              |
+        | b = 1      | Harmonic    | 1 - (1 + D*x)^(-1)                         |
+        | b > 0      | Hyperbolic  | 1 - (1 + b*D*x)^(-1/b)                     |
+        """
+        x = np.asarray(x, dtype=np.float64)
+        result = np.zeros_like(x)
+        
+        if abs(b - (-1.0)) < epsilon:
+            # Logarithmic: T(x) = ln(1 + D*x)
+            result = np.log1p(D * x)
+            
+        elif b < 0 and abs(b - (-1.0)) >= epsilon:
+            # Integral: T(x) = (1 - (1 - b*D*x)^((b+1)/b)) / (D*(b+1))
+            base = np.maximum(1.0 - b * D * x, epsilon)
+            exponent = (b + 1.0) / b
+            result = (1.0 - np.power(base, exponent)) / (D * (b + 1.0))
+            
+        elif abs(b) < epsilon:
+            # Exponential: T(x) = 1 - exp(-D*x)
+            result = 1.0 - np.exp(-D * x)
+            
+        elif abs(b - 1.0) < epsilon:
+            # Harmonic: T(x) = 1 - (1 + D*x)^(-1)
+            result = 1.0 - 1.0 / (1.0 + D * x)
+            
+        else:  # b > 0, b != 1
+            # Hyperbolic: T(x) = 1 - (1 + b*D*x)^(-1/b)
+            base = np.maximum(1.0 + b * D * x, epsilon)
+            result = 1.0 - np.power(base, -1.0 / b)
+        
+        return result
+    
+    def T_prime(x, D, b):
+        """
+        Dérivée première T'(x) - nécessaire pour les segments linéaires LP et HP
+        
+        | b value    | Formula T'(x)                              |
+        |------------|---------------------------------------------|
+        | b = -1     | D / (1 + D*x)                              |
+        | b < 0      | (1 - b*D*x)^(1/b)                          |
+        | b = 0      | D * exp(-D*x)                              |
+        | b = 1      | D * (1 + D*x)^(-2)                         |
+        | b > 0      | D * (1 + b*D*x)^(-(1+b)/b)                 |
+        """
+        x = np.asarray(x, dtype=np.float64)
+        result = np.zeros_like(x)
+        
+        if abs(b - (-1.0)) < epsilon:
+            # T'(x) = D / (1 + D*x)
+            result = D / (1.0 + D * x)
+            
+        elif b < 0 and abs(b - (-1.0)) >= epsilon:
+            # T'(x) = (1 - b*D*x)^(1/b)
+            base = np.maximum(1.0 - b * D * x, epsilon)
+            result = np.power(base, 1.0 / b)
+            
+        elif abs(b) < epsilon:
+            # T'(x) = D * exp(-D*x)
+            result = D * np.exp(-D * x)
+            
+        elif abs(b - 1.0) < epsilon:
+            # T'(x) = D * (1 + D*x)^(-2)
+            result = D * np.power(1.0 + D * x, -2.0)
+            
+        else:  # b > 0, b != 1
+            # T'(x) = D * (1 + b*D*x)^(-(1+b)/b)
+            base = np.maximum(1.0 + b * D * x, epsilon)
+            result = D * np.power(base, -(1.0 + b) / b)
+        
+        return result
+    
+    # =========================================================================
+    # CONSTRUCTION DE LA TRANSFORMATION COMPLÈTE
+    # =========================================================================
+    
+    # T3(x) = T(x - SP) pour x >= SP (transformation centrée sur SP)
+    def T3(x):
+        return T_base(x - SP, D, b)
+    
+    def T3_prime(x):
+        return T_prime(x - SP, D, b)
+    
+    # T2(x) = -T(SP - x) pour LP <= x < SP (symétrie autour de SP)
+    def T2(x):
+        return -T_base(SP - x, D, b)
+    
+    def T2_prime(x):
+        return T_prime(SP - x, D, b)
+    
+    # Valeurs aux bornes pour les segments linéaires
+    T2_LP = float(T2(LP))
+    T2_prime_LP = float(T2_prime(LP))
+    T3_HP = float(T3(HP))
+    T3_prime_HP = float(T3_prime(HP))
+    
+    # T1(x) = T2'(LP) * (x - LP) + T2(LP) pour x < LP (linéaire - protection shadows)
+    def T1(x):
+        return T2_prime_LP * (x - LP) + T2_LP
+    
+    # T4(x) = T3'(HP) * (x - HP) + T3(HP) pour x >= HP (linéaire - protection highlights)
+    def T4(x):
+        return T3_prime_HP * (x - HP) + T3_HP
+    
+    # Valeurs pour la normalisation (transformation doit aller de 0 à 1)
+    T1_0 = float(T1(0.0))
+    T4_1 = float(T4(1.0))
+    norm_range = T4_1 - T1_0
+    
+    if abs(norm_range) < epsilon:
+        return array  # Pas de transformation possible
+    
+    # =========================================================================
+    # APPLICATION DE LA TRANSFORMATION PAR RÉGION
+    # =========================================================================
+    
     img_stretched = np.zeros_like(img_float)
-
-    # Pour les pixels >= SP
-    mask_high = img_float >= SP
-    if np.any(mask_high):
-        diff_high = img_float[mask_high] - SP
-        img_stretched[mask_high] = inv_stretchFactor * np.power(diff_high, exponent) + SP
-
-    # Pour les pixels < SP
-    mask_low = img_float < SP
-    if np.any(mask_low):
-        diff_low = SP - img_float[mask_low]
-        img_stretched[mask_low] = SP - inv_stretchFactor * np.power(diff_low, exponent)
-
+    
+    # Masques pour les 4 régions
+    mask1 = img_float < LP                          # Région 1: 0 <= x < LP (linéaire)
+    mask2 = (img_float >= LP) & (img_float < SP)    # Région 2: LP <= x < SP (symétrie)
+    mask3 = (img_float >= SP) & (img_float < HP)    # Région 3: SP <= x < HP (principale)
+    mask4 = img_float >= HP                         # Région 4: HP <= x <= 1 (linéaire)
+    
+    # Appliquer les transformations par région
+    if np.any(mask1):
+        img_stretched[mask1] = T1(img_float[mask1])
+    if np.any(mask2):
+        img_stretched[mask2] = T2(img_float[mask2])
+    if np.any(mask3):
+        img_stretched[mask3] = T3(img_float[mask3])
+    if np.any(mask4):
+        img_stretched[mask4] = T4(img_float[mask4])
+    
+    # Normaliser entre 0 et 1
+    img_stretched = (img_stretched - T1_0) / norm_range
+    
     # Clip et reconvertir en uint8
-    img_stretched = np.clip(img_stretched, 0, 1)
-    img_stretched = (img_stretched * 255).astype(np.uint8)
-
+    img_stretched = np.clip(img_stretched, 0.0, 1.0)
+    img_stretched = (img_stretched * 255.0).astype(np.uint8)
+    
     return img_stretched
+
 
 
 def astro_stretch(array):
@@ -2365,18 +2564,20 @@ def astro_stretch(array):
         numpy array étiré de même dimension
     """
     global stretch_preset, stretch_p_low, stretch_p_high, stretch_factor
-    global ghs_D, ghs_B, ghs_SP
+    global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
 
     if stretch_preset == 0:
         # OFF - pas de stretch
         return array
 
     elif stretch_preset == 1:
-        # GHS stretch
-        D = ghs_D / 10.0
-        B = ghs_B / 10.0
-        SP = ghs_SP / 100.0
-        return ghs_stretch(array, D, B, SP)
+        # GHS stretch - Phase 2 (algorithme conforme Siril/PixInsight)
+        D = ghs_D / 10.0       # 0-50 -> 0.0-5.0
+        b = ghs_b / 10.0       # -50 à 150 -> -5.0 à 15.0
+        SP = ghs_SP / 100.0    # 0-100 -> 0.0-1.0
+        LP = ghs_LP / 100.0    # 0-100 -> 0.0-1.0
+        HP = ghs_HP / 100.0    # 0-100 -> 0.0-1.0
+        return ghs_stretch(array, D, b, SP, LP, HP)
 
     elif stretch_preset == 2:
         # Arcsinh stretch (code original)
@@ -2468,7 +2669,8 @@ def preview():
             preview.prev_config.get('vflip') != vflip or
             preview.prev_config.get('hflip') != hflip or
             preview.prev_config.get('mode_type') != (0 if mode == 0 or sspeed > 80000 else 1) or
-            preview.prev_config.get('use_native_sensor_mode') != use_native_sensor_mode
+            preview.prev_config.get('use_native_sensor_mode') != use_native_sensor_mode or
+            preview.prev_config.get('awb') != awb  # Changement AWB nécessite recréation (ColourGains persistent)
         )
 
         # Calculer speed2 et autres paramètres (avant le if/else)
@@ -2498,6 +2700,8 @@ def preview():
             # AWB
             if awb == 0:
                 fast_controls["ColourGains"] = (red/10, blue/10)
+                if show_cmds == 1:
+                    print(f"  DEBUG AWB: Mode manuel (awb=0), ColourGains=({red/10}, {blue/10})")
             else:
                 awb_modes = {
                     1: controls.AwbModeEnum.Auto, 2: controls.AwbModeEnum.Incandescent,
@@ -2506,6 +2710,11 @@ def preview():
                 }
                 if awb in awb_modes:
                     fast_controls["AwbMode"] = awb_modes[awb]
+                    if show_cmds == 1:
+                        print(f"  DEBUG AWB: Mode auto (awb={awb}={awbs[awb]}), AwbMode={awb_modes[awb]}")
+                else:
+                    if show_cmds == 1:
+                        print(f"  DEBUG AWB: ERREUR - awb={awb} non trouvé dans awb_modes!")
 
             # Saturation & Sharpness
             fast_controls["Saturation"] = saturation / 10
@@ -2513,10 +2722,17 @@ def preview():
 
             # Appliquer tous les contrôles en une seule fois (rapide!)
             try:
+                if show_cmds == 1:
+                    print(f"  DEBUG: fast_controls = {fast_controls}")
                 picam2.set_controls(fast_controls)
 
+                # Vérifier que les contrôles ont été appliqués
                 if show_cmds == 1:
+                    metadata = picam2.capture_metadata()
+                    actual_awb = metadata.get("AwbMode", "N/A")
+                    actual_gains = metadata.get("ColourGains", "N/A")
                     print(f"  ✓ Controls updated instantly - ExposureTime={speed2}µs, Gain={gain}")
+                    print(f"  → Camera reports: AwbMode={actual_awb}, ColourGains={actual_gains}")
 
                 # Pas besoin de mémoriser la config car elle n'a pas changé
                 restart = 0
@@ -2646,6 +2862,8 @@ def preview():
         if awb == 0:
             # AWB manuel - définir ColourGains désactive automatiquement AWB
             controls_dict["ColourGains"] = (red/10, blue/10)
+            if show_cmds == 1:
+                print(f"  DEBUG AWB [FULL]: Mode manuel (awb=0), ColourGains=({red/10}, {blue/10})")
         else:
             # AWB auto - utiliser AwbMode
             awb_modes = {
@@ -2659,6 +2877,11 @@ def preview():
             }
             if awb in awb_modes:
                 controls_dict["AwbMode"] = awb_modes[awb]
+                if show_cmds == 1:
+                    print(f"  DEBUG AWB [FULL]: Mode auto (awb={awb}={awbs[awb]}), AwbMode={awb_modes[awb]}")
+            else:
+                if show_cmds == 1:
+                    print(f"  DEBUG AWB [FULL]: ERREUR - awb={awb} non trouvé dans awb_modes!")
 
         # Saturation & Sharpness
         controls_dict["Saturation"] = saturation / 10
@@ -2832,7 +3055,8 @@ def preview():
             'vflip': vflip,
             'hflip': hflip,
             'mode_type': 0 if mode == 0 or sspeed > 80000 else 1,
-            'use_native_sensor_mode': use_native_sensor_mode
+            'use_native_sensor_mode': use_native_sensor_mode,
+            'awb': awb
         }
 
         restart = 0
@@ -3021,6 +3245,8 @@ def Menu():
                 button(0,d,0,4)
             elif menu == 9:
                 button(0,d,0,4)
+            elif menu == 10:
+                button(0,d,0,4)
         text(0,0,1,0,1,"MAIN MENU ",ft,7)
       
     if menu == 0:
@@ -3116,28 +3342,43 @@ def Menu():
         if cam1 != "1":
             text(0,1,2,0,1,"Switch Camera",ft,7)
             text(0,1,3,1,1,str(camera),fv,7)
-        text(0,2,2,0,1,"Ext Trig: " + str(STR),ft,7)
-        text(0,2,3,1,1,strs[str_cap],fv,7)
+        # Ligne 2 - Accès menu METRICS
+        button(0,2,0,2)
+        text(0,2,5,0,1,"METRICS",ft,7)
+        text(0,2,3,1,1,"Settings >",fv,7)
+
+        # Ligne 3 - Histogram
         text(0,3,3,0,1,"Histogram",ft,7)
         text(0,3,3,1,1,histograms[histogram],fv,7)
+        draw_bar(0,3,greyColor,'histogram',histogram)
+
+        # Ligne 4 - Hist Area
         text(0,4,2,0,1,"Hist Area",ft,7)
         text(0,4,3,1,1,str(histarea),fv,7)
+        draw_Vbar(0,4,greyColor,'histarea',histarea)
+
+        # Ligne 5 - Vert Flip
         text(0,5,5,0,1,"Vert Flip",ft,7)
         text(0,5,3,1,1,str(vflip),fv,7)
+
+        # Ligne 6 - Horiz Flip
         text(0,6,5,0,1,"Horiz Flip",ft,7)
         text(0,6,3,1,1,str(hflip),fv,7)
+
+        # Ligne 7 - STILL -t time
         text(0,7,5,0,1," STILL -t time ",fv,7)
         text(0,7,3,1,1,str(timet),fv,7)
+
+        # Ligne 8 - Sensor Mode
         text(0,8,2,0,1,"Sensor Mode",ft,7)
         if use_native_sensor_mode == 0:
             text(0,8,3,1,1,"Binning",fv,7)
         else:
             text(0,8,3,1,1,"Native",fv,7)
         draw_Vbar(0,8,greyColor,'use_native_sensor_mode',use_native_sensor_mode)
+
+        # Ligne 9 - SAVE CONFIG
         text(0,9,2,0,1,"SAVE CONFIG",fv,7)
-        draw_Vbar(0,2,greyColor,'str_cap',str_cap)
-        draw_bar(0,3,greyColor,'histogram',histogram)
-        draw_Vbar(0,4,greyColor,'histarea',histarea)
       
     elif menu == 3:
       text(0,1,5,0,1,"Mode",ft,10)
@@ -3296,48 +3537,88 @@ def Menu():
         draw_Vbar(0,3,lyelColor,'tshots',tshots)
 
     elif menu == 7:
-        # STRETCH Settings
-        # Ligne 1 - Stretch Low %
-        text(0,1,5,0,1,"Stretch Low %",ft,7)
-        text(0,1,3,1,1,str(stretch_p_low/10)[0:4],fv,7)
-        draw_Vbar(0,1,greyColor,'stretch_p_low',stretch_p_low)
+        # STRETCH Settings - Multi-pages (Phase 2)
+        current_page = menu_page.get(7, 1)  # Page par défaut = 1
 
-        # Ligne 2 - Stretch High %
-        text(0,2,5,0,1,"Stretch High %",ft,7)
-        text(0,2,3,1,1,str(stretch_p_high/100)[0:6],fv,7)
-        draw_Vbar(0,2,greyColor,'stretch_p_high',stretch_p_high)
+        if current_page == 1:
+            # ========== PAGE 1 - Paramètres Arcsinh + Preset ==========
+            # Ligne 1 - Stretch Low %
+            text(0,1,5,0,1,"Stretch Low %",ft,7)
+            text(0,1,3,1,1,str(stretch_p_low/10)[0:4],fv,7)
+            draw_Vbar(0,1,greyColor,'stretch_p_low',stretch_p_low)
 
-        # Ligne 3 - Stretch Factor
-        text(0,3,5,0,1,"Stretch Factor",ft,7)
-        text(0,3,3,1,1,str(stretch_factor/10)[0:4],fv,7)
-        draw_Vbar(0,3,greyColor,'stretch_factor',stretch_factor)
+            # Ligne 2 - Stretch High %
+            text(0,2,5,0,1,"Stretch High %",ft,7)
+            text(0,2,3,1,1,str(stretch_p_high/100)[0:6],fv,7)
+            draw_Vbar(0,2,greyColor,'stretch_p_high',stretch_p_high)
 
-        # Ligne 4 - Preset
-        text(0,4,5,0,1,"Preset",ft,7)
-        text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
-        draw_Vbar(0,4,greyColor,'stretch_preset',stretch_preset)
+            # Ligne 3 - Stretch Factor
+            text(0,3,5,0,1,"Stretch Factor",ft,7)
+            text(0,3,3,1,1,str(stretch_factor/10)[0:4],fv,7)
+            draw_Vbar(0,3,greyColor,'stretch_factor',stretch_factor)
 
-        # Lignes 5-7 - Paramètres GHS (affichés seulement si preset=GHS)
-        if stretch_preset == 1:  # GHS
-            text(0,5,5,0,1,"force",ft,7)
-            text(0,5,3,1,1,str(ghs_D/10.0)[0:5],fv,7)
-            draw_Vbar(0,5,greyColor,'ghs_D',ghs_D)
+            # Ligne 4 - Preset
+            text(0,4,5,0,1,"Preset",ft,7)
+            text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
+            draw_Vbar(0,4,greyColor,'stretch_preset',stretch_preset)
 
-            text(0,6,5,0,1,"hi-Lo",ft,7)
-            text(0,6,3,1,1,str(ghs_B/10.0)[0:6],fv,7)
-            draw_Vbar(0,6,greyColor,'ghs_B',ghs_B)
+            # Ligne 8 - SAVE CONFIG
+            text(0,8,2,0,1,"SAVE CONFIG",fv,7)
 
-            text(0,7,5,0,1,"Sym",ft,7)
-            text(0,7,3,1,1,str(ghs_SP/100.0)[0:5],fv,7)
-            draw_Vbar(0,7,greyColor,'ghs_SP',ghs_SP)
+            # Ligne 9 - Navigation
+            if stretch_preset == 1:  # GHS sélectionné - montrer accès page 2
+                button(0,9,0,9)
+                text(0,9,3,0,1,"GHS Params",ft,7)
+                text(0,9,3,1,1,"Page 2 ->",ft,7)
+            else:
+                button(0,9,0,9)
+                text(0,9,1,0,1,"CAMERA",ft,7)
+                text(0,9,1,1,1,"Settings",ft,7)
 
-        # Ligne 8 - SAVE CONFIG
-        text(0,8,2,0,1,"SAVE CONFIG",fv,7)
+        elif current_page == 2:
+            # ========== PAGE 2 - Paramètres GHS complets (D, b, SP, LP, HP) ==========
+            # Ligne 1 - Navigation retour
+            button(0,1,0,1)
+            text(0,1,3,0,1,"<- Page 1",ft,7)
+            text(0,1,3,1,1,"Arcsinh",ft,7)
 
-        # Ligne 9 - Retour
-        button(0,9,0,9)
-        text(0,9,1,0,1,"CAMERA",ft,7)
-        text(0,9,1,1,1,"Settings",ft,7)
+            # Ligne 2 - GHS D (Stretch Factor)
+            text(0,2,5,0,1,"GHS D (Force)",ft,7)
+            text(0,2,3,1,1,str(ghs_D/10.0)[0:5],fv,7)
+            draw_Vbar(0,2,greyColor,'ghs_D',ghs_D)
+
+            # Ligne 3 - GHS b (Local Intensity)
+            text(0,3,5,0,1,"GHS b (Focus)",ft,7)
+            text(0,3,3,1,1,str(ghs_b/10.0)[0:5],fv,7)
+            draw_Vbar(0,3,greyColor,'ghs_b',ghs_b)
+
+            # Ligne 4 - GHS SP (Symmetry Point)
+            text(0,4,5,0,1,"GHS SP (Sym)",ft,7)
+            text(0,4,3,1,1,str(ghs_SP/100.0)[0:5],fv,7)
+            draw_Vbar(0,4,greyColor,'ghs_SP',ghs_SP)
+
+            # Ligne 5 - GHS LP (Protect Shadows)
+            text(0,5,5,0,1,"GHS LP (Shad)",ft,7)
+            text(0,5,3,1,1,str(ghs_LP/100.0)[0:5],fv,7)
+            draw_Vbar(0,5,greyColor,'ghs_LP',ghs_LP)
+
+            # Ligne 6 - GHS HP (Protect Highlights)
+            text(0,6,5,0,1,"GHS HP (High)",ft,7)
+            text(0,6,3,1,1,str(ghs_HP/100.0)[0:5],fv,7)
+            draw_Vbar(0,6,greyColor,'ghs_HP',ghs_HP)
+
+            # Ligne 7 - GHS Preset
+            text(0,7,5,0,1,"GHS Preset",ft,7)
+            text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
+            draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
+
+            # Ligne 8 - SAVE CONFIG
+            text(0,8,2,0,1,"SAVE CONFIG",fv,7)
+
+            # Ligne 9 - Retour menu principal
+            button(0,9,0,9)
+            text(0,9,1,0,1,"CAMERA",ft,7)
+            text(0,9,1,1,1,"Settings",ft,7)
 
     elif menu == 8:
         # LIVE STACK Settings - Multi-pages
@@ -3388,18 +3669,10 @@ def Menu():
                 text(0,7,3,1,1,"ON",fv,7)
             draw_Vbar(0,7,greyColor,'ls_enable_qc',ls_enable_qc)
 
-            # Ligne 8 - Lucky Enable (NOUVEAU)
-            text(0,8,5,0,1,"Lucky Imaging",ft,7)
-            if ls_lucky_enable == 0:
-                text(0,8,3,1,1,"OFF",fv,7)
-            else:
-                text(0,8,3,1,1,"ON",fv,7)
-            draw_Vbar(0,8,greyColor,'ls_lucky_enable',ls_lucky_enable)
-
-            # Ligne 9 - Navigation Page 2
-            button(0,9,0,9)
-            text(0,9,1,0,1,"Page 2",ft,7)
-            text(0,9,1,1,1,">>>",ft,7)
+            # Ligne 8 - Navigation Page 2
+            button(0,8,0,9)
+            text(0,8,1,0,1,"Page 2",ft,7)
+            text(0,8,1,1,1,">>>",ft,7)
 
         else:  # Page 2
             # PAGE 2 - Stacker + Planetary
@@ -3435,6 +3708,7 @@ def Menu():
             draw_Vbar(0,7,greyColor,'ls_planetary_disk_max',ls_planetary_disk_max)
 
             # Ligne 8 - SAVE CONFIG
+            button(0,8,6,4)
             text(0,8,2,0,1,"SAVE CONFIG",fv,7)
 
             # Ligne 9 - Retour Page 1
@@ -3488,6 +3762,41 @@ def Menu():
         button(0,9,0,9)
         text(0,9,1,0,1,"CAMERA",ft,7)
         text(0,9,1,1,1,"Settings",ft,7)
+
+    elif menu == 10:
+        # ========== MENU 10 - METRICS Settings ==========
+
+        # Ligne 1 - Focus Method
+        text(0,1,5,0,1,"Focus Method",ft,10)
+        text(0,1,3,1,1,focus_methods[focus_method],fv,10)
+        draw_bar(0,1,lgrnColor,'focus_method',focus_method)
+
+        # Ligne 2 - Star Metric
+        text(0,2,5,0,1,"Star Metric",ft,10)
+        text(0,2,3,1,1,star_metrics[star_metric],fv,10)
+        draw_bar(0,2,lgrnColor,'star_metric',star_metric)
+
+        # Ligne 3 - SNR Display
+        text(0,3,5,0,1,"SNR Display",ft,10)
+        if snr_display == 0:
+            text(0,3,3,1,1,"OFF",fv,10)
+        else:
+            text(0,3,3,1,1,"ON",fv,10)
+        draw_bar(0,3,lgrnColor,'snr_display',snr_display)
+
+        # Ligne 4 - Calc Interval
+        text(0,4,5,0,1,"Calc Interval",ft,10)
+        text(0,4,3,1,1,str(metrics_interval),fv,10)
+        draw_bar(0,4,lgrnColor,'metrics_interval',metrics_interval)
+
+        # Ligne 8 - SAVE CONFIG
+        button(0,8,6,4)
+        text(0,8,2,0,1,"SAVE CONFIG",fv,10)
+
+        # Ligne 9 - Retour OTHER Settings
+        button(0,9,0,9)
+        text(0,9,1,0,1,"OTHER",ft,10)
+        text(0,9,1,1,1,"Settings",ft,10)
 
 text(0,0,6,2,1,"Please Wait, checking camera",int(fv* 1.7),1)
 text(0,0,6,2,1,"Found " + str(cameras[Pi_Cam]),int(fv*1.7),1)
@@ -4092,99 +4401,100 @@ while True:
         del image2_transposed
         del crop2
         
-        # Calcul du focus Laplacian avec indicateur de qualité coloré
-        foc = cv2.Laplacian(gray, cv2.CV_64F).var()
-        
-        # Déterminer la couleur du texte selon la qualité du focus
-        # Seuils typiques pour astrophotographie (dépendent de la taille de la zone)
-        focus_color = 0  # couleur par défaut (gris foncé)
-        if foc > 500:
-            focus_color = 1  # vert - excellent focus
-        elif foc > 200:
-            focus_color = 2  # jaune - bon focus
-        elif foc > 50:
-            focus_color = 3  # rouge - focus moyen/mauvais
-        else:
-            focus_color = 3  # rouge - mauvais focus
-        
-        text(20,1,focus_color,2,0,"Focus: " + str(int(foc)),fv* 2,0)
-        
-        # Calcul et affichage du SNR - convertir la surface pygame en array numpy
-        try:
-            # Convertir la surface pygame en array pour le calcul SNR
-            image_array = pygame.surfarray.array3d(image)
-            # Transposer car pygame utilise (width, height, channels) et opencv utilise (height, width, channels)
-            image_array = np.transpose(image_array, (1, 0, 2))
-            snr_value = calculate_snr(image_array)
-            
-            # Seuils pour ratio linéaire (adapté à l'astrophotographie)
-            snr_color = 0  # couleur par défaut (gris foncé)
-            if snr_value > 20:
-                snr_color = 1  # vert si excellent SNR
-            elif snr_value > 10:
-                snr_color = 2  # jaune si bon SNR
-            elif snr_value > 5:
-                snr_color = 2  # jaune si SNR moyen
-            else:
-                snr_color = 3  # rouge si mauvais SNR
-            
-            # Affichage au format ratio (ex: 15.2:1)
-            text(20,2,snr_color,2,0,"SNR = " + str(round(snr_value, 1)) + ":1",fv* 2,0)
-        except:
-            text(20,2,0,2,0,"SNR = N/A",fv* 2,0)
-        
-        # *** HFR : Calcul et affichage permanent (robuste aux aigrettes) ***
-        if focus_mode == 1 or histogram > 0:
-            # Utiliser la même zone que le réticule (histarea) pour cohérence avec FWHM
-            # L'algorithme avec seuil à 20% filtre le bruit efficacement
-            hfr_val = calculate_hfr(image, xx, xy, histarea)
+        # ========== METRICS CALCULATION - Optimisé avec frame counter ==========
+        # Incrémenter le compteur de frames (variable globale définie ligne 777)
+        metrics_frame_counter += 1
 
-            if hfr_val is not None:
-                # Déterminer la couleur selon la qualité HFR
-                # HFR en pixels : plus petit = meilleur
-                # Valeurs typiques pour astrophotographie
-                if hfr_val < 2:
-                    hfr_color = 1  # vert (excellent - étoile très concentrée)
-                elif hfr_val < 3.5:
-                    hfr_color = 2  # jaune (bon)
-                elif hfr_val < 5:
-                    hfr_color = 2  # jaune (moyen)
+        # Calculer les métriques seulement toutes les N frames
+        if metrics_frame_counter >= metrics_interval:
+            metrics_frame_counter = 0  # Réinitialiser le compteur
+
+            # *** FOCUS METRIC (configurable via menu METRICS) ***
+            if focus_method > 0:
+                foc = calculate_focus(gray, focus_method)
+
+                # Déterminer la couleur du texte selon la qualité du focus
+                # Seuils typiques pour astrophotographie (dépendent de la taille de la zone)
+                focus_color = 0  # couleur par défaut (gris foncé)
+                if foc > 500:
+                    focus_color = 1  # vert - excellent focus
+                elif foc > 200:
+                    focus_color = 2  # jaune - bon focus
+                elif foc > 50:
+                    focus_color = 3  # rouge - focus moyen/mauvais
                 else:
-                    hfr_color = 3  # rouge (mauvais - étoile diffuse)
+                    focus_color = 3  # rouge - mauvais focus
 
-                # Affichage texte HFR - position adaptée selon le mode
-                # En preview: ligne 3 (juste sous SNR), en focus: ligne 4 (sous FWHM)
-                hfr_line = 3 if focus_mode == 0 else 4
-                text(20, hfr_line, hfr_color, 2, 0, "HFR: " + str(round(hfr_val, 2)), fv * 2, 0)
-            else:
-                # Afficher "N/A" si pas d'étoile détectée
-                hfr_line = 3 if focus_mode == 0 else 4
-                text(20, hfr_line, 0, 2, 0, "HFR: N/A", fv * 2, 0)
+                text(20,1,focus_color,2,0,f"Focus ({focus_methods[focus_method]}): {int(foc)}",fv* 2,0)
 
-        # *** Éléments affichés SEULEMENT en mode focus ***
-        if focus_mode == 1:
-            # FWHM
-            fwhm_val = calculate_fwhm(image, xx, xy, histarea)
+            # *** SNR DISPLAY (configurable via menu METRICS) ***
+            if snr_display == 1:
+                try:
+                    # Convertir la surface pygame en array pour le calcul SNR
+                    image_array = pygame.surfarray.array3d(image)
+                    # Transposer car pygame utilise (width, height, channels) et opencv utilise (height, width, channels)
+                    image_array = np.transpose(image_array, (1, 0, 2))
+                    snr_value = calculate_snr(image_array)
 
-            if fwhm_val is not None:
-                # Déterminer la couleur selon la qualité FWHM
-                # Note: FWHM est en pixels, pas en arcsec
-                # Les seuils dépendent de la taille de histarea
-                # Pour histarea=50, des valeurs typiques sont 2-20 pixels
-                if fwhm_val < 5:
-                    fwhm_color = 1  # vert (excellente - étoile très fine)
-                elif fwhm_val < 10:
-                    fwhm_color = 2  # jaune (bonne)
-                elif fwhm_val < 20:
-                    fwhm_color = 2  # jaune (moyenne)
+                    # Seuils pour ratio linéaire (adapté à l'astrophotographie)
+                    snr_color = 0  # couleur par défaut (gris foncé)
+                    if snr_value > 20:
+                        snr_color = 1  # vert si excellent SNR
+                    elif snr_value > 10:
+                        snr_color = 2  # jaune si bon SNR
+                    elif snr_value > 5:
+                        snr_color = 2  # jaune si SNR moyen
+                    else:
+                        snr_color = 3  # rouge si mauvais SNR
+
+                    # Affichage au format ratio (ex: 15.2:1)
+                    text(20,2,snr_color,2,0,"SNR = " + str(round(snr_value, 1)) + ":1",fv* 2,0)
+                except:
+                    text(20,2,0,2,0,"SNR = N/A",fv* 2,0)
+
+            # *** STAR METRIC (configurable via menu METRICS: OFF/HFR/FWHM) ***
+            if star_metric > 0 and (focus_mode == 1 or histogram > 0):
+                # Utiliser la même zone que le réticule (histarea)
+                star_val = None
+                star_label = "STAR"
+
+                if star_metric == 1:
+                    # HFR : Half Flux Radius (robuste aux aigrettes)
+                    star_val = calculate_hfr(image, xx, xy, histarea)
+                    star_label = "HFR"
+                    # Seuils HFR (en pixels, plus petit = meilleur)
+                    threshold_excellent = 2
+                    threshold_good = 3.5
+                    threshold_medium = 5
+
+                elif star_metric == 2:
+                    # FWHM : Full Width Half Maximum
+                    star_val = calculate_fwhm(image, xx, xy, histarea)
+                    star_label = "FWHM"
+                    # Seuils FWHM (en pixels, plus petit = meilleur)
+                    threshold_excellent = 5
+                    threshold_good = 10
+                    threshold_medium = 20
+
+                if star_val is not None:
+                    # Déterminer la couleur selon la qualité
+                    if star_val < threshold_excellent:
+                        star_color = 1  # vert (excellent)
+                    elif star_val < threshold_good:
+                        star_color = 2  # jaune (bon)
+                    elif star_val < threshold_medium:
+                        star_color = 2  # jaune (moyen)
+                    else:
+                        star_color = 3  # rouge (mauvais)
+
+                    # Affichage texte - position adaptée selon le mode
+                    # En preview: ligne 3 (juste sous SNR), en focus: ligne 4
+                    star_line = 3 if focus_mode == 0 else 4
+                    text(20, star_line, star_color, 2, 0, f"{star_label}: {round(star_val, 2)}", fv * 2, 0)
                 else:
-                    fwhm_color = 3  # rouge (mauvaise - étoile très large)
-
-                # Affichage texte FWHM
-                text(20, 3, fwhm_color, 2, 0, "FWHM: " + str(round(fwhm_val, 1)), fv * 2, 0)
-            else:
-                # Afficher "N/A" si pas d'étoile détectée
-                text(20, 3, 0, 2, 0, "FWHM: N/A", fv * 2, 0)
+                    # Afficher "N/A" si pas d'étoile détectée
+                    star_line = 3 if focus_mode == 0 else 4
+                    text(20, star_line, 0, 2, 0, f"{star_label}: N/A", fv * 2, 0)
 
             # En mode focus : afficher 2 graphiques élégants dans le bandeau noir
             # Graphique 1 (gauche) : HFR + FWHM combinés
@@ -4227,11 +4537,12 @@ while True:
             except Exception as e:
                 pass  # Ignorer les erreurs des graphiques
 
-            # Rectangle rouge et croix d'analyse
+        # Rectangle rouge et croix d'analyse - SEULEMENT en mode focus
+        if focus_mode == 1:
             pygame.draw.rect(windowSurfaceObj,redColor,Rect(xx-histarea,xy-histarea,histarea*2,histarea*2),1)
             pygame.draw.line(windowSurfaceObj,(255,255,255),(xx-int(histarea/2),xy),(xx+int(histarea/2),xy),1)
             pygame.draw.line(windowSurfaceObj,(255,255,255),(xx,xy-int(histarea/2)),(xx,xy+int(histarea/2)),1)
-    
+
     # Mode preview (zoom == 0 ET focus_mode == 0) - Ne pas afficher en mode stretch
     if zoom == 0 and focus_mode == 0 and stretch_mode == 0:
         text(0,0,6,2,0,"Preview",fv* 2,0)
@@ -5839,8 +6150,8 @@ while True:
                                 # Alignement
                                 alignment_mode=ls_alignment_modes[ls_alignment_mode],
 
-                                # Contrôle qualité (désactivé si Lucky activé)
-                                enable_qc=bool(ls_enable_qc) if not bool(ls_lucky_enable) else False,
+                                # Contrôle qualité
+                                enable_qc=bool(ls_enable_qc),
                                 max_fwhm=ls_max_fwhm / 10.0 if ls_max_fwhm > 0 else 999.0,
                                 min_sharpness=ls_min_sharpness / 1000.0 if ls_min_sharpness > 0 else 0.0,
                                 max_drift=float(ls_max_drift) if ls_max_drift > 0 else 999999.0,
@@ -5861,8 +6172,8 @@ while True:
                                 planetary_corr=ls_planetary_corr / 100.0,
                                 planetary_max_shift=float(ls_planetary_max_shift),
 
-                                # Lucky Imaging (paramètre ls_lucky_enable)
-                                lucky_enable=bool(ls_lucky_enable),
+                                # Lucky Imaging (désactivé en mode LIVE STACK)
+                                lucky_enable=False,
                                 lucky_buffer_size=ls_lucky_buffer,
                                 lucky_keep_percent=float(ls_lucky_keep),
                                 lucky_score_method=['laplacian', 'gradient', 'sobel', 'tenengrad'][ls_lucky_score],
@@ -5876,7 +6187,7 @@ while True:
                                 png_clip_low=stretch_p_low / 10.0,
                                 png_clip_high=stretch_p_high / 100.0,
                                 ghs_D=ghs_D / 10.0,
-                                ghs_B=ghs_B / 10.0,
+                                ghs_b=ghs_b / 10.0,
                                 ghs_SP=ghs_SP / 100.0,
                                 preview_refresh=ls_preview_refresh,
                                 save_dng="none"
@@ -5889,11 +6200,8 @@ while True:
                         pygame._livestack_last_saved = 0
 
                         # Afficher le mode activé
-                        if ls_lucky_enable:
-                            print(f"[LIVESTACK] Mode activé avec Lucky Imaging (buffer: {ls_lucky_buffer}, keep: {ls_lucky_keep}%)")
-                        else:
-                            qc_status = "ON" if ls_enable_qc else "OFF"
-                            print(f"[LIVESTACK] Mode activé (standard, QC: {qc_status})")
+                        qc_status = "ON" if ls_enable_qc else "OFF"
+                        print(f"[LIVESTACK] Mode activé (QC: {qc_status})")
                     else:
                         # Désactiver Live Stack
                         livestack_active = False
@@ -5998,7 +6306,7 @@ while True:
                                 png_clip_low=stretch_p_low / 10.0,
                                 png_clip_high=stretch_p_high / 100.0,
                                 ghs_D=ghs_D / 10.0,
-                                ghs_B=ghs_B / 10.0,
+                                ghs_b=ghs_b / 10.0,
                                 ghs_SP=ghs_SP / 100.0,
                                 preview_refresh=ls_preview_refresh,
                                 save_dng="none"
@@ -6465,31 +6773,12 @@ while True:
                 restart = 1
                 
               elif button_row == 2:
-                # EXT TRIGGER 
-                for f in range(0,len(video_limits)-1,3):
-                    if video_limits[f] == 'str_cap':
-                        pmin = video_limits[f+1]
-                        pmax = video_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
-                    str_cap = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height + bh  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
-                    str_cap = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75 + bh  and mousey < preview_height * .75 + (bh*3) + int(bh/3)) and alt_dis == 2:
-                    str_cap = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        str_cap -=1
-                        str_cap = max(str_cap,pmin)
-                    else:
-                        str_cap +=1
-                        str_cap = min(str_cap,pmax)
-                text(0,2,3,1,1,strs[str_cap],fv,7)
-                draw_Vbar(0,2,greyColor,'str_cap',str_cap)
-                restart = 1
-                time.sleep(.25)
-                
+                # Accès menu METRICS Settings
+                menu = 10
+                Menu()
+
               elif button_row == 3:
-                # HISTOGRAM 
+                # HISTOGRAM
                 for f in range(0,len(still_limits)-1,3):
                     if still_limits[f] == 'histogram':
                         pmin = still_limits[f+1]
@@ -6510,7 +6799,7 @@ while True:
                 text(0,3,3,1,1,histograms[histogram],fv,7)
                 draw_bar(0,3,greyColor,'histogram',histogram)
                 time.sleep(.25)
-                
+
               elif button_row == 4:
                 # HISTOGRAM SIZE
                 for f in range(0,len(video_limits)-1,3):
@@ -6542,8 +6831,8 @@ while True:
                 text(0,4,3,1,1,str(histarea),fv,7)
                 draw_Vbar(0,4,greyColor,'histarea',histarea)
                 old_histarea = histarea
-                time.sleep(.25) 
-                
+                time.sleep(.25)
+
               elif button_row == 5:
                 # VERTICAL FLIP
                 vflip +=1
@@ -6552,7 +6841,7 @@ while True:
                 text(0,5,3,1,1,str(vflip),fv,7)
                 restart = 1
                 time.sleep(.25)
-                
+
               elif button_row == 6:
                 # HORIZONTAL FLIP
                 hflip += 1
@@ -6561,9 +6850,9 @@ while True:
                 text(0,6,3,1,1,str(hflip),fv,7)
                 restart = 1
                 time.sleep(.25)
-                        
+
               elif button_row == 7:
-                # timet
+                # STILL -t time
                 if alt_dis == 0 and mousex < preview_width + (bw/2):
                     timet -=100
                     timet  = max(timet ,100)
@@ -6630,39 +6919,45 @@ while True:
                    config[40] = stretch_factor
                    config[41] = stretch_preset
                    config[42] = ghs_D
-                   config[43] = ghs_B
+                   config[43] = ghs_b
                    config[44] = ghs_SP
-                   config[45] = ls_preview_refresh
-                   config[46] = ls_alignment_mode
-                   config[47] = ls_enable_qc
-                   config[48] = ls_max_fwhm
-                   config[49] = ls_min_sharpness
-                   config[50] = ls_max_drift
-                   config[51] = ls_min_stars
-                   config[52] = ls_stack_method
-                   config[53] = ls_stack_kappa
-                   config[54] = ls_stack_iterations
-                   config[55] = ls_planetary_enable
-                   config[56] = ls_planetary_mode
-                   config[57] = ls_planetary_disk_min
-                   config[58] = ls_planetary_disk_max
-                   config[59] = ls_planetary_threshold
-                   config[60] = ls_planetary_margin
-                   config[61] = ls_planetary_ellipse
-                   config[62] = ls_planetary_window
-                   config[63] = ls_planetary_upsample
-                   config[64] = ls_planetary_highpass
-                   config[65] = ls_planetary_roi_center
-                   config[66] = ls_planetary_corr
-                   config[67] = ls_planetary_max_shift
-                   config[68] = ls_lucky_enable
-                   config[69] = ls_lucky_buffer
-                   config[70] = ls_lucky_keep
-                   config[71] = ls_lucky_score
-                   config[72] = ls_lucky_stack
-                   config[73] = ls_lucky_align
-                   config[74] = ls_lucky_roi
-                   config[75] = use_native_sensor_mode
+                   config[45] = ghs_LP
+                   config[46] = ghs_HP
+                   config[47] = ghs_preset
+                   config[48] = ls_preview_refresh
+                   config[49] = ls_alignment_mode
+                   config[50] = ls_enable_qc
+                   config[51] = ls_max_fwhm
+                   config[52] = ls_min_sharpness
+                   config[53] = ls_max_drift
+                   config[54] = ls_min_stars
+                   config[55] = ls_stack_method
+                   config[56] = ls_stack_kappa
+                   config[57] = ls_stack_iterations
+                   config[58] = ls_planetary_enable
+                   config[59] = ls_planetary_mode
+                   config[60] = ls_planetary_disk_min
+                   config[61] = ls_planetary_disk_max
+                   config[62] = ls_planetary_threshold
+                   config[63] = ls_planetary_margin
+                   config[64] = ls_planetary_ellipse
+                   config[65] = ls_planetary_window
+                   config[66] = ls_planetary_upsample
+                   config[67] = ls_planetary_highpass
+                   config[68] = ls_planetary_roi_center
+                   config[69] = ls_planetary_corr
+                   config[70] = ls_planetary_max_shift
+                   config[71] = ls_lucky_buffer
+                   config[72] = ls_lucky_keep
+                   config[73] = ls_lucky_score
+                   config[74] = ls_lucky_stack
+                   config[75] = ls_lucky_align
+                   config[76] = ls_lucky_roi
+                   config[77] = use_native_sensor_mode
+                   config[78] = focus_method
+                   config[79] = star_metric
+                   config[80] = snr_display
+                   config[81] = metrics_interval
                    with open(config_file, 'w') as f:
                       for item in range(0,len(titles)):
                           f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -6911,16 +7206,11 @@ while True:
                     else:
                         awb  +=1
                         awb = min(awb ,pmax)
-                text(0,7,3,1,1,awbs[awb],fv,10)
+                text(0,6,3,1,1,awbs[awb],fv,10)
                 draw_bar(0,6,lgrnColor,'awb',awb)
-                text(0,7,5,0,1,"Blue",ft,10)
-                text(0,8,5,0,1,"Red",ft,10)
-                text(0,8,3,1,1,str(red/10)[0:3],fv,10)
-                text(0,7,3,1,1,str(blue/10)[0:3],fv,10)
-                draw_bar(0,7,lgrnColor,'blue',blue)
-                draw_bar(0,8,lgrnColor,'red',red)
+                # Pas de restart nécessaire : le fast path applique instantanément via set_controls
+                preview()  # Appel direct pour mise à jour immédiate
                 time.sleep(.25)
-                restart = 1
                 
               elif button_row == 7:
                 # BLUE
@@ -7745,161 +8035,330 @@ while True:
 
             # MENU 7 - STRETCH Settings
             elif menu == 7:
+              # Gestion multi-pages - Phase 2
+              current_page = menu_page.get(7, 1)
+
               if button_row == 9:
-                  # Retour CAMERA Settings
-                  menu = 1
-                  Menu()
+                  if current_page == 1 and stretch_preset == 1:
+                      # Page 1 + GHS sélectionné : aller vers Page 2
+                      menu_page[7] = 2
+                      Menu()
+                  elif current_page == 2:
+                      # Page 2 : retour vers Page 1
+                      menu_page[7] = 1
+                      Menu()
+                  else:
+                      # Page 1 + pas GHS : retour CAMERA Settings
+                      menu = 1
+                      Menu()
 
               elif button_row == 1:
-                # STRETCH LOW PERCENTILE (0% à 0.2%, stocké x10)
-                pmin = 0    # 0%
-                pmax = 2    # 0.2%
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
-                    stretch_p_low = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        stretch_p_low = max(0, stretch_p_low - 1)
+                if current_page == 1:
+                    # PAGE 1 - STRETCH LOW PERCENTILE (0% à 0.2%, stocké x10)
+                    pmin = 0    # 0%
+                    pmax = 2    # 0.2%
+                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                        stretch_p_low = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                     else:
-                        stretch_p_low = min(pmax, stretch_p_low + 1)
-                # Note: modification manuelle des paramètres - le preset affiché reste inchangé
-                text(0,1,3,1,1,str(stretch_p_low/10)[0:4],fv,7)
-                draw_Vbar(0,1,greyColor,'stretch_p_low',stretch_p_low)
-                text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
-                draw_Vbar(0,4,greyColor,'stretch_preset',stretch_preset)
-                time.sleep(.05)
+                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                            stretch_p_low = max(0, stretch_p_low - 1)
+                        else:
+                            stretch_p_low = min(pmax, stretch_p_low + 1)
+                    text(0,1,3,1,1,str(stretch_p_low/10)[0:4],fv,7)
+                    draw_Vbar(0,1,greyColor,'stretch_p_low',stretch_p_low)
+                    time.sleep(.05)
+                elif current_page == 2:
+                    # PAGE 2 - Navigation retour (déjà géré par button_row == 9)
+                    # Clic sur ligne 1 = retour Page 1
+                    menu_page[7] = 1
+                    Menu()
 
               elif button_row == 2:
-                # STRETCH HIGH PERCENTILE (99.95% à 100%, stocké x100)
-                pmin = 9995  # 99.95%
-                pmax = 10000 # 100%
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
-                    stretch_p_high = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        stretch_p_high = max(pmin, stretch_p_high - 1)
+                if current_page == 1:
+                    # PAGE 1 - STRETCH HIGH PERCENTILE (99.95% à 100%, stocké x100)
+                    pmin = 9995  # 99.95%
+                    pmax = 10000 # 100%
+                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                        stretch_p_high = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                     else:
-                        stretch_p_high = min(pmax, stretch_p_high + 1)
-                # Note: modification manuelle des paramètres - le preset affiché reste inchangé
-                text(0,2,3,1,1,str(stretch_p_high/100)[0:6],fv,7)
-                draw_Vbar(0,2,greyColor,'stretch_p_high',stretch_p_high)
-                text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
-                draw_Vbar(0,4,greyColor,'stretch_preset',stretch_preset)
-                time.sleep(.05)
+                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                            stretch_p_high = max(pmin, stretch_p_high - 1)
+                        else:
+                            stretch_p_high = min(pmax, stretch_p_high + 1)
+                    text(0,2,3,1,1,str(stretch_p_high/100)[0:6],fv,7)
+                    draw_Vbar(0,2,greyColor,'stretch_p_high',stretch_p_high)
+                    time.sleep(.05)
+                elif current_page == 2:
+                    # PAGE 2 - GHS D (Force) : 0-50 -> 0.0-5.0
+                    for f in range(0,len(video_limits)-1,3):
+                        if video_limits[f] == 'ghs_D':
+                            pmin = video_limits[f+1]
+                            pmax = video_limits[f+2]
+                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                        ghs_D = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
+                    else:
+                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                            ghs_D -= 1
+                            ghs_D = max(ghs_D, pmin)
+                        else:
+                            ghs_D += 1
+                            ghs_D = min(ghs_D, pmax)
+
+                    # Passage automatique en mode Manual
+                    ghs_preset = 0
+
+                    text(0,2,3,1,1,str(ghs_D/10.0)[0:5],fv,7)
+                    draw_Vbar(0,2,greyColor,'ghs_D',ghs_D)
+                    text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
+                    draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
+                    time.sleep(.05)
 
               elif button_row == 3:
-                # STRETCH FACTOR (0 à 5, stocké x10)
-                pmin = 0    # 0.0
-                pmax = 50   # 5.0
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
-                    stretch_factor = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        stretch_factor = max(pmin, stretch_factor - 1)
+                # Ligne 3: Page 1 = STRETCH FACTOR, Page 2 = GHS b (Local intensity)
+                current_page = menu_page.get(7, 1)
+
+                if current_page == 1:
+                    # PAGE 1: STRETCH FACTOR (0 à 5, stocké x10)
+                    pmin = 0    # 0.0
+                    pmax = 50   # 5.0
+                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                        stretch_factor = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                     else:
-                        stretch_factor = min(pmax, stretch_factor + 1)
-                # Note: modification manuelle des paramètres - le preset affiché reste inchangé
-                text(0,3,3,1,1,str(stretch_factor/10)[0:4],fv,7)
-                draw_Vbar(0,3,greyColor,'stretch_factor',stretch_factor)
-                text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
-                draw_Vbar(0,4,greyColor,'stretch_preset',stretch_preset)
+                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                            stretch_factor = max(pmin, stretch_factor - 1)
+                        else:
+                            stretch_factor = min(pmax, stretch_factor + 1)
+                    # Note: modification manuelle des paramètres - le preset affiché reste inchangé
+                    text(0,3,3,1,1,str(stretch_factor/10)[0:4],fv,7)
+                    draw_Vbar(0,3,greyColor,'stretch_factor',stretch_factor)
+                    text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
+                    draw_Vbar(0,4,greyColor,'stretch_preset',stretch_preset)
+
+                elif current_page == 2:
+                    # PAGE 2: GHS b - Local intensity (-5.0 à 15.0, stocké x10)
+                    pmin = -50   # -5.0
+                    pmax = 150   # 15.0
+                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                        ghs_b = int(((mousex-preview_width) / bw) * (pmax-pmin+1) + pmin)
+                    else:
+                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                            ghs_b = max(pmin, ghs_b - 1)
+                        else:
+                            ghs_b = min(pmax, ghs_b + 1)
+
+                    # Passage automatique en mode Manual
+                    ghs_preset = 0
+
+                    text(0,3,3,1,1,str(ghs_b/10.0)[0:5],fv,7)
+                    draw_Vbar(0,3,greyColor,'ghs_b',ghs_b)
+                    text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
+                    draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
+
                 time.sleep(.05)
 
               elif button_row == 4:
-                # STRETCH PRESET
-                pmin = 0
-                pmax = 2  # OFF/GHS/Arcsinh
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
-                    stretch_preset = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        stretch_preset -=1
-                        stretch_preset = max(stretch_preset,pmin)
+                # Ligne 4: Page 1 = STRETCH PRESET, Page 2 = GHS SP (Symmetry point)
+                current_page = menu_page.get(7, 1)
+
+                if current_page == 1:
+                    # PAGE 1: STRETCH PRESET
+                    pmin = 0
+                    pmax = 2  # OFF/GHS/Arcsinh
+                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                        stretch_preset = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                     else:
-                        stretch_preset +=1
-                        stretch_preset = min(stretch_preset,pmax)
+                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                            stretch_preset -=1
+                            stretch_preset = max(stretch_preset,pmin)
+                        else:
+                            stretch_preset +=1
+                            stretch_preset = min(stretch_preset,pmax)
 
-                # Charger les valeurs du preset
-                if stretch_preset == 0:
-                    # OFF - Pas de stretch
-                    pass
-                elif stretch_preset == 1:
-                    # GHS - Paramètres par défaut
-                    ghs_D = 0    # 0.0
-                    ghs_B = 0    # 0.0
-                    ghs_SP = 0   # 0.0
-                elif stretch_preset == 2:
-                    # Arcsinh - Paramètres par défaut
-                    stretch_p_low = 0      # 0%
-                    stretch_p_high = 9998  # 99.98%
-                    stretch_factor = 25    # 2.5
+                    # Charger les valeurs du preset
+                    if stretch_preset == 0:
+                        # OFF - Pas de stretch
+                        pass
+                    elif stretch_preset == 1:
+                        # GHS - Paramètres par défaut
+                        ghs_D = 0    # 0.0
+                        ghs_b = 0    # 0.0
+                        ghs_SP = 0   # 0.0
+                    elif stretch_preset == 2:
+                        # Arcsinh - Paramètres par défaut
+                        stretch_p_low = 0      # 0%
+                        stretch_p_high = 9998  # 99.98%
+                        stretch_factor = 25    # 2.5
 
-                # Mettre à jour l'affichage
-                text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
-                draw_Vbar(0,4,greyColor,'stretch_preset',stretch_preset)
+                    # Mettre à jour l'affichage
+                    text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
+                    draw_Vbar(0,4,greyColor,'stretch_preset',stretch_preset)
 
-                # Mettre à jour l'affichage des paramètres selon le preset
-                if stretch_preset == 1:  # GHS
-                    text(0,5,3,1,1,str(ghs_D/10.0)[0:5],fv,7)
-                    draw_Vbar(0,5,greyColor,'ghs_D',ghs_D)
-                    text(0,6,3,1,1,str(ghs_B/10.0)[0:6],fv,7)
-                    draw_Vbar(0,6,greyColor,'ghs_B',ghs_B)
-                    text(0,7,3,1,1,str(ghs_SP/100.0)[0:5],fv,7)
-                    draw_Vbar(0,7,greyColor,'ghs_SP',ghs_SP)
-                elif stretch_preset == 2:  # Arcsinh
-                    text(0,1,3,1,1,str(stretch_p_low/10)[0:4],fv,7)
-                    draw_Vbar(0,1,greyColor,'stretch_p_low',stretch_p_low)
-                    text(0,2,3,1,1,str(stretch_p_high/100)[0:6],fv,7)
-                    draw_Vbar(0,2,greyColor,'stretch_p_high',stretch_p_high)
-                    text(0,3,3,1,1,str(stretch_factor/10)[0:4],fv,7)
-                    draw_Vbar(0,3,greyColor,'stretch_factor',stretch_factor)
+                    # Mettre à jour l'affichage des paramètres selon le preset
+                    if stretch_preset == 1:  # GHS
+                        text(0,5,3,1,1,str(ghs_D/10.0)[0:5],fv,7)
+                        draw_Vbar(0,5,greyColor,'ghs_D',ghs_D)
+                        text(0,6,3,1,1,str(ghs_b/10.0)[0:6],fv,7)
+                        draw_Vbar(0,6,greyColor,'ghs_b',ghs_b)
+                        text(0,7,3,1,1,str(ghs_SP/100.0)[0:5],fv,7)
+                        draw_Vbar(0,7,greyColor,'ghs_SP',ghs_SP)
+                    elif stretch_preset == 2:  # Arcsinh
+                        text(0,1,3,1,1,str(stretch_p_low/10)[0:4],fv,7)
+                        draw_Vbar(0,1,greyColor,'stretch_p_low',stretch_p_low)
+                        text(0,2,3,1,1,str(stretch_p_high/100)[0:6],fv,7)
+                        draw_Vbar(0,2,greyColor,'stretch_p_high',stretch_p_high)
+                        text(0,3,3,1,1,str(stretch_factor/10)[0:4],fv,7)
+                        draw_Vbar(0,3,greyColor,'stretch_factor',stretch_factor)
 
-                Menu()  # Redessiner le menu pour afficher/cacher les sliders GHS
+                    Menu()  # Redessiner le menu pour afficher/cacher les sliders GHS
+
+                elif current_page == 2:
+                    # PAGE 2: GHS SP - Symmetry point (0.0 à 1.0, stocké x100)
+                    pmin = 0    # 0.0
+                    pmax = 100  # 1.0
+                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                        ghs_SP = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
+                    else:
+                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                            ghs_SP = max(pmin, ghs_SP - 1)
+                        else:
+                            ghs_SP = min(pmax, ghs_SP + 1)
+
+                    # Contraintes: LP <= SP et HP >= SP
+                    if ghs_LP > ghs_SP:
+                        ghs_LP = ghs_SP
+                    if ghs_HP < ghs_SP:
+                        ghs_HP = ghs_SP
+
+                    # Passage automatique en mode Manual
+                    ghs_preset = 0
+
+                    text(0,4,3,1,1,str(ghs_SP/100.0)[0:5],fv,7)
+                    draw_Vbar(0,4,greyColor,'ghs_SP',ghs_SP)
+                    text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
+                    draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
+
                 time.sleep(.05)
 
-              elif button_row == 5 and stretch_preset == 1:
-                # GHS D (-1.0 à 1.0, stocké x10)
-                pmin = -10  # -1.0
-                pmax = 10   # 1.0
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
-                    ghs_D = int(((mousex-preview_width) / bw) * (pmax-pmin+1) + pmin)
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        ghs_D = max(pmin, ghs_D - 1)
-                    else:
-                        ghs_D = min(pmax, ghs_D + 1)
-                text(0,5,3,1,1,str(ghs_D/10.0)[0:5],fv,7)
-                draw_Vbar(0,5,greyColor,'ghs_D',ghs_D)
-                time.sleep(.05)
+              elif button_row == 5:
+                # Ligne 5: Page 1 = (vide), Page 2 = GHS LP (Protect shadows)
+                current_page = menu_page.get(7, 1)
 
-              elif button_row == 6 and stretch_preset == 1:
-                # GHS B (-30.0 à 10.0, stocké x10)
-                pmin = -300  # -30.0
-                pmax = 100   # 10.0
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
-                    ghs_B = int(((mousex-preview_width) / bw) * (pmax-pmin+1) + pmin)
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        ghs_B = max(pmin, ghs_B - 10)
+                if current_page == 2:
+                    # PAGE 2: GHS LP - Protect shadows (0.0 à 1.0, stocké x100)
+                    # Contrainte: LP <= SP
+                    pmin = 0          # 0.0
+                    pmax = ghs_SP     # Limité par SP
+                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                        ghs_LP = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                     else:
-                        ghs_B = min(pmax, ghs_B + 10)
-                text(0,6,3,1,1,str(ghs_B/10.0)[0:6],fv,7)
-                draw_Vbar(0,6,greyColor,'ghs_B',ghs_B)
-                time.sleep(.05)
+                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                            ghs_LP = max(pmin, ghs_LP - 1)
+                        else:
+                            ghs_LP = min(pmax, ghs_LP + 1)
 
-              elif button_row == 7 and stretch_preset == 1:
-                # GHS SP (0.0 à 1.0, stocké x100)
-                pmin = 0    # 0.0
-                pmax = 100  # 1.0
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
-                    ghs_SP = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        ghs_SP = max(pmin, ghs_SP - 1)
+                    # Forcer LP <= SP
+                    if ghs_LP > ghs_SP:
+                        ghs_LP = ghs_SP
+
+                    # Passage automatique en mode Manual
+                    ghs_preset = 0
+
+                    text(0,5,3,1,1,str(ghs_LP/100.0)[0:5],fv,7)
+                    draw_Vbar(0,5,greyColor,'ghs_LP',ghs_LP)
+                    text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
+                    draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
+                    time.sleep(.05)
+
+              elif button_row == 6:
+                # Ligne 6: Page 1 = (vide), Page 2 = GHS HP (Protect highlights)
+                current_page = menu_page.get(7, 1)
+
+                if current_page == 2:
+                    # PAGE 2: GHS HP - Protect highlights (0.0 à 1.0, stocké x100)
+                    # Contrainte: HP >= SP
+                    pmin = ghs_SP     # Limité par SP
+                    pmax = 100        # 1.0
+                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                        ghs_HP = int(((mousex-preview_width) / bw) * (pmax-pmin+1) + pmin)
                     else:
-                        ghs_SP = min(pmax, ghs_SP + 1)
-                text(0,7,3,1,1,str(ghs_SP/100.0)[0:5],fv,7)
-                draw_Vbar(0,7,greyColor,'ghs_SP',ghs_SP)
-                time.sleep(.05)
+                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                            ghs_HP = max(pmin, ghs_HP - 1)
+                        else:
+                            ghs_HP = min(pmax, ghs_HP + 1)
+
+                    # Forcer HP >= SP
+                    if ghs_HP < ghs_SP:
+                        ghs_HP = ghs_SP
+
+                    # Passage automatique en mode Manual
+                    ghs_preset = 0
+
+                    text(0,6,3,1,1,str(ghs_HP/100.0)[0:5],fv,7)
+                    draw_Vbar(0,6,greyColor,'ghs_HP',ghs_HP)
+                    text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
+                    draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
+                    time.sleep(.05)
+
+              elif button_row == 7:
+                # Ligne 7: Page 1 = (vide), Page 2 = GHS Preset
+                current_page = menu_page.get(7, 1)
+
+                if current_page == 2:
+                    # PAGE 2: GHS Preset - Charger valeurs prédéfinies
+                    pmin = 0
+                    pmax = 3  # 0=Manual, 1=Galaxies, 2=Nébuleuses, 3=Étirement initial
+                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                        ghs_preset = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                    else:
+                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                            ghs_preset -=1
+                            ghs_preset = max(ghs_preset,pmin)
+                        else:
+                            ghs_preset +=1
+                            ghs_preset = min(ghs_preset,pmax)
+
+                    # Charger les valeurs du preset GHS
+                    if ghs_preset == 1:
+                        # Galaxies (ciel profond)
+                        ghs_D = 20    # 2.0
+                        ghs_b = 60    # 6.0
+                        ghs_SP = 15   # 0.15
+                        ghs_LP = 0    # 0.0
+                        ghs_HP = 85   # 0.85
+                    elif ghs_preset == 2:
+                        # Nébuleuses (émission)
+                        ghs_D = 25    # 2.5
+                        ghs_b = 40    # 4.0
+                        ghs_SP = 10   # 0.10
+                        ghs_LP = 2    # 0.02
+                        ghs_HP = 95   # 0.95
+                    elif ghs_preset == 3:
+                        # Étirement initial (linéaire -> non-linéaire)
+                        ghs_D = 35    # 3.5
+                        ghs_b = 120   # 12.0
+                        ghs_SP = 8    # 0.08
+                        ghs_LP = 0    # 0.0
+                        ghs_HP = 100  # 1.0
+                    # Si ghs_preset == 0 (Manual), ne rien changer
+
+                    # Mettre à jour l'affichage
+                    text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
+                    draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
+
+                    # Mettre à jour l'affichage de tous les paramètres GHS
+                    if ghs_preset > 0:  # Si ce n'est pas Manual, redessiner les sliders
+                        text(0,2,3,1,1,str(ghs_D/10.0)[0:5],fv,7)
+                        draw_Vbar(0,2,greyColor,'ghs_D',ghs_D)
+                        text(0,3,3,1,1,str(ghs_b/10.0)[0:5],fv,7)
+                        draw_Vbar(0,3,greyColor,'ghs_b',ghs_b)
+                        text(0,4,3,1,1,str(ghs_SP/100.0)[0:5],fv,7)
+                        draw_Vbar(0,4,greyColor,'ghs_SP',ghs_SP)
+                        text(0,5,3,1,1,str(ghs_LP/100.0)[0:5],fv,7)
+                        draw_Vbar(0,5,greyColor,'ghs_LP',ghs_LP)
+                        text(0,6,3,1,1,str(ghs_HP/100.0)[0:5],fv,7)
+                        draw_Vbar(0,6,greyColor,'ghs_HP',ghs_HP)
+
+                    time.sleep(.05)
 
               elif button_row == 8:
                    # SAVE CONFIG
@@ -7976,7 +8435,7 @@ while True:
                       text(0,1,3,1,1,stack_methods[ls_stack_method],fv,7)
                       draw_Vbar(0,1,greyColor,'ls_stack_method',ls_stack_method)
                       # Mettre à jour la config livestack en temps réel
-                      if livestack_active and livestack is not None:
+                      if livestack is not None:
                           method_names = ['mean', 'median', 'kappa_sigma', 'winsorized', 'weighted']
                           livestack.configure(stacking_method=method_names[ls_stack_method])
                       time.sleep(.05)
@@ -7999,7 +8458,7 @@ while True:
                       text(0,2,3,1,1,str(ls_stack_kappa/10.0)[0:4],fv,7)
                       draw_Vbar(0,2,greyColor,'ls_stack_kappa',ls_stack_kappa)
                       # Mettre à jour la config livestack en temps réel
-                      if livestack_active and livestack is not None:
+                      if livestack is not None:
                           livestack.configure(kappa=ls_stack_kappa / 10.0)
                       time.sleep(.05)
 
@@ -8021,7 +8480,7 @@ while True:
                       text(0,3,3,1,1,str(ls_stack_iterations),fv,7)
                       draw_Vbar(0,3,greyColor,'ls_stack_iterations',ls_stack_iterations)
                       # Mettre à jour la config livestack en temps réel
-                      if livestack_active and livestack is not None:
+                      if livestack is not None:
                           livestack.configure(iterations=ls_stack_iterations)
                       time.sleep(.05)
 
@@ -8034,7 +8493,7 @@ while True:
                           text(0,4,3,1,1,"ON",fv,7)
                       draw_Vbar(0,4,greyColor,'ls_planetary_enable',ls_planetary_enable)
                       # Mettre à jour la config livestack en temps réel
-                      if livestack_active and livestack is not None:
+                      if livestack is not None:
                           livestack.configure(planetary_enable=bool(ls_planetary_enable))
                       time.sleep(.05)
 
@@ -8056,7 +8515,7 @@ while True:
                       text(0,5,3,1,1,planetary_modes[ls_planetary_mode],fv,7)
                       draw_Vbar(0,5,greyColor,'ls_planetary_mode',ls_planetary_mode)
                       # Mettre à jour la config livestack en temps réel
-                      if livestack_active and livestack is not None:
+                      if livestack is not None:
                           mode_names = ['disk', 'surface', 'hybrid']
                           livestack.configure(planetary_mode=mode_names[ls_planetary_mode])
                       time.sleep(.05)
@@ -8079,7 +8538,7 @@ while True:
                       text(0,6,3,1,1,str(ls_planetary_disk_min),fv,7)
                       draw_Vbar(0,6,greyColor,'ls_planetary_disk_min',ls_planetary_disk_min)
                       # Mettre à jour la config livestack en temps réel
-                      if livestack_active and livestack is not None:
+                      if livestack is not None:
                           livestack.configure(planetary_disk_min=ls_planetary_disk_min)
                       time.sleep(.05)
 
@@ -8101,7 +8560,7 @@ while True:
                       text(0,7,3,1,1,str(ls_planetary_disk_max),fv,7)
                       draw_Vbar(0,7,greyColor,'ls_planetary_disk_max',ls_planetary_disk_max)
                       # Mettre à jour la config livestack en temps réel
-                      if livestack_active and livestack is not None:
+                      if livestack is not None:
                           livestack.configure(planetary_disk_max=ls_planetary_disk_max)
                       time.sleep(.05)
 
@@ -8150,38 +8609,45 @@ while True:
                       config[40] = stretch_factor
                       config[41] = stretch_preset
                       config[42] = ghs_D
-                      config[43] = ghs_B
+                      config[43] = ghs_b
                       config[44] = ghs_SP
-                      config[45] = ls_preview_refresh
-                      config[46] = ls_alignment_mode
-                      config[47] = ls_enable_qc
-                      config[48] = ls_max_fwhm
-                      config[49] = ls_min_sharpness
-                      config[50] = ls_max_drift
-                      config[51] = ls_min_stars
-                      config[52] = ls_stack_method
-                      config[53] = ls_stack_kappa
-                      config[54] = ls_stack_iterations
-                      config[55] = ls_planetary_enable
-                      config[56] = ls_planetary_mode
-                      config[57] = ls_planetary_disk_min
-                      config[58] = ls_planetary_disk_max
-                      config[59] = ls_planetary_threshold
-                      config[60] = ls_planetary_margin
-                      config[61] = ls_planetary_ellipse
-                      config[62] = ls_planetary_window
-                      config[63] = ls_planetary_upsample
-                      config[64] = ls_planetary_highpass
-                      config[65] = ls_planetary_roi_center
-                      config[66] = ls_planetary_corr
-                      config[67] = ls_planetary_max_shift
-                      config[68] = ls_lucky_enable
-                      config[69] = ls_lucky_buffer
-                      config[70] = ls_lucky_keep
-                      config[71] = ls_lucky_score
-                      config[72] = ls_lucky_stack
-                      config[73] = ls_lucky_align
-                      config[74] = ls_lucky_roi
+                      config[45] = ghs_LP
+                      config[46] = ghs_HP
+                      config[47] = ghs_preset
+                      config[48] = ls_preview_refresh
+                      config[49] = ls_alignment_mode
+                      config[50] = ls_enable_qc
+                      config[51] = ls_max_fwhm
+                      config[52] = ls_min_sharpness
+                      config[53] = ls_max_drift
+                      config[54] = ls_min_stars
+                      config[55] = ls_stack_method
+                      config[56] = ls_stack_kappa
+                      config[57] = ls_stack_iterations
+                      config[58] = ls_planetary_enable
+                      config[59] = ls_planetary_mode
+                      config[60] = ls_planetary_disk_min
+                      config[61] = ls_planetary_disk_max
+                      config[62] = ls_planetary_threshold
+                      config[63] = ls_planetary_margin
+                      config[64] = ls_planetary_ellipse
+                      config[65] = ls_planetary_window
+                      config[66] = ls_planetary_upsample
+                      config[67] = ls_planetary_highpass
+                      config[68] = ls_planetary_roi_center
+                      config[69] = ls_planetary_corr
+                      config[70] = ls_planetary_max_shift
+                      config[71] = ls_lucky_buffer
+                      config[72] = ls_lucky_keep
+                      config[73] = ls_lucky_score
+                      config[74] = ls_lucky_stack
+                      config[75] = ls_lucky_align
+                      config[76] = ls_lucky_roi
+                      config[77] = use_native_sensor_mode
+                      config[78] = focus_method
+                      config[79] = star_metric
+                      config[80] = snr_display
+                      config[81] = metrics_interval
                       with open(config_file, 'w') as f:
                           for item in range(0,len(titles)):
                               f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -8206,8 +8672,8 @@ while True:
                         ls_preview_refresh = min(ls_preview_refresh,pmax)
                 text(0,1,3,1,1,str(ls_preview_refresh),fv,7)
                 draw_Vbar(0,1,greyColor,'ls_preview_refresh',ls_preview_refresh)
-                # Mettre à jour la config livestack en temps réel
-                if livestack_active and livestack is not None:
+                # Mettre à jour la config (même si arrêté)
+                if livestack is not None:
                     livestack.configure(preview_refresh=ls_preview_refresh)
                 time.sleep(.05)
 
@@ -8228,8 +8694,8 @@ while True:
                         ls_alignment_mode = min(ls_alignment_mode,pmax)
                 text(0,2,3,1,1,ls_alignment_modes[ls_alignment_mode],fv,7)
                 draw_Vbar(0,2,greyColor,'ls_alignment_mode',ls_alignment_mode)
-                # Mettre à jour la config livestack en temps réel
-                if livestack_active and livestack is not None:
+                # Mettre à jour la config (même si arrêté)
+                if livestack is not None:
                     livestack.configure(alignment_mode=ls_alignment_modes[ls_alignment_mode])
                 time.sleep(.05)
 
@@ -8254,7 +8720,7 @@ while True:
                     text(0,3,3,1,1,str(ls_max_fwhm/10)[0:4],fv,7)
                 draw_Vbar(0,3,greyColor,'ls_max_fwhm',ls_max_fwhm)
                 # Mettre à jour la config livestack en temps réel
-                if livestack_active and livestack is not None:
+                if livestack is not None:
                     livestack.configure(max_fwhm=ls_max_fwhm / 10.0 if ls_max_fwhm > 0 else 999.0)
                 time.sleep(.05)
 
@@ -8279,7 +8745,7 @@ while True:
                     text(0,4,3,1,1,str(ls_min_sharpness/1000)[0:5],fv,7)
                 draw_Vbar(0,4,greyColor,'ls_min_sharpness',ls_min_sharpness)
                 # Mettre à jour la config livestack en temps réel
-                if livestack_active and livestack is not None:
+                if livestack is not None:
                     livestack.configure(min_sharpness=ls_min_sharpness / 1000.0 if ls_min_sharpness > 0 else 0.0)
                 time.sleep(.05)
 
@@ -8304,7 +8770,7 @@ while True:
                     text(0,5,3,1,1,str(ls_max_drift),fv,7)
                 draw_Vbar(0,5,greyColor,'ls_max_drift',ls_max_drift)
                 # Mettre à jour la config livestack en temps réel
-                if livestack_active and livestack is not None:
+                if livestack is not None:
                     livestack.configure(max_drift=float(ls_max_drift) if ls_max_drift > 0 else 999999.0)
                 time.sleep(.05)
 
@@ -8329,7 +8795,7 @@ while True:
                     text(0,6,3,1,1,str(ls_min_stars),fv,7)
                 draw_Vbar(0,6,greyColor,'ls_min_stars',ls_min_stars)
                 # Mettre à jour la config livestack en temps réel
-                if livestack_active and livestack is not None:
+                if livestack is not None:
                     livestack.configure(min_stars=int(ls_min_stars))
                 time.sleep(.05)
 
@@ -8350,22 +8816,9 @@ while True:
                     text(0,7,3,1,1,"ON",fv,7)
                 draw_Vbar(0,7,greyColor,'ls_enable_qc',ls_enable_qc)
                 # Mettre à jour la config livestack en temps réel
-                if livestack_active and livestack is not None:
+                if livestack is not None:
                     livestack.configure(enable_qc=bool(ls_enable_qc))
                 time.sleep(.05)
-
-              elif current_page == 1 and button_row == 8:
-                   # PAGE 1 : LUCKY ENABLE (toggle 0/1)
-                   ls_lucky_enable = 1 - ls_lucky_enable
-                   if ls_lucky_enable == 0:
-                       text(0,8,3,1,1,"OFF",fv,7)
-                   else:
-                       text(0,8,3,1,1,"ON",fv,7)
-                   draw_Vbar(0,8,greyColor,'ls_lucky_enable',ls_lucky_enable)
-                   # Mettre à jour la config livestack en temps réel
-                   if livestack_active and livestack is not None:
-                       livestack.configure(lucky_enable=bool(ls_lucky_enable))
-                   time.sleep(.05)
 
               elif current_page == 2 and button_row == 8:
                    # PAGE 2 : SAVE CONFIG
@@ -8413,56 +8866,230 @@ while True:
                    config[40] = stretch_factor
                    config[41] = stretch_preset
                    config[42] = ghs_D
-                   config[43] = ghs_B
+                   config[43] = ghs_b
                    config[44] = ghs_SP
-                   config[45] = ls_preview_refresh
-                   config[46] = ls_alignment_mode
-                   config[47] = ls_enable_qc
-                   config[48] = ls_max_fwhm
-                   config[49] = ls_min_sharpness
-                   config[50] = ls_max_drift
-                   config[51] = ls_min_stars
-                   config[52] = ls_stack_method
-                   config[53] = ls_stack_kappa
-                   config[54] = ls_stack_iterations
-                   config[55] = ls_planetary_enable
-                   config[56] = ls_planetary_mode
-                   config[57] = ls_planetary_disk_min
-                   config[58] = ls_planetary_disk_max
-                   config[59] = ls_planetary_threshold
-                   config[60] = ls_planetary_margin
-                   config[61] = ls_planetary_ellipse
-                   config[62] = ls_planetary_window
-                   config[63] = ls_planetary_upsample
-                   config[64] = ls_planetary_highpass
-                   config[65] = ls_planetary_roi_center
-                   config[66] = ls_planetary_corr
-                   config[67] = ls_planetary_max_shift
-                   config[68] = ls_lucky_enable
-                   config[69] = ls_lucky_buffer
-                   config[70] = ls_lucky_keep
-                   config[71] = ls_lucky_score
-                   config[72] = ls_lucky_stack
-                   config[73] = ls_lucky_align
-                   config[74] = ls_lucky_roi
+                   config[45] = ghs_LP
+                   config[46] = ghs_HP
+                   config[47] = ghs_preset
+                   config[48] = ls_preview_refresh
+                   config[49] = ls_alignment_mode
+                   config[50] = ls_enable_qc
+                   config[51] = ls_max_fwhm
+                   config[52] = ls_min_sharpness
+                   config[53] = ls_max_drift
+                   config[54] = ls_min_stars
+                   config[55] = ls_stack_method
+                   config[56] = ls_stack_kappa
+                   config[57] = ls_stack_iterations
+                   config[58] = ls_planetary_enable
+                   config[59] = ls_planetary_mode
+                   config[60] = ls_planetary_disk_min
+                   config[61] = ls_planetary_disk_max
+                   config[62] = ls_planetary_threshold
+                   config[63] = ls_planetary_margin
+                   config[64] = ls_planetary_ellipse
+                   config[65] = ls_planetary_window
+                   config[66] = ls_planetary_upsample
+                   config[67] = ls_planetary_highpass
+                   config[68] = ls_planetary_roi_center
+                   config[69] = ls_planetary_corr
+                   config[70] = ls_planetary_max_shift
+                   config[71] = ls_lucky_buffer
+                   config[72] = ls_lucky_keep
+                   config[73] = ls_lucky_score
+                   config[74] = ls_lucky_stack
+                   config[75] = ls_lucky_align
+                   config[76] = ls_lucky_roi
+                   config[77] = use_native_sensor_mode
+                   config[78] = focus_method
+                   config[79] = star_metric
+                   config[80] = snr_display
+                   config[81] = metrics_interval
                    with open(config_file, 'w') as f:
                        for item in range(0,len(titles)):
                            f.write(titles[item] + " : " + str(config[item]) + "\n")
                    time.sleep(1)
                    text(0,8,2,0,1,"SAVE CONFIG",fv,7)
 
-              elif button_row == 9:
-                  # Navigation entre pages ou retour
-                  current_page = menu_page.get(8, 1)
+              elif current_page == 1 and button_row == 8:
+                  # Page 1 - Bouton ligne 8 : Navigation vers Page 2
+                  menu_page[8] = 2
+                  Menu()
 
-                  if current_page == 1:
-                      # Page 1 -> Page 2
-                      menu_page[8] = 2
-                      Menu()
-                  else:
+              elif button_row == 9:
+                  # Navigation: Retour Page 2 -> Page 1
+                  current_page = menu_page.get(8, 1)
+                  if current_page == 2:
                       # Page 2 -> Page 1
                       menu_page[8] = 1
                       Menu()
+
+            elif menu == 10:
+              # METRICS Settings - Gestion des clics
+              if button_row == 1:
+                # FOCUS METHOD (0-4: OFF/Laplacian/Gradient/Sobel/Tenengrad)
+                pmin = 0
+                pmax = 4
+                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    focus_method = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                    focus_method = min(focus_method, pmax)  # Limiter à pmax
+                else:
+                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                        focus_method -=1
+                        focus_method = max(focus_method,pmin)
+                    else:
+                        focus_method +=1
+                        focus_method = min(focus_method,pmax)
+                text(0,1,3,1,1,focus_methods[focus_method],fv,10)
+                draw_bar(0,1,lgrnColor,'focus_method',focus_method)
+                time.sleep(.05)
+
+              elif button_row == 2:
+                # STAR METRIC (0-2: OFF/HFR/FWHM)
+                pmin = 0
+                pmax = 2
+                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    star_metric = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                    star_metric = min(star_metric, pmax)  # Limiter à pmax
+                else:
+                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                        star_metric -=1
+                        star_metric = max(star_metric,pmin)
+                    else:
+                        star_metric +=1
+                        star_metric = min(star_metric,pmax)
+                text(0,2,3,1,1,star_metrics[star_metric],fv,10)
+                draw_bar(0,2,lgrnColor,'star_metric',star_metric)
+                time.sleep(.05)
+
+              elif button_row == 3:
+                # SNR DISPLAY (0-1: OFF/ON)
+                pmin = 0
+                pmax = 1
+                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    snr_display = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                else:
+                    # Toggle entre 0 et 1
+                    snr_display = 1 - snr_display
+                if snr_display == 0:
+                    text(0,3,3,1,1,"OFF",fv,10)
+                else:
+                    text(0,3,3,1,1,"ON",fv,10)
+                draw_bar(0,3,lgrnColor,'snr_display',snr_display)
+                time.sleep(.05)
+
+              elif button_row == 4:
+                # CALC INTERVAL (1-10 frames)
+                pmin = 1
+                pmax = 10
+                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    metrics_interval = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
+                else:
+                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                        metrics_interval -=1
+                        metrics_interval = max(metrics_interval,pmin)
+                    else:
+                        metrics_interval +=1
+                        metrics_interval = min(metrics_interval,pmax)
+                text(0,4,3,1,1,str(metrics_interval),fv,10)
+                draw_bar(0,4,lgrnColor,'metrics_interval',metrics_interval)
+                time.sleep(.05)
+
+              elif button_row == 8:
+                # SAVE CONFIG
+                text(0,8,3,0,1,"SAVE Config",fv,10)
+                config[0] = mode
+                config[1] = speed
+                config[2] = gain
+                config[3] = int(brightness)
+                config[4] = int(contrast)
+                config[5] = frame
+                config[6] = int(red)
+                config[7] = int(blue)
+                config[8] = ev
+                config[9] = vlen
+                config[10] = fps
+                config[11] = vformat
+                config[12] = codec
+                config[13] = tinterval
+                config[14] = tshots
+                config[15] = extn
+                config[16] = zx
+                config[17] = zy
+                config[18] = zoom
+                config[19] = int(saturation)
+                config[20] = meter
+                config[21] = awb
+                config[22] = sharpness
+                config[23] = int(denoise)
+                config[24] = quality
+                config[25] = profile
+                config[26] = level
+                config[27] = histogram
+                config[28] = histarea
+                config[29] = v3_f_speed
+                config[30] = v3_f_range
+                config[31] = rotate
+                config[32] = IRF
+                config[33] = str_cap
+                config[34] = v3_hdr
+                config[35] = timet
+                config[36] = vflip
+                config[37] = hflip
+                config[38] = stretch_p_low
+                config[39] = stretch_p_high
+                config[40] = stretch_factor
+                config[41] = stretch_preset
+                config[42] = ghs_D
+                config[43] = ghs_b
+                config[44] = ghs_SP
+                config[45] = ghs_LP
+                config[46] = ghs_HP
+                config[47] = ghs_preset
+                config[48] = ls_preview_refresh
+                config[49] = ls_alignment_mode
+                config[50] = ls_enable_qc
+                config[51] = ls_max_fwhm
+                config[52] = ls_min_sharpness
+                config[53] = ls_max_drift
+                config[54] = ls_min_stars
+                config[55] = ls_stack_method
+                config[56] = ls_stack_kappa
+                config[57] = ls_stack_iterations
+                config[58] = ls_planetary_enable
+                config[59] = ls_planetary_mode
+                config[60] = ls_planetary_disk_min
+                config[61] = ls_planetary_disk_max
+                config[62] = ls_planetary_threshold
+                config[63] = ls_planetary_margin
+                config[64] = ls_planetary_ellipse
+                config[65] = ls_planetary_window
+                config[66] = ls_planetary_upsample
+                config[67] = ls_planetary_highpass
+                config[68] = ls_planetary_roi_center
+                config[69] = ls_planetary_corr
+                config[70] = ls_planetary_max_shift
+                config[71] = ls_lucky_buffer
+                config[72] = ls_lucky_keep
+                config[73] = ls_lucky_score
+                config[74] = ls_lucky_stack
+                config[75] = ls_lucky_align
+                config[76] = ls_lucky_roi
+                config[77] = use_native_sensor_mode
+                config[78] = focus_method
+                config[79] = star_metric
+                config[80] = snr_display
+                config[81] = metrics_interval
+                with open(config_file, 'w') as f:
+                    for item in range(0,len(titles)):
+                        f.write(titles[item] + " : " + str(config[item]) + "\n")
+                time.sleep(1)
+                text(0,8,2,0,1,"SAVE CONFIG",fv,10)
+
+              elif button_row == 9:
+                # Retour menu OTHER Settings (menu 2)
+                menu = 2
+                Menu()
 
             elif menu == 9:
               # LUCKY STACK Settings - Gestion complète
@@ -8483,11 +9110,19 @@ while True:
                         ls_lucky_buffer = min(ls_lucky_buffer,pmax)
                 text(0,1,3,1,1,str(ls_lucky_buffer),fv,7)
                 draw_Vbar(0,1,greyColor,'ls_lucky_buffer',ls_lucky_buffer)
-                # Mettre à jour la config en temps réel (luckystack ou livestack si lucky activé)
-                if luckystack_active and luckystack is not None:
+                # Mettre à jour la config en temps réel (même si stacker arrêté)
+                print(f"[DEBUG] ls_lucky_buffer changé à {ls_lucky_buffer}")
+                print(f"[DEBUG] luckystack_active={luckystack_active}, luckystack={luckystack}")
+                print(f"[DEBUG] livestack_active={livestack_active}, livestack={livestack}")
+                # Toujours appeler configure() si l'objet existe (actif ou non)
+                if luckystack is not None:
+                    print(f"[DEBUG] Appel luckystack.configure(lucky_buffer_size={ls_lucky_buffer}) [actif={luckystack_active}]")
                     luckystack.configure(lucky_buffer_size=ls_lucky_buffer)
-                elif livestack_active and livestack is not None and ls_lucky_enable:
+                elif livestack is not None:
+                    print(f"[DEBUG] Appel livestack.configure(lucky_buffer_size={ls_lucky_buffer}) [actif={livestack_active}]")
                     livestack.configure(lucky_buffer_size=ls_lucky_buffer)
+                else:
+                    print(f"[DEBUG] AUCUN objet luckystack/livestack disponible")
                 time.sleep(.05)
 
               elif button_row == 2:
@@ -8507,10 +9142,10 @@ while True:
                         ls_lucky_keep = min(ls_lucky_keep,pmax)
                 text(0,2,3,1,1,str(ls_lucky_keep)+"%",fv,7)
                 draw_Vbar(0,2,greyColor,'ls_lucky_keep',ls_lucky_keep)
-                # Mettre à jour la config en temps réel
-                if luckystack_active and luckystack is not None:
+                # Mettre à jour la config (même si arrêté)
+                if luckystack is not None:
                     luckystack.configure(lucky_keep_percent=float(ls_lucky_keep))
-                elif livestack_active and livestack is not None and ls_lucky_enable:
+                elif livestack is not None:
                     livestack.configure(lucky_keep_percent=float(ls_lucky_keep))
                 time.sleep(.05)
 
@@ -8531,12 +9166,11 @@ while True:
                         ls_lucky_score = min(ls_lucky_score,pmax)
                 text(0,3,3,1,1,lucky_score_methods[ls_lucky_score],fv,7)
                 draw_Vbar(0,3,greyColor,'ls_lucky_score',ls_lucky_score)
-                # Mettre à jour la config en temps réel
-                if luckystack_active and luckystack is not None:
-                    score_names = ['laplacian', 'gradient', 'sobel', 'tenengrad']
+                # Mettre à jour la config (même si arrêté)
+                score_names = ['laplacian', 'gradient', 'sobel', 'tenengrad']
+                if luckystack is not None:
                     luckystack.configure(lucky_score_method=score_names[ls_lucky_score])
-                elif livestack_active and livestack is not None and ls_lucky_enable:
-                    score_names = ['laplacian', 'gradient', 'sobel', 'tenengrad']
+                elif livestack is not None:
                     livestack.configure(lucky_score_method=score_names[ls_lucky_score])
                 time.sleep(.05)
 
@@ -8557,12 +9191,11 @@ while True:
                         ls_lucky_stack = min(ls_lucky_stack,pmax)
                 text(0,4,3,1,1,lucky_stack_methods[ls_lucky_stack],fv,7)
                 draw_Vbar(0,4,greyColor,'ls_lucky_stack',ls_lucky_stack)
-                # Mettre à jour la config en temps réel
-                if luckystack_active and luckystack is not None:
-                    stack_names = ['mean', 'median', 'sigma_clip']
+                # Mettre à jour la config (même si arrêté)
+                stack_names = ['mean', 'median', 'sigma_clip']
+                if luckystack is not None:
                     luckystack.configure(lucky_stack_method=stack_names[ls_lucky_stack])
-                elif livestack_active and livestack is not None and ls_lucky_enable:
-                    stack_names = ['mean', 'median', 'sigma_clip']
+                elif livestack is not None:
                     livestack.configure(lucky_stack_method=stack_names[ls_lucky_stack])
                 time.sleep(.05)
 
@@ -8574,11 +9207,11 @@ while True:
                 else:
                     text(0,5,3,1,1,"ON",fv,7)
                 draw_Vbar(0,5,greyColor,'ls_lucky_align',ls_lucky_align)
-                # Mettre à jour la config en temps réel
-                if luckystack_active and luckystack is not None:
-                    luckystack.configure(lucky_align=bool(ls_lucky_align))
-                elif livestack_active and livestack is not None and ls_lucky_enable:
-                    livestack.configure(lucky_align=bool(ls_lucky_align))
+                # Mettre à jour la config (même si arrêté)
+                if luckystack is not None:
+                    luckystack.configure(lucky_align_enabled=bool(ls_lucky_align))
+                elif livestack is not None:
+                    livestack.configure(lucky_align_enabled=bool(ls_lucky_align))
                 time.sleep(.05)
 
               elif button_row == 6:
@@ -8598,11 +9231,11 @@ while True:
                         ls_lucky_roi = min(ls_lucky_roi,pmax)
                 text(0,6,3,1,1,str(ls_lucky_roi)+"%",fv,7)
                 draw_Vbar(0,6,greyColor,'ls_lucky_roi',ls_lucky_roi)
-                # Mettre à jour la config en temps réel
-                if luckystack_active and luckystack is not None:
-                    luckystack.configure(lucky_roi_percent=float(ls_lucky_roi))
-                elif livestack_active and livestack is not None and ls_lucky_enable:
-                    livestack.configure(lucky_roi_percent=float(ls_lucky_roi))
+                # Mettre à jour la config (même si arrêté)
+                if luckystack is not None:
+                    luckystack.configure(lucky_score_roi_percent=float(ls_lucky_roi))
+                elif livestack is not None:
+                    livestack.configure(lucky_score_roi_percent=float(ls_lucky_roi))
                 time.sleep(.05)
 
               elif button_row == 8:
@@ -8651,38 +9284,45 @@ while True:
                    config[40] = stretch_factor
                    config[41] = stretch_preset
                    config[42] = ghs_D
-                   config[43] = ghs_B
+                   config[43] = ghs_b
                    config[44] = ghs_SP
-                   config[45] = ls_preview_refresh
-                   config[46] = ls_alignment_mode
-                   config[47] = ls_enable_qc
-                   config[48] = ls_max_fwhm
-                   config[49] = ls_min_sharpness
-                   config[50] = ls_max_drift
-                   config[51] = ls_min_stars
-                   config[52] = ls_stack_method
-                   config[53] = ls_stack_kappa
-                   config[54] = ls_stack_iterations
-                   config[55] = ls_planetary_enable
-                   config[56] = ls_planetary_mode
-                   config[57] = ls_planetary_disk_min
-                   config[58] = ls_planetary_disk_max
-                   config[59] = ls_planetary_threshold
-                   config[60] = ls_planetary_margin
-                   config[61] = ls_planetary_ellipse
-                   config[62] = ls_planetary_window
-                   config[63] = ls_planetary_upsample
-                   config[64] = ls_planetary_highpass
-                   config[65] = ls_planetary_roi_center
-                   config[66] = ls_planetary_corr
-                   config[67] = ls_planetary_max_shift
-                   config[68] = ls_lucky_enable
-                   config[69] = ls_lucky_buffer
-                   config[70] = ls_lucky_keep
-                   config[71] = ls_lucky_score
-                   config[72] = ls_lucky_stack
-                   config[73] = ls_lucky_align
-                   config[74] = ls_lucky_roi
+                   config[45] = ghs_LP
+                   config[46] = ghs_HP
+                   config[47] = ghs_preset
+                   config[48] = ls_preview_refresh
+                   config[49] = ls_alignment_mode
+                   config[50] = ls_enable_qc
+                   config[51] = ls_max_fwhm
+                   config[52] = ls_min_sharpness
+                   config[53] = ls_max_drift
+                   config[54] = ls_min_stars
+                   config[55] = ls_stack_method
+                   config[56] = ls_stack_kappa
+                   config[57] = ls_stack_iterations
+                   config[58] = ls_planetary_enable
+                   config[59] = ls_planetary_mode
+                   config[60] = ls_planetary_disk_min
+                   config[61] = ls_planetary_disk_max
+                   config[62] = ls_planetary_threshold
+                   config[63] = ls_planetary_margin
+                   config[64] = ls_planetary_ellipse
+                   config[65] = ls_planetary_window
+                   config[66] = ls_planetary_upsample
+                   config[67] = ls_planetary_highpass
+                   config[68] = ls_planetary_roi_center
+                   config[69] = ls_planetary_corr
+                   config[70] = ls_planetary_max_shift
+                   config[71] = ls_lucky_buffer
+                   config[72] = ls_lucky_keep
+                   config[73] = ls_lucky_score
+                   config[74] = ls_lucky_stack
+                   config[75] = ls_lucky_align
+                   config[76] = ls_lucky_roi
+                   config[77] = use_native_sensor_mode
+                   config[78] = focus_method
+                   config[79] = star_metric
+                   config[80] = snr_display
+                   config[81] = metrics_interval
                    with open(config_file, 'w') as f:
                        for item in range(0,len(titles)):
                            f.write(titles[item] + " : " + str(config[item]) + "\n")
