@@ -1,0 +1,21 @@
+{
+  "black_level": 0,
+  "wb_red_gain": 1.0,
+  "wb_green_gain": 1.0,
+  "wb_blue_gain": 0.5,
+  "ccm": [
+    [1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0]
+  ],
+  "gamma": 1.0,
+  "contrast": 1.1,
+  "saturation": 1.0,
+  "sharpening": 0.0,
+  "calibration_info": {
+    "source": "manual",
+    "description": "ISP neutre pour astrophotographie - paramètres transparents",
+    "target": "preview_only",
+    "note": "N'affecte QUE les PNG de prévisualisation, PAS les fichiers FITS"
+  }
+}

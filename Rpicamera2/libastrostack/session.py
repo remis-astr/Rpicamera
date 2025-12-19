@@ -15,8 +15,9 @@ from .config import StackingConfig
 from .quality import QualityAnalyzer
 from .aligner import AdvancedAligner
 from .stacker import ImageStacker
-from .io import load_image, save_fits
+from .io import load_image, save_fits, save_png_auto
 from .stretch import apply_stretch
+from .isp import ISP, ISPCalibrator
 
 
 class LiveStackSession:
@@ -43,12 +44,30 @@ class LiveStackSession:
         """
         self.config = config if config else StackingConfig()
         self.config.validate()
-        
+
         # Composants
         self.quality_analyzer = QualityAnalyzer(self.config.quality)
         self.aligner = AdvancedAligner(self.config)
         self.stacker = ImageStacker(self.config)
-        
+
+        # ISP (Image Signal Processor)
+        self.isp = None
+        print(f"[DEBUG ISP INIT] isp_enable={self.config.isp_enable}, isp_config_path={self.config.isp_config_path}")
+        if self.config.isp_enable:
+            if self.config.isp_config_path:
+                # Charger config ISP existante
+                print(f"[DEBUG ISP] Chargement de {self.config.isp_config_path}...")
+                try:
+                    self.isp = ISP.load_config(self.config.isp_config_path)
+                    print(f"[DEBUG ISP] ✓ Chargé avec succès")
+                except Exception as e:
+                    print(f"[DEBUG ISP] ✗ Erreur: {e}")
+            else:
+                print(f"[DEBUG ISP] Pas de chemin de config, isp_config_path est vide/None")
+            # Sinon, calibration auto plus tard avec première frame
+        else:
+            print(f"[DEBUG ISP] ISP désactivé (isp_enable=False)")
+
         # État
         self.is_running = False
         self.files_processed = 0
@@ -56,7 +75,7 @@ class LiveStackSession:
         self.files_failed = 0
         self.is_color = None
         self.rotation_angles = []
-        
+
         # Compteur pour rafraîchissement preview
         self._frame_count_since_refresh = 0
     
@@ -65,11 +84,20 @@ class LiveStackSession:
         print("\n" + "="*60)
         print(">>> LIBASTROSTACK SESSION")
         print("="*60)
-        
+
         print("\n[CONFIG]")
         print(f"  - Mode alignement: {self.config.alignment_mode}")
         print(f"  - Contrôle qualité: {'OUI' if self.config.quality.enable else 'NON'}")
+        print(f"  - ISP activé: {'OUI' if self.config.isp_enable else 'NON'}")
+        if self.config.isp_enable:
+            if self.isp:
+                print(f"    • Config chargée: {self.config.isp_config_path}")
+            else:
+                print(f"    • Mode: Auto-calibration")
+        print(f"  - Format vidéo: {self.config.video_format or 'Auto-détection'}")
+        print(f"  - PNG bit depth: {self.config.png_bit_depth or 'Auto'}")
         print(f"  - Étirement PNG: {self.config.png_stretch_method}")
+        print(f"  - FITS: {'Linéaire (RAW)' if self.config.fits_linear else 'Stretched'}")
         print(f"  - Preview refresh: toutes les {self.config.preview_refresh_interval} images")
         print(f"  - Save DNG: {self.config.save_dng_mode}")
         
@@ -196,14 +224,57 @@ class LiveStackSession:
         Génère preview PNG étiré pour affichage
 
         Returns:
-            Array uint8 (0-255) pour affichage direct
+            Array uint8 ou uint16 (selon config) pour affichage/sauvegarde
         """
+        print(f"\n[DEBUG get_preview_png] Début")
+        print(f"  • ISP activé: {self.config.isp_enable}")
+        print(f"  • ISP instance: {self.isp is not None}")
+        print(f"  • Format vidéo: {self.config.video_format}")
+        print(f"  • PNG bit depth config: {self.config.png_bit_depth}")
+
         result = self.stacker.get_result()
         if result is None:
             return None
 
+        print(f"  • Stack result shape: {result.shape}, dtype: {result.dtype}")
+        print(f"  • Stack result range: [{result.min():.3f}, {result.max():.3f}]")
+
+        # NOUVEAU: Appliquer ISP AVANT stretch (si activé ET format RAW uniquement)
+        # Pipeline optimal: Stack (linéaire) → ISP → Stretch → PNG
+        # L'ISP ne doit s'appliquer QUE sur RAW12/RAW16, JAMAIS sur YUV420 (déjà traité par ISP hardware)
+        is_raw_format = self.config.video_format in ['raw12', 'raw16']
+        if self.config.isp_enable and self.isp is not None and is_raw_format:
+            print(f"  → Application ISP (format RAW détecté)...")
+            # swap_rb=True pour RAW car le débayeurisation inverse R/B (RPiCamera2.py:4931-4932)
+            result = self.isp.process(result, return_uint8=False, swap_rb=True)  # Reste en float32
+            print(f"  → Après ISP: shape={result.shape}, dtype={result.dtype}, range=[{result.min():.3f}, {result.max():.3f}]")
+        elif self.config.isp_enable and not is_raw_format:
+            print(f"  → ISP ignoré (format {self.config.video_format} déjà traité par camera ISP)")
+        else:
+            print(f"  → Pas d'ISP (enable={self.config.isp_enable}, isp={self.isp is not None})")
+
         # Appliquer étirement
         is_color = len(result.shape) == 3
+
+        # CORRECTION: Normaliser [0-255] → [0-1] AVANT stretch pour éviter clip
+        # La fonction stretch_ghs() attend des données en [0-1], pas [0-255]
+        # Pour YUV420: normalisation simple /255 (comme RPiCamera2.py)
+        # Pour RAW: normalisation par percentiles (pour images brutes)
+        if is_raw_format:
+            # RAW: normalisation par percentiles (data brute avec possibles pixels chauds)
+            # Les données RAW passent par ISP qui normalise déjà à [0-1]
+            clip_low = self.config.png_clip_low
+            clip_high = self.config.png_clip_high
+            print(f"  • Normalisation: Percentiles (RAW) - clip_low={clip_low}%, clip_high={clip_high}%")
+        else:
+            # YUV420: normalisation simple /255 (déjà traité par ISP caméra, pas de pixels chauds)
+            # On normalise manuellement AVANT d'appeler stretch pour éviter le clip à [0-1]
+            result = result / 255.0  # [0-255] → [0-1]
+            result = np.clip(result, 0, 1)
+            # Désactiver la normalisation par percentiles dans stretch (déjà normalisé)
+            clip_low = 0.0
+            clip_high = 100.0
+            print(f"  • Normalisation: Simple /255 (YUV420 déjà traité par ISP caméra)")
 
         if is_color:
             stretched = np.zeros_like(result, dtype=np.float32)
@@ -212,26 +283,57 @@ class LiveStackSession:
                     result[:, :, i],
                     method=self.config.png_stretch_method,
                     factor=self.config.png_stretch_factor,
-                    clip_low=self.config.png_clip_low,
-                    clip_high=self.config.png_clip_high,
-                    ghs_D=getattr(self.config, 'ghs_D', 0.0),
-                    ghs_B=getattr(self.config, 'ghs_B', 0.0),
-                    ghs_SP=getattr(self.config, 'ghs_SP', 0.5)
+                    clip_low=clip_low,
+                    clip_high=clip_high,
+                    ghs_D=getattr(self.config, 'ghs_D', 3.0),
+                    ghs_b=getattr(self.config, 'ghs_b', getattr(self.config, 'ghs_B', 0.13)),
+                    ghs_SP=getattr(self.config, 'ghs_SP', 0.2),
+                    ghs_LP=getattr(self.config, 'ghs_LP', 0.0),
+                    ghs_HP=getattr(self.config, 'ghs_HP', 0.0)
                 )
         else:
             stretched = apply_stretch(
                 result,
                 method=self.config.png_stretch_method,
                 factor=self.config.png_stretch_factor,
-                clip_low=self.config.png_clip_low,
-                clip_high=self.config.png_clip_high,
-                ghs_D=getattr(self.config, 'ghs_D', 0.0),
-                ghs_B=getattr(self.config, 'ghs_B', 0.0),
-                ghs_SP=getattr(self.config, 'ghs_SP', 0.5)
+                clip_low=clip_low,
+                clip_high=clip_high,
+                ghs_D=getattr(self.config, 'ghs_D', 3.0),
+                ghs_b=getattr(self.config, 'ghs_b', getattr(self.config, 'ghs_B', 0.13)),
+                ghs_SP=getattr(self.config, 'ghs_SP', 0.2),
+                ghs_LP=getattr(self.config, 'ghs_LP', 0.0),
+                ghs_HP=getattr(self.config, 'ghs_HP', 0.0)
             )
 
-        # Convertir en uint8
-        preview = (stretched * 255).astype(np.uint8)
+        # Convertir en uint8 ou uint16 selon configuration
+        # NOUVEAU: Support PNG 16-bit
+        print(f"  • Stretched range: [{stretched.min():.3f}, {stretched.max():.3f}]")
+        print(f"  → Sélection bit depth:")
+        print(f"     config.png_bit_depth = {self.config.png_bit_depth}")
+        print(f"     config.video_format = {self.config.video_format}")
+
+        if self.config.png_bit_depth == 16:
+            preview = (stretched * 65535).astype(np.uint16)
+            print(f"     → 16-bit (forcé par config)")
+        elif self.config.png_bit_depth == 8:
+            preview = (stretched * 255).astype(np.uint8)
+            print(f"     → 8-bit (forcé par config)")
+        else:
+            # Auto-détection intelligente selon stretch et format
+            # CORRECTION: Toujours utiliser 16-bit si stretch activé (même pour YUV420)
+            # Car le stretch crée des niveaux intermédiaires → besoin de 16-bit pour histogramme lisse
+            if self.config.png_stretch_method != 'off':
+                preview = (stretched * 65535).astype(np.uint16)
+                print(f"     → 16-bit (auto: stretch '{self.config.png_stretch_method}' activé → préserve histogramme)")
+            elif self.config.video_format and 'raw' in self.config.video_format.lower():
+                preview = (stretched * 65535).astype(np.uint16)
+                print(f"     → 16-bit (auto: format RAW)")
+            else:
+                preview = (stretched * 255).astype(np.uint8)
+                print(f"     → 8-bit (auto: pas de stretch, pas de RAW)")
+
+        print(f"  ✓ Preview final: dtype={preview.dtype}, shape={preview.shape}")
+        print(f"     range=[{preview.min()}, {preview.max()}]")
 
         return preview
     
@@ -262,10 +364,11 @@ class LiveStackSession:
             header_data['ROTMAX'] = np.max(self.rotation_angles)
             header_data['ROTMED'] = np.median(self.rotation_angles)
         
-        # Sauvegarder FITS
-        save_fits(result, output_path, header_data)
-        
+        # Sauvegarder FITS (linéaire ou stretched selon config)
+        save_fits(result, output_path, header_data, linear=self.config.fits_linear)
+
         print(f"\n[SAVE] FITS: {output_path}")
+        print(f"       Type: {'Linéaire (RAW)' if self.config.fits_linear else 'Stretched'}")
         print(f"       Acceptées: {self.config.num_stacked}, Rejetées: {self.files_rejected}")
         
         if self.rotation_angles:
@@ -306,12 +409,15 @@ class LiveStackSession:
         self.config.quality.rejection_reasons = {}
     
     def _save_png(self, data, png_path):
-        """Sauvegarde PNG pure sans surcharge"""
+        """Sauvegarde PNG avec détection automatique du bit depth"""
         preview = self.get_preview_png()
         if preview is None:
             return
 
         import cv2
+
+        # Détecter le bit depth
+        bit_depth = 16 if preview.dtype == np.uint16 else 8
 
         if len(preview.shape) == 3:
             # CORRECTION: Les données sont en RGB (de Picamera2)
@@ -323,7 +429,10 @@ class LiveStackSession:
             # Grayscale image
             cv2.imwrite(str(png_path), preview)
 
+        # Afficher infos
+        file_size = Path(png_path).stat().st_size / 1024
         print(f"[OK] PNG: {png_path}")
+        print(f"       Bit depth: {bit_depth}-bit, Taille: {file_size:.1f} KB")
     
     def _save_quality_report(self, report_path):
         """Sauvegarde rapport qualité"""

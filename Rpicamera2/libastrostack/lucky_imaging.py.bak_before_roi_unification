@@ -385,13 +385,11 @@ class FrameAligner:
         self.reference = self._extract_align_roi(self.reference)
     
     def _extract_align_roi(self, image: np.ndarray) -> np.ndarray:
-        """Extrait ROI central pour alignement (utilise le même ROI que le scoring)"""
-        # OPTIMISATION : Utiliser score_roi_percent pour scoring ET alignement
-        # En imagerie planétaire, la cible est au centre → même zone pour les deux
-        if self.config.score_roi_percent < 100.0:
+        """Extrait ROI central pour alignement"""
+        if self.config.align_roi_percent < 100.0:
             h, w = image.shape[:2]
-            margin_x = int(w * (100 - self.config.score_roi_percent) / 200)
-            margin_y = int(h * (100 - self.config.score_roi_percent) / 200)
+            margin_x = int(w * (100 - self.config.align_roi_percent) / 200)
+            margin_y = int(h * (100 - self.config.align_roi_percent) / 200)
             return image[margin_y:h-margin_y, margin_x:w-margin_x]
         return image
     
@@ -441,55 +439,24 @@ class FrameAligner:
         w = min(ref.shape[1], img.shape[1])
         ref = ref[:h, :w]
         img = img[:h, :w]
-
-        # DEBUG: Log taille ROI entrante (première fois seulement)
-        if not hasattr(self, '_logged_roi_size'):
-            print(f"[DEBUG ALIGN] ROI entrante pour FFT: {h}×{w}")
-            self._logged_roi_size = True
-
-        # OPTIMISATION : Downscale 50% pour accélérer FFT (4× plus rapide)
-        # La précision reste excellente car on rescale le décalage détecté
-        scale_factor = 0.5
-        h_small = int(h * scale_factor)
-        w_small = int(w * scale_factor)
-
-        if h_small > 32 and w_small > 32:  # Downscale seulement si ROI assez grand
-            ref_small = cv2.resize(ref, (w_small, h_small), interpolation=cv2.INTER_AREA)
-            img_small = cv2.resize(img, (w_small, h_small), interpolation=cv2.INTER_AREA)
-            h_fft, w_fft = h_small, w_small
-            if not hasattr(self, '_logged_downscale'):
-                print(f"[DEBUG ALIGN] Downscale activé: {h}×{w} → {h_fft}×{w_fft}")
-                self._logged_downscale = True
-        else:
-            ref_small = ref
-            img_small = img
-            h_fft, w_fft = h, w
-            scale_factor = 1.0  # Pas de rescale si pas de downscale
-            if not hasattr(self, '_logged_no_downscale'):
-                print(f"[DEBUG ALIGN] Downscale désactivé (ROI trop petit): {h_small}×{w_small}")
-                self._logged_no_downscale = True
-
-        # FFT sur images downscalées (ou originales si trop petites)
-        ref_fft = np.fft.fft2(ref_small.astype(np.float64))
-        img_fft = np.fft.fft2(img_small.astype(np.float64))
-
+        
+        # FFT
+        ref_fft = np.fft.fft2(ref.astype(np.float64))
+        img_fft = np.fft.fft2(img.astype(np.float64))
+        
         # Cross-power spectrum
         cross_power = (ref_fft * np.conj(img_fft)) / (np.abs(ref_fft * np.conj(img_fft)) + 1e-10)
-
+        
         # Inverse FFT
         correlation = np.real(np.fft.ifft2(cross_power))
         correlation = np.fft.fftshift(correlation)
-
+        
         # Trouver le pic
         peak_idx = np.unravel_index(np.argmax(correlation), correlation.shape)
-
-        dy = peak_idx[0] - h_fft // 2
-        dx = peak_idx[1] - w_fft // 2
-
-        # Rescaler le décalage détecté pour l'appliquer à l'image complète
-        dx = dx / scale_factor
-        dy = dy / scale_factor
-
+        
+        dy = peak_idx[0] - h // 2
+        dx = peak_idx[1] - w // 2
+        
         return float(dx), float(dy)
     
     def _ecc_alignment(self, ref: np.ndarray, img: np.ndarray) -> Tuple[float, float]:
@@ -653,45 +620,39 @@ class LuckyImagingStacker:
             return None
         
         t0 = time.perf_counter()
-
+        
         # 1. Déterminer combien d'images garder
         keep_count = self.config.get_keep_count()
         keep_count = min(keep_count, len(self.buffer))
-
+        
         # 2. Sélectionner les meilleures
-        t_select = time.perf_counter()
         best_indices = self.buffer.get_best_indices(keep_count, self.config.min_score)
-
+        
         if not best_indices:
             print(f"[LUCKY] Aucune image au-dessus du seuil min_score={self.config.min_score}")
             return None
-
+        
         # Calculer le seuil de sélection (score de la dernière image sélectionnée)
         buffer_stats = self.buffer.get_statistics()
         if best_indices:
             scores_list = list(self.buffer.scores)
             selected_scores = [scores_list[i] for i in best_indices]
             self.stats['selection_threshold'] = min(selected_scores) if selected_scores else 0
-
+        
         # 3. Récupérer les frames sélectionnées
         selected_frames = self.buffer.get_frames_by_indices(best_indices)
-        time_select = (time.perf_counter() - t_select) * 1000
-
+        
         print(f"[LUCKY] Sélection: {len(selected_frames)}/{len(self.buffer)} images "
               f"(seuil={self.stats['selection_threshold']:.1f})")
-
+        
         # 4. Aligner les frames
-        t_align = time.perf_counter()
         if self.config.align_enabled and len(selected_frames) > 1:
             aligned_frames = self._align_frames(selected_frames)
         else:
             aligned_frames = selected_frames
-        time_align = (time.perf_counter() - t_align) * 1000
-
+        
         # 5. Stacker
-        t_stack = time.perf_counter()
         result = self._stack_frames(aligned_frames)
-        time_stack = (time.perf_counter() - t_stack) * 1000
         
         # Timing et stats
         stack_time = (time.perf_counter() - t0) * 1000
@@ -703,13 +664,9 @@ class LuckyImagingStacker:
         
         # Mettre à jour stats
         self._update_stats(buffer_stats, len(selected_frames))
-
-        # DEBUG: Afficher décomposition du temps
+        
         print(f"[LUCKY] Stack #{self.total_stacks_done}: {len(selected_frames)} images, "
-              f"{stack_time:.1f}ms total")
-        print(f"  └─ Sélection: {time_select:.1f}ms, "
-              f"Alignement: {time_align:.1f}ms, "
-              f"Stack: {time_stack:.1f}ms")
+              f"{stack_time:.1f}ms")
 
         # Vider le buffer pour le prochain cycle
         self.buffer.clear()
@@ -810,19 +767,20 @@ class LuckyImagingStacker:
     def get_preview(self, as_uint8: bool = True) -> Optional[np.ndarray]:
         """
         Retourne une preview du dernier résultat
-
+        
         Args:
             as_uint8: Convertir en uint8 pour affichage
         """
         if self.last_result is None:
             return None
-
+        
         if as_uint8:
-            # Convertir en uint8 SANS normalisation pour préserver l'histogramme
-            # Les données sont déjà en float32 [0, 255+], on clip et convertit directement
+            # Normaliser pour affichage
             result = self.last_result.copy()
+            if result.max() > 255:
+                result = (result / result.max() * 255)
             return np.clip(result, 0, 255).astype(np.uint8)
-
+        
         return self.last_result.copy()
     
     def get_stats(self) -> Dict[str, Any]:
@@ -1145,10 +1103,12 @@ class RPiCameraLuckyImaging:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"lucky_{timestamp}"
         
-        # Sauvegarder en PNG SANS normalisation pour préserver l'histogramme
+        # Sauvegarder en PNG
         result = self.stacker.last_result
-        # Clip directement à [0, 255] sans normaliser
-        result_8bit = np.clip(result, 0, 255).astype(np.uint8)
+        if result.max() > 255:
+            result_8bit = (result / result.max() * 255).astype(np.uint8)
+        else:
+            result_8bit = result.astype(np.uint8)
         
         png_path = os.path.join(self.output_dir, f"{filename}.png")
         

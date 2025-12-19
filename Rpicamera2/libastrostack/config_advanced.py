@@ -348,9 +348,11 @@ class OutputConfig:
     # FITS
     auto_fits: bool = True
     fits_compress: bool = False
+    fits_linear: bool = True            # FITS linéaire (RAW) vs stretched
 
     # PNG
     auto_png: bool = True
+    png_bit_depth: Optional[int] = None # None=auto, 8, ou 16
     png_stretch_method: StretchMethod = StretchMethod.ASINH
     png_stretch_factor: float = 10.0
     png_clip_low: float = 1.0           # Percentile bas (%)
@@ -393,7 +395,13 @@ class AdvancedStackingConfig:
     # Mode d'alignement
     alignment_mode: AlignmentMode = AlignmentMode.ROTATION
     max_stars_alignment: int = 50
-    
+
+    # ISP (Image Signal Processor)
+    isp_enable: bool = False
+    isp_config_path: Optional[str] = None
+    isp_calibration_frames: Optional[tuple] = None
+    video_format: Optional[str] = None  # 'yuv420', 'raw12', 'raw16', None=auto
+
     # Sous-configurations
     stacking: StackingMethodConfig = field(default_factory=StackingMethodConfig)
     drizzle: DrizzleConfig = field(default_factory=DrizzleConfig)
@@ -401,10 +409,10 @@ class AdvancedStackingConfig:
     lucky: LuckyImagingConfig = field(default_factory=LuckyImagingConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
-    
+
     # Preview (pour RPiCamera)
     preview_refresh_interval: int = 5
-    
+
     # DNG (mode hybride)
     save_dng_mode: str = "accepted"  # "none", "accepted", "all"
     
@@ -454,8 +462,15 @@ class AdvancedStackingConfig:
         legacy.quality.star_detection_sigma = self.quality.star_detection_sigma
         legacy.quality.min_star_separation = self.quality.min_star_separation
         
+        # ISP (nouveaux champs)
+        legacy.isp_enable = getattr(self, 'isp_enable', False)
+        legacy.isp_config_path = getattr(self, 'isp_config_path', None)
+        legacy.isp_calibration_frames = getattr(self, 'isp_calibration_frames', None)
+        legacy.video_format = getattr(self, 'video_format', None)
+
         # PNG
         legacy.auto_png = self.output.auto_png
+        legacy.png_bit_depth = getattr(self.output, 'png_bit_depth', None)
         legacy.png_stretch_method = self.output.png_stretch_method.value
         legacy.png_stretch_factor = self.output.png_stretch_factor
         legacy.png_clip_low = self.output.png_clip_low
@@ -465,7 +480,10 @@ class AdvancedStackingConfig:
         legacy.ghs_D = self.output.ghs_D
         legacy.ghs_B = self.output.ghs_B
         legacy.ghs_SP = self.output.ghs_SP
-        
+
+        # FITS
+        legacy.fits_linear = getattr(self.output, 'fits_linear', True)
+
         # Autres
         legacy.preview_refresh_interval = self.preview_refresh_interval
         legacy.save_dng_mode = self.save_dng_mode
@@ -603,15 +621,29 @@ class LegacyStackingConfig:
     def __init__(self):
         self.alignment_mode = "rotation"
         self.quality = LegacyQualityConfig()
+
+        # Paramètres ISP (nouveaux, pour compatibilité)
+        self.isp_enable = False
+        self.isp_config_path = None
+        self.isp_calibration_frames = None
+        self.video_format = None
+
+        # Paramètres PNG
         self.auto_png = True
+        self.png_bit_depth = None
         self.png_stretch_method = "asinh"
         self.png_stretch_factor = 10.0
         self.png_clip_low = 1.0
         self.png_clip_high = 99.5
+
         # Paramètres GHS
         self.ghs_D = 0.0
         self.ghs_B = 0.0
         self.ghs_SP = 0.5
+
+        # Paramètres FITS
+        self.fits_linear = True
+
         self.preview_refresh_interval = 5
         self.save_dng_mode = "accepted"
         self.output_directory = "/media/admin/THKAILAR/Stacks/"

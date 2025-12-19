@@ -32,6 +32,7 @@ import glob
 from datetime import timedelta
 import numpy as np
 import math
+from pathlib import Path
 from gpiozero import Button
 from gpiozero import LED
 import struct
@@ -62,6 +63,9 @@ from libcamera import controls, Transform
 # Import Live Stack module (dans le même répertoire)
 from rpicamera_livestack import create_livestack_session
 from rpicamera_livestack_advanced import create_advanced_livestack_session
+
+# Import Allsky module (dans libastrostack/)
+from libastrostack.allsky import AllskyMeanController
 
 # ============================================================================
 # Helper pour tuer le subprocess rpicam-vid (mode non-Picamera2)
@@ -155,6 +159,110 @@ def fix_video_timestamps(input_file, fps_value, quality_preset="ultrafast"):
         except:
             pass
         return False
+
+# ============================================================================
+# Helpers pour Allsky Timelapse
+# ============================================================================
+def assemble_allsky_video(pic_dir, timestamp, fps, output_filename):
+    """
+    Assemble une séquence JPEG en vidéo MP4 via FFmpeg
+
+    Args:
+        pic_dir: Répertoire contenant les JPEGs
+        timestamp: Préfixe timestamp des fichiers (ex: "250112123045")
+        fps: Framerate de la vidéo finale
+        output_filename: Chemin complet du fichier MP4 de sortie
+
+    Returns:
+        bool: True si succès, False sinon
+
+    Pattern fichiers : timestamp_%04d.jpg (0001, 0002, ...)
+    Codec : libx264, preset medium, CRF 23, yuv420p
+    """
+    import subprocess
+    import os
+
+    try:
+        input_pattern = os.path.join(pic_dir, f"{timestamp}_%04d.jpg")
+
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-framerate", str(fps),
+            "-i", input_pattern,
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", "23",  # Qualité (18-28, plus bas = meilleure qualité)
+            "-pix_fmt", "yuv420p",  # Compatibilité maximale
+            "-y",  # Overwrite output file
+            "-loglevel", "error",
+            output_filename
+        ]
+
+        print(f"[Allsky] Assemblage vidéo: {output_filename}")
+        print(f"[Allsky] Commande FFmpeg: {' '.join(ffmpeg_cmd)}")
+
+        result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=600)
+
+        if result.returncode == 0:
+            print(f"[Allsky] ✓ Vidéo assemblée avec succès")
+            return True
+        else:
+            print(f"[Allsky] ✗ Erreur FFmpeg: {result.stderr}")
+            return False
+
+    except subprocess.TimeoutExpired:
+        print("[Allsky] ✗ Timeout FFmpeg - vidéo trop longue ou processus bloqué")
+        return False
+    except Exception as e:
+        print(f"[Allsky] ✗ Erreur assemblage vidéo: {e}")
+        return False
+
+
+def apply_stretch_to_jpeg(jpeg_path, stretch_preset):
+    """
+    Applique astro_stretch() à un JPEG et le sauvegarde
+
+    Args:
+        jpeg_path: Chemin du fichier JPEG
+        stretch_preset: Preset de stretch (0=OFF, 1=GHS, 2=Arcsinh)
+
+    Returns:
+        bool: True si succès, False sinon
+
+    Utilise les paramètres stretch globaux (ghs_D, ghs_b, etc.)
+    Qualité JPEG = 95 pour minimiser les artefacts de compression
+    """
+    import cv2
+
+    try:
+        # Skip si stretch OFF
+        if stretch_preset == 0:
+            return True
+
+        # Charger JPEG
+        img = cv2.imread(jpeg_path)
+        if img is None:
+            print(f"[Allsky] ✗ Échec chargement image: {jpeg_path}")
+            return False
+
+        # Convertir BGR (OpenCV) -> RGB (astro_stretch)
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        # Appliquer stretch (utilise fonction existante et paramètres globaux)
+        stretched = astro_stretch(img_rgb)
+
+        # Convertir RGB -> BGR pour sauvegarde
+        stretched_bgr = cv2.cvtColor(stretched, cv2.COLOR_RGB2BGR)
+
+        # Sauvegarder avec qualité élevée
+        cv2.imwrite(jpeg_path, stretched_bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
+
+        return True
+
+    except Exception as e:
+        print(f"[Allsky] ✗ Erreur stretch {jpeg_path}: {e}")
+        return False
+
 
 # ============================================================================
 # Helpers pour gérer Picamera2 temporairement pendant rpicam-vid
@@ -528,6 +636,77 @@ def convert_yuv420_to_ser(yuv_file, ser_file, width, height, fps=25):
     except Exception as e:
         return False, 0, f"Erreur: {str(e)}"
 
+def debayer_raw_array(raw_array, raw_format_str, red_gain=1.0, blue_gain=1.0, apply_denoise=True, swap_rb=False):
+    """
+    Débayérise un array RAW Bayer (SRGGB12 ou SRGGB16) en RGB uint16 avec balance des blancs.
+
+    IMPORTANT: Préserve la dynamique complète 12/16-bit en retournant du uint16
+
+    Args:
+        raw_array: Array numpy uint8 (height, stride_bytes) depuis capture_array("raw")
+        raw_format_str: "SRGGB12" ou "SRGGB16" (utilisé pour info uniquement)
+        red_gain: Gain du canal rouge (AWB, défaut=1.0)
+        blue_gain: Gain du canal bleu (AWB, défaut=1.0)
+        apply_denoise: Appliquer débruitage logiciel pour compenser l'absence d'ISP (défaut=True)
+        swap_rb: Inverser les gains rouge et bleu (défaut=False)
+
+    Returns:
+        Array numpy uint16 (height, width, 3) RGB [0-65535]
+    """
+    try:
+        height, stride_bytes = raw_array.shape
+
+        # Convertir en uint16 (little-endian, 2 bytes par pixel)
+        raw_uint16 = raw_array.view(np.uint16)
+        width = stride_bytes // 2
+        raw_image = raw_uint16.reshape(height, -1)[:, :width]
+
+        # *** DÉBRUITAGE PRÉ-DEBAYER (optionnel) ***
+        # DÉSACTIVÉ car cause écran noir pendant le stack (trop lent)
+        # if apply_denoise:
+        #     raw_image = cv2.fastNlMeansDenoising(raw_image, None, h=3, templateWindowSize=7, searchWindowSize=21)
+
+        # Débayériser DIRECTEMENT en uint16 (préserve la dynamique complète)
+        # OpenCV supporte le débayérisation sur uint16
+        # Pattern pour IMX585 : RGGB (pattern original - BG inversait les couleurs)
+        # Patterns possibles : BG=BGGR, GB=GBRG, RG=RGGB, GR=GRBG
+        rgb_uint16 = cv2.cvtColor(raw_image, cv2.COLOR_BayerRG2RGB)
+
+        # *** NOUVEAU : Appliquer la balance des blancs (AWB gains) ***
+        # Le gain vert est normalisé à 1.0, donc on applique uniquement red_gain et blue_gain
+        # Convertir en float32 pour appliquer les gains sans overflow
+        rgb_float = rgb_uint16.astype(np.float32)
+
+        # Inverser rouge et bleu si demandé (utile si le pattern Bayer inverse les couleurs)
+        if swap_rb:
+            rgb_float[:, :, 0] *= blue_gain  # Canal Rouge reçoit le gain bleu
+            rgb_float[:, :, 2] *= red_gain   # Canal Bleu reçoit le gain rouge
+        else:
+            rgb_float[:, :, 0] *= red_gain   # Canal Rouge
+            rgb_float[:, :, 2] *= blue_gain  # Canal Bleu
+        # Canal Vert (index 1) : gain = 1.0, pas de modification
+
+        # Cliper et reconvertir en uint16
+        rgb_uint16 = np.clip(rgb_float, 0, 65535).astype(np.uint16)
+
+        # Retourner en uint16 pour préserver la dynamique 12/16-bit
+        # et être compatible avec libastrostack
+        # Note: Pour SRGGB12, les valeurs sont déjà dans la bonne plage (0-65520)
+        # car le capteur shifte de 4 bits à gauche.
+        return rgb_uint16
+
+    except Exception as e:
+        print(f"[ERROR] Débayérisation échouée: {e}")
+        import traceback
+        traceback.print_exc()
+        # Retourner une image noire en cas d'erreur (uint16 pour cohérence)
+        # Dimensions approximatives si height/width non disponibles
+        try:
+            return np.zeros((height, width, 3), dtype=np.uint16)
+        except:
+            return np.zeros((1090, 1928, 3), dtype=np.uint16)
+
+
 def calculate_snr(image):
     """
     Calcule le rapport signal/bruit (SNR) d'une image
@@ -744,7 +923,7 @@ v3_f_speed  = 0    # v3 focus speed, see v3_f_speeds below
 IRF         = 0    # Waveshare imx290-83 IR filter, 1 = ON
 str_cap     = 0    # 0 = STILL, see strs below
 v3_hdr      = 0    # HDR (v3 camera or Pi5 ONLY), see v3_hdrs below
-timet       = 2000 # -t setting when capturing STILLS
+timet       = 100  # -t setting when capturing STILLS (délai stabilisation AE/AWB)
 vflip       = 0    # set to 1 to vertically flip images
 hflip       = 0    # set tp 1 tp horizontally flip images
 # NOTE if you change any of the above defaults you need to delete the con_file and restart.
@@ -759,7 +938,9 @@ Home_Files  = []
 Home_Files.append(os.getlogin())
 pic_dir     = "/media/admin/THKAILAR/Pictures/"
 vid_dir     = "/home/" + Home_Files[0]+ "/" + vid + "/"
-config_file = "/home/" + Home_Files[0]+ "/" + con_file
+# Lire le fichier de config dans le même répertoire que le programme
+script_dir  = os.path.dirname(os.path.abspath(__file__))
+config_file = os.path.join(script_dir, con_file)
 
 # inital parameters
 prev_fps    = 5   # Réduit pour IMX585 
@@ -790,7 +971,7 @@ show_cmds   = 1  # Debug: afficher les commandes
 v3_af       = 1
 v5_af       = 1
 menu        = 0
-menu_page   = {}  # Suivi des pages pour les menus multi-pages (ex: menu_page[8] = 1 pour menu 8 page 1)
+menu_page   = {6: 1}  # Suivi des pages pour les menus multi-pages (menu 6: TIMELAPSE, page 1 par défaut)
 alt_dis     = 0
 rotate      = 0
 still       = 0
@@ -800,14 +981,14 @@ stream      = 0
 stretch_mode = 0  # Mode stretch astro pour le preview
 stretch_p_low = 0    # Percentile bas pour stretch (0% à 0.2%, stocké x10 pour slider)
 stretch_p_high = 9998 # Percentile haut pour stretch (99.95% à 100%, stocké x100 pour slider)
-stretch_factor = 25 # Facteur de stretch (0 à 5, stocké x10 pour slider)
+stretch_factor = 25 # Facteur de stretch (0 à 8, stocké x10 pour slider)
 stretch_preset = 0   # Préréglage stretch: 0=OFF, 1=GHS, 2=Arcsinh
 # GHS Parameters (conforme Siril/PixInsight) - Phase 2
-ghs_D = 20     # Stretch factor: 0-50 -> 0.0-5.0 (défaut 2.0 pour galaxies)
-ghs_b = 60     # Local intensity: -50 à 150 -> -5.0 à 15.0 (défaut 6.0)
-ghs_SP = 15    # Symmetry point: 0-100 -> 0.0-1.0 (défaut 0.15)
+ghs_D = 31     # Stretch factor: -10 à 100 -> -1.0 à 10.0 (défaut 3.1 optimisé tests)
+ghs_b = 1      # Local intensity: -50 à 150 -> -5.0 à 15.0 (défaut 0.1 optimisé tests)
+ghs_SP = 19    # Symmetry point: 0-100 -> 0.0-1.0 (défaut 0.19 optimisé tests)
 ghs_LP = 0     # Protect shadows: 0-100 -> 0.0-1.0 (défaut 0.0)
-ghs_HP = 85    # Protect highlights: 0-100 -> 0.0-1.0 (défaut 0.85)
+ghs_HP = 0     # Protect highlights: 0-100 -> 0.0-1.0 (défaut 0.0 optimisé tests)
 ghs_preset = 1 # 0=Manual, 1=Galaxies, 2=Nébuleuses, 3=Étirement initial
 ghs_presets = ['Manual', 'Galaxies', 'Nebulae', 'Initial']
 # METRICS Settings - Phase 2 Demande 5 et 6
@@ -890,8 +1071,19 @@ ls_lucky_score = 0  # 0=laplacian, 1=gradient, 2=sobel, 3=tenengrad
 ls_lucky_stack = 0  # 0=mean, 1=median, 2=sigma_clip
 ls_lucky_align = 1  # 0=off, 1=on
 ls_lucky_roi = 50  # % ROI scoring (20-100)
+ls_lucky_save_progress = 0  # 0=off, 1=on (sauvegarde FITS+PNG tous les 2 stacks)
 lucky_score_methods = ['Laplacian', 'Gradient', 'Sobel', 'Tenengrad']
 lucky_stack_methods = ['Mean', 'Median', 'Sigma-Clip']
+
+# RAW Format parameters (pour Lucky/Live Stack et vidéo RAW)
+raw_format = 1  # 0=YUV420, 1=SRGGB12, 2=SRGGB16
+raw_formats = ['YUV420', 'SRGGB12', 'SRGGB16']
+raw_swap_rb = 0  # Inverser rouge et bleu en mode RAW (0=non, 1=oui)
+raw_stream_size = (1928, 1090)  # Taille du flux RAW (sera calculée dans preview())
+capture_size = (1928, 1090)  # Taille de capture/ROI (sera calculée dans preview())
+
+# ISP (Image Signal Processor) parameters
+isp_enable = 0  # 0=off, 1=on (utilise isp_config_imx585.json)
 
 # set button sizes
 bw = int(preview_width/5.66)
@@ -1072,14 +1264,31 @@ if Pi == 5:
     codecs.append('mp4')
     codecs2.append('mp4')
 
+# ALLSKY TIMELAPSE PARAMETERS - Mode vidéo timelapse style Allsky
+allsky_mode = 0              # 0=OFF, 1=ON (gain fixe), 2=Auto-Gain
+allsky_mean_target = 30      # ×100 → 0.30 (cible de luminosité pour auto-gain)
+allsky_mean_threshold = 5    # ×100 → 0.05 (tolérance autour de la cible)
+allsky_video_fps = 25        # FPS pour la vidéo finale assemblée (15-60)
+allsky_max_gain = 200        # Gain maximum autorisé en mode Auto-Gain (50-500)
+allsky_apply_stretch = 1     # 0=OFF, 1=ON (appliquer stretch sur chaque frame)
+allsky_cleanup_jpegs = 0     # 0=garder JPEG, 1=supprimer après assemblage vidéo
+allsky_modes = ['OFF', 'ON', 'Auto-Gain']
+
+# Options de sauvegarde LiveStack/LuckyStack
+ls_save_progress = 1         # 0=OFF, 1=ON (sauvegarder PNG intermédiaires LiveStack toutes les frames)
+ls_save_final = 1            # 0=OFF, 1=ON (sauvegarder PNG/FITS final LiveStack)
+ls_lucky_save_final = 1      # 0=OFF, 1=ON (sauvegarder PNG/FITS final LuckyStack)
+
 still_limits = ['mode',0,len(modes)-1,'speed',0,len(shutters)-1,'gain',0,30,'brightness',-100,100,'contrast',0,200,'ev',-10,10,'blue',1,80,'sharpness',0,30,
                 'denoise',0,len(denoises)-1,'quality',0,100,'red',1,80,'extn',0,len(extns)-1,'saturation',0,20,'meter',0,len(meters)-1,'awb',0,len(awbs)-1,
                 'histogram',0,len(histograms)-1,'v3_f_speed',0,len(v3_f_speeds)-1,'focus_method',0,4,'star_metric',0,2,'snr_display',0,1,'metrics_interval',1,10]
 video_limits = ['vlen',0,3600,'fps',1,40,'v5_focus',10,2500,'vformat',0,7,'0',0,0,'zoom',0,5,'Focus',0,1,'tduration',1,86400,'tinterval',0.01,10,'tshots',1,999,
                 'flicker',0,3,'codec',0,len(codecs)-1,'profile',0,len(h264profiles)-1,'v3_focus',10,2000,'histarea',10,300,'v3_f_range',0,len(v3_f_ranges)-1,
-                'str_cap',0,len(strs)-1,'v6_focus',10,1020,'stretch_p_low',0,2,'stretch_p_high',9995,10000,'stretch_factor',0,50,'stretch_preset',0,2,
-                'ghs_D',-10,10,'ghs_b',-300,100,'ghs_SP',0,100,'ghs_LP',0,100,'ghs_HP',0,100,'ghs_preset',0,3,'use_native_sensor_mode',0,1,
-                'focus_method',0,4,'star_metric',0,2,'snr_display',0,1,'metrics_interval',1,10]
+                'str_cap',0,len(strs)-1,'v6_focus',10,1020,'stretch_p_low',0,2,'stretch_p_high',9995,10000,'stretch_factor',0,80,'stretch_preset',0,2,
+                'ghs_D',-10,100,'ghs_b',-300,100,'ghs_SP',0,100,'ghs_LP',0,100,'ghs_HP',0,100,'ghs_preset',0,3,'use_native_sensor_mode',0,1,
+                'raw_format',0,2,'focus_method',0,4,'star_metric',0,2,'snr_display',0,1,'metrics_interval',1,10,
+                'allsky_mode',0,2,'allsky_mean_target',10,60,'allsky_mean_threshold',2,15,'allsky_video_fps',15,60,
+                'allsky_max_gain',50,500,'allsky_apply_stretch',0,1,'allsky_cleanup_jpegs',0,1]
 
 livestack_limits = [
     # Existants
@@ -1119,21 +1328,25 @@ livestack_limits = [
 
 # check config_file exists, if not then write default values
 titles = ['mode','speed','gain','brightness','contrast','frame','red','blue','ev','vlen','fps','vformat','codec','tinterval','tshots','extn','zx','zy','zoom','saturation',
-          'meter','awb','sharpness','denoise','quality','profile','level','histogram','histarea','v3_f_speed','v3_f_range','rotate','IRF','str_cap','v3_hdr','timet','vflip','hflip',
+          'meter','awb','sharpness','denoise','quality','profile','level','histogram','histarea','v3_f_speed','v3_f_range','rotate','IRF','str_cap','v3_hdr','raw_format','vflip','hflip',
           'stretch_p_low','stretch_p_high','stretch_factor','stretch_preset','ghs_D','ghs_b','ghs_SP','ghs_LP','ghs_HP','ghs_preset',
           'ls_preview_refresh','ls_alignment_mode','ls_enable_qc','ls_max_fwhm','ls_min_sharpness','ls_max_drift','ls_min_stars',
           'ls_stack_method','ls_stack_kappa','ls_stack_iterations',
           'ls_planetary_enable','ls_planetary_mode','ls_planetary_disk_min','ls_planetary_disk_max','ls_planetary_threshold','ls_planetary_margin','ls_planetary_ellipse','ls_planetary_window','ls_planetary_upsample','ls_planetary_highpass','ls_planetary_roi_center','ls_planetary_corr','ls_planetary_max_shift',
           'ls_lucky_buffer','ls_lucky_keep','ls_lucky_score','ls_lucky_stack','ls_lucky_align','ls_lucky_roi','use_native_sensor_mode',
-          'focus_method','star_metric','snr_display','metrics_interval']
+          'focus_method','star_metric','snr_display','metrics_interval','ls_lucky_save_progress','isp_enable',
+          'allsky_mode','allsky_mean_target','allsky_mean_threshold','allsky_video_fps','allsky_max_gain','allsky_apply_stretch','allsky_cleanup_jpegs',
+          'ls_save_progress','ls_save_final','ls_lucky_save_final']
 points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat,codec,tinterval,tshots,extn,zx,zy,zoom,saturation,
-          meter,awb,sharpness,denoise,quality,profile,level,histogram,histarea,v3_f_speed,v3_f_range,rotate,IRF,str_cap,v3_hdr,timet,vflip,hflip,
+          meter,awb,sharpness,denoise,quality,profile,level,histogram,histarea,v3_f_speed,v3_f_range,rotate,IRF,str_cap,v3_hdr,raw_format,vflip,hflip,
           stretch_p_low,stretch_p_high,stretch_factor,stretch_preset,ghs_D,ghs_b,ghs_SP,ghs_LP,ghs_HP,ghs_preset,
           ls_preview_refresh,ls_alignment_mode,ls_enable_qc,ls_max_fwhm,ls_min_sharpness,ls_max_drift,ls_min_stars,
           ls_stack_method,ls_stack_kappa,ls_stack_iterations,
           ls_planetary_enable,ls_planetary_mode,ls_planetary_disk_min,ls_planetary_disk_max,ls_planetary_threshold,ls_planetary_margin,ls_planetary_ellipse,ls_planetary_window,ls_planetary_upsample,ls_planetary_highpass,ls_planetary_roi_center,ls_planetary_corr,ls_planetary_max_shift,
           ls_lucky_buffer,ls_lucky_keep,ls_lucky_score,ls_lucky_stack,ls_lucky_align,ls_lucky_roi,use_native_sensor_mode,
-          focus_method,star_metric,snr_display,metrics_interval]
+          focus_method,star_metric,snr_display,metrics_interval,ls_lucky_save_progress,isp_enable,
+          allsky_mode,allsky_mean_target,allsky_mean_threshold,allsky_video_fps,allsky_max_gain,allsky_apply_stretch,allsky_cleanup_jpegs,
+          ls_save_progress,ls_save_final,ls_lucky_save_final]
 if not os.path.exists(config_file):
     with open(config_file, 'w') as f:
         for item in range(0,len(titles)):
@@ -1188,7 +1401,7 @@ rotate      = config[31]
 IRF         = config[32]
 str_cap     = config[33]
 v3_hdr      = config[34]
-timet       = config[35]
+raw_format  = config[35]  # Remplace timet (maintenant fixé à 100ms)
 vflip       = config[36]
 hflip       = config[37]
 
@@ -1202,15 +1415,15 @@ if len(config) <= 40:
 if len(config) <= 41:
     config.append(0)     # stretch_preset par défaut (OFF)
 if len(config) <= 42:
-    config.append(0)     # ghs_D par défaut (0.0)
+    config.append(31)    # ghs_D par défaut (3.1 optimisé)
 if len(config) <= 43:
-    config.append(0)     # ghs_b par défaut (0.0)
+    config.append(1)     # ghs_b par défaut (0.1 optimisé)
 if len(config) <= 44:
-    config.append(0)     # ghs_SP par défaut (0.0)
+    config.append(19)    # ghs_SP par défaut (0.19 optimisé)
 if len(config) <= 45:
     config.append(0)     # ghs_LP par défaut (0.0)
 if len(config) <= 46:
-    config.append(85)    # ghs_HP par défaut (0.85)
+    config.append(0)     # ghs_HP par défaut (0.0 optimisé)
 if len(config) <= 47:
     config.append(1)     # ghs_preset par défaut (Galaxies)
 
@@ -1332,11 +1545,47 @@ ls_lucky_stack     = config[74]
 ls_lucky_align     = config[75]
 ls_lucky_roi       = config[76]
 use_native_sensor_mode = config[77] if len(config) > 77 else 0
+ls_lucky_save_progress = config[82] if len(config) > 82 else 0
 
 focus_method       = config[78] if len(config) > 78 else 1
 star_metric        = config[79] if len(config) > 79 else 1
 snr_display        = config[80] if len(config) > 80 else 0
 metrics_interval   = config[81] if len(config) > 81 else 3
+isp_enable         = config[83] if len(config) > 83 else 0
+
+# Ajouter les paramètres ALLSKY si le fichier de config est ancien
+if len(config) <= 84:
+    config.append(0)     # allsky_mode par défaut (OFF)
+if len(config) <= 85:
+    config.append(30)    # allsky_mean_target par défaut (0.30)
+if len(config) <= 86:
+    config.append(5)     # allsky_mean_threshold par défaut (0.05)
+if len(config) <= 87:
+    config.append(25)    # allsky_video_fps par défaut (25 fps)
+if len(config) <= 88:
+    config.append(200)   # allsky_max_gain par défaut (200)
+if len(config) <= 89:
+    config.append(1)     # allsky_apply_stretch par défaut (ON)
+if len(config) <= 90:
+    config.append(0)     # allsky_cleanup_jpegs par défaut (keep JPEGs)
+
+# Charger les paramètres ALLSKY
+allsky_mode           = config[84] if len(config) > 84 else 0
+allsky_mean_target    = config[85] if len(config) > 85 else 30
+allsky_mean_threshold = config[86] if len(config) > 86 else 5
+allsky_video_fps      = config[87] if len(config) > 87 else 25
+allsky_max_gain       = config[88] if len(config) > 88 else 200
+allsky_apply_stretch  = config[89] if len(config) > 89 else 1
+allsky_cleanup_jpegs  = config[90] if len(config) > 90 else 0
+
+# Options de sauvegarde LiveStack/LuckyStack
+ls_save_progress      = config[91] if len(config) > 91 else 1
+ls_save_final         = config[92] if len(config) > 92 else 1
+ls_lucky_save_final   = config[93] if len(config) > 93 else 1
+
+# ISP configuration (chemin en dur pour le fichier de config ISP)
+# Config neutre (transparente) pour astrophotographie - n'affecte que les PNG de prévisualisation
+isp_config_path = "isp_config_neutral.json"
 
 # VALIDATION GLOBALE - S'assurer que TOUTES les valeurs sont dans les limites correctes
 # pour éviter les IndexError et les valeurs invalides
@@ -1377,18 +1626,33 @@ ls_lucky_score = max(0, min(ls_lucky_score, 3))  # 0-3: laplacian/gradient/sobel
 ls_lucky_stack = max(0, min(ls_lucky_stack, 2))  # 0-2: mean/median/sigma_clip
 ls_lucky_align = max(0, min(ls_lucky_align, 1))
 ls_lucky_roi = max(20, min(ls_lucky_roi, 100))
+ls_lucky_save_progress = max(0, min(ls_lucky_save_progress, 1))  # 0-1: off/on
+
+# Validation des options de sauvegarde LiveStack/LuckyStack
+ls_save_progress = max(0, min(ls_save_progress, 1))  # 0-1: off/on
+ls_save_final = max(0, min(ls_save_final, 1))  # 0-1: off/on
+ls_lucky_save_final = max(0, min(ls_lucky_save_final, 1))  # 0-1: off/on
 
 # Metrics parameters
 focus_method = max(0, min(focus_method, 4))  # 0-4: OFF/Laplacian/Gradient/Sobel/Tenengrad
 star_metric = max(0, min(star_metric, 2))    # 0-2: OFF/HFR/FWHM
 snr_display = max(0, min(snr_display, 1))    # 0-1: OFF/ON
+
+# RAW Format parameter
+raw_format = max(0, min(raw_format, 2))      # 0-2: YUV420/SRGGB12/SRGGB16
 metrics_interval = max(1, min(metrics_interval, 10))  # 1-10 frames
 
 # Sensor mode
 use_native_sensor_mode = max(0, min(use_native_sensor_mode, 1))  # 0-1: Binning/Native
 
-# Étendre config à 82 éléments si nécessaire
-while len(config) < 82:
+# ISP parameter
+isp_enable = max(0, min(isp_enable, 1))  # 0-1: OFF/ON
+
+# Debug ISP
+print(f"[DEBUG CONFIG] isp_enable = {isp_enable}, isp_config_path = {isp_config_path}")
+
+# Étendre config à 94 éléments si nécessaire (pour ls_lucky_save_final à index 93)
+while len(config) <= 93:
     config.append(0)
 
 if codec > len(codecs)-1:
@@ -1683,6 +1947,746 @@ def Camera_Version():
             else:
                 text(0,2,0,1,1,str(shutters[speed]),fv,10)
 
+# ============================================================================
+# MODE TEST RAW - Activation avec python3 RPiCamera2.py --test-raw
+# ============================================================================
+def test_raw_modes():
+    """
+    Mode test pour analyser les formats RAW disponibles
+    S'exécute avant l'interface graphique
+    """
+    print("\n" + "="*70)
+    print("🎥 MODE TEST RAW - Analyse des formats disponibles")
+    print("="*70)
+
+    try:
+        # Initialiser la caméra
+        print("\n📷 Initialisation caméra...")
+        test_picam2 = Picamera2()
+
+        # Informations capteur
+        print("\n" + "="*70)
+        print("INFORMATIONS CAPTEUR")
+        print("="*70)
+        camera_props = test_picam2.camera_properties
+        print(f"Modèle : {camera_props.get('Model', 'N/A')}")
+        print(f"Résolution : {camera_props.get('PixelArraySize', 'N/A')}")
+
+        if 'ColorFilterArrangement' in camera_props:
+            cfa = camera_props['ColorFilterArrangement']
+            bayer_map = {0: 'RGGB', 1: 'GRBG', 2: 'GBRG', 3: 'BGGR', 4: 'MONO'}
+            print(f"Matrice Bayer : {bayer_map.get(cfa, f'Unknown ({cfa})')}")
+
+        # Test formats disponibles
+        print("\n" + "="*70)
+        print("TEST DES FORMATS DISPONIBLES")
+        print("="*70)
+
+        formats_to_test = [
+            ("RGB888", "RGB 8-bit standard"),
+            ("YUV420", "YUV420 non compressé"),
+            ("XRGB8888", "XRGB 8-bit"),
+            ("SRGGB10", "RAW Bayer 10-bit"),
+            ("SRGGB10_CSI2P", "RAW Bayer 10-bit CSI2"),
+            ("SRGGB12", "RAW Bayer 12-bit"),
+            ("SRGGB16", "RAW Bayer 16-bit"),
+        ]
+
+        available = []
+        for fmt, desc in formats_to_test:
+            try:
+                cfg = test_picam2.create_preview_configuration(
+                    main={"size": (640, 480), "format": fmt}
+                )
+                print(f"✅ {fmt:20s} - {desc}")
+                available.append(fmt)
+            except Exception as e:
+                print(f"❌ {fmt:20s} - Non supporté")
+
+        # Test capture RAW
+        print("\n" + "="*70)
+        print("TEST CAPTURE FLUX RAW")
+        print("="*70)
+
+        try:
+            # Configuration avec RAW
+            sensor_res = test_picam2.sensor_resolution
+            raw_cfg = test_picam2.create_preview_configuration(
+                main={"size": (1920, 1080), "format": "RGB888"},
+                raw={"size": sensor_res}
+            )
+
+            print(f"Configuration : {raw_cfg}")
+            test_picam2.configure(raw_cfg)
+            test_picam2.start()
+            time.sleep(1)
+
+            # Tester capture RGB
+            print("\n📸 Test flux 'main' (RGB)...")
+            main_array = test_picam2.capture_array("main")
+            print(f"   ✅ Shape: {main_array.shape}, dtype: {main_array.dtype}")
+
+            # Tester capture RAW
+            print("\n📸 Test flux 'raw' (Bayer)...")
+            raw_array = test_picam2.capture_array("raw")
+            print(f"   ✅ Shape: {raw_array.shape}, dtype: {raw_array.dtype}")
+            print(f"   📊 Min/Max: {raw_array.min()} / {raw_array.max()}")
+            print(f"   💾 Taille: {raw_array.nbytes / 1024 / 1024:.2f} MB")
+
+            # Test de debayerisation
+            print("\n🔬 Test debayerisation...")
+            patterns = [
+                (cv2.COLOR_BayerRG2RGB, "RGGB"),
+                (cv2.COLOR_BayerGR2RGB, "GRBG"),
+                (cv2.COLOR_BayerGB2RGB, "GBRG"),
+                (cv2.COLOR_BayerBG2RGB, "BGGR"),
+            ]
+
+            # Convertir en uint8 si nécessaire
+            if raw_array.dtype == np.uint16:
+                test_array = (raw_array / 256).astype(np.uint8)
+            else:
+                test_array = raw_array.astype(np.uint8)
+
+            for pattern_code, pattern_name in patterns:
+                try:
+                    rgb = cv2.cvtColor(test_array, pattern_code)
+                    print(f"   ✅ {pattern_name} : OK ({rgb.shape})")
+                except Exception as e:
+                    print(f"   ❌ {pattern_name} : {e}")
+
+            test_picam2.stop()
+
+        except Exception as e:
+            print(f"❌ Erreur test capture : {e}")
+            import traceback
+            traceback.print_exc()
+
+        # Test performance
+        print("\n" + "="*70)
+        print("TEST PERFORMANCE CAPTURE")
+        print("="*70)
+
+        try:
+            # Configuration RAW
+            raw_cfg = test_picam2.create_preview_configuration(
+                main={"size": (1920, 1080), "format": "RGB888"},
+                raw={"size": test_picam2.sensor_resolution}
+            )
+            test_picam2.configure(raw_cfg)
+            test_picam2.start()
+            time.sleep(1)
+
+            # Test RGB
+            print("\n📊 Test RGB (50 frames)...")
+            start = time.time()
+            for i in range(50):
+                _ = test_picam2.capture_array("main")
+            rgb_time = time.time() - start
+            rgb_fps = 50 / rgb_time
+            print(f"   FPS: {rgb_fps:.1f}, Latence: {rgb_time/50*1000:.1f}ms/frame")
+
+            # Test RAW
+            print("\n📊 Test RAW (50 frames)...")
+            start = time.time()
+            for i in range(50):
+                _ = test_picam2.capture_array("raw")
+            raw_time = time.time() - start
+            raw_fps = 50 / raw_time
+            print(f"   FPS: {raw_fps:.1f}, Latence: {raw_time/50*1000:.1f}ms/frame")
+
+            # Comparaison
+            print("\n💡 RÉSUMÉ:")
+            print(f"   RGB : {rgb_fps:.1f} fps")
+            print(f"   RAW : {raw_fps:.1f} fps ({(raw_fps/rgb_fps*100):.0f}% de RGB)")
+
+            if raw_fps >= 25:
+                print("\n   ✅ RAW assez rapide pour Lucky Imaging !")
+            else:
+                print("\n   ⚠️  RAW trop lent pour Lucky Imaging haute cadence")
+
+            test_picam2.stop()
+
+        except Exception as e:
+            print(f"❌ Erreur test performance : {e}")
+
+        # Fermer
+        test_picam2.close()
+
+        print("\n" + "="*70)
+        print("✅ Tests terminés ! Appuyez sur CTRL+C pour quitter.")
+        print("="*70)
+
+        input("\nAppuyez sur ENTRÉE pour continuer...")
+        sys.exit(0)
+
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Tests interrompus par l'utilisateur")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n❌ ERREUR : {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+# ============================================================================
+# ANALYSE PROFONDEUR DE BITS - Utilitaire d'analyse
+# ============================================================================
+def analyze_bit_depth(raw_array, format_name):
+    """Analyse la profondeur de bits réelle d'un array brut."""
+
+    print(f"\n{'='*60}")
+    print(f"ANALYSE DE PROFONDEUR : {format_name}")
+    print(f"{'='*60}\n")
+
+    # Convertir en uint16 si nécessaire (données brutes en uint8)
+    print(f"Array brut - Shape: {raw_array.shape}, Dtype: {raw_array.dtype}")
+
+    if raw_array.dtype == np.uint8:
+        # Les données sont en bytes, il faut les convertir en uint16
+        # Format: little-endian, 2 bytes par pixel
+        raw_uint16 = raw_array.view(np.uint16)
+
+        # Calculer la largeur réelle (en excluant le padding du stride)
+        height, stride_bytes = raw_array.shape
+        width = stride_bytes // 2  # 2 bytes par pixel en 16-bit
+
+        # Reshape et extraire seulement les pixels valides
+        raw_array = raw_uint16.reshape(height, -1)[:, :width]
+
+        print(f"Converti en uint16 - Shape: {raw_array.shape}, Dtype: {raw_array.dtype}")
+
+    # Stats de base
+    print(f"\nMin value: {raw_array.min()}")
+    print(f"Max value: {raw_array.max()}")
+    print(f"Mean value: {raw_array.mean():.2f}")
+    print(f"Std dev: {raw_array.std():.2f}")
+
+    # Analyse des bits utilisés
+    print(f"\n--- ANALYSE DES BITS ---")
+
+    # Vérifier si les valeurs sont multiples de 16 (12-bit shifté de 4 bits)
+    multiples_of_16 = np.sum(raw_array % 16 == 0)
+    total_pixels = raw_array.size
+    percentage_mult_16 = (multiples_of_16 / total_pixels) * 100
+
+    print(f"Valeurs multiples de 16: {multiples_of_16}/{total_pixels} ({percentage_mult_16:.2f}%)")
+
+    # Vérifier si les valeurs sont multiples de autres puissances de 2
+    for shift in [1, 2, 3, 4, 5, 6, 7, 8]:
+        divisor = 2 ** shift
+        multiples = np.sum(raw_array % divisor == 0)
+        percentage = (multiples / total_pixels) * 100
+        print(f"Valeurs multiples de {divisor:3d}: {multiples}/{total_pixels} ({percentage:.2f}%)")
+
+    # Analyse des 4 bits de poids faible
+    print(f"\n--- BITS DE POIDS FAIBLE ---")
+    low_4_bits = raw_array & 0x0F  # Masque les 4 bits de poids faible
+    unique_low_bits = np.unique(low_4_bits)
+    print(f"Valeurs uniques dans les 4 bits de poids faible: {len(unique_low_bits)}")
+    print(f"Valeurs: {unique_low_bits[:20]}...")  # Affiche les 20 premières
+
+    if len(unique_low_bits) == 1 and unique_low_bits[0] == 0:
+        print("⚠️  Les 4 bits de poids faible sont toujours à 0 → 12-bit codé sur 16-bit")
+    else:
+        print("✓ Les 4 bits de poids faible varient → Probablement du vrai 16-bit")
+
+    # Analyse des 8 bits de poids faible
+    print(f"\n--- BITS DE POIDS FAIBLE (8 bits) ---")
+    low_8_bits = raw_array & 0xFF
+    unique_low_8_bits = np.unique(low_8_bits)
+    print(f"Valeurs uniques dans les 8 bits de poids faible: {len(unique_low_8_bits)}")
+
+    # Histogramme des valeurs
+    print(f"\n--- DISTRIBUTION DES VALEURS ---")
+    hist, bin_edges = np.histogram(raw_array, bins=16)
+    for i, (count, edge) in enumerate(zip(hist, bin_edges[:-1])):
+        next_edge = bin_edges[i+1]
+        print(f"  [{edge:6.0f} - {next_edge:6.0f}): {count:8d} pixels ({count/total_pixels*100:5.2f}%)")
+
+    # Échantillon de valeurs brutes
+    print(f"\n--- ÉCHANTILLON DE VALEURS BRUTES (50 pixels au centre) ---")
+    center_y = raw_array.shape[0] // 2
+    center_x = raw_array.shape[1] // 2
+    sample = raw_array[center_y:center_y+10, center_x:center_x+5].flatten()
+
+    print("Valeurs décimales:")
+    print(sample)
+    print("\nValeurs hexadécimales:")
+    print([hex(v) for v in sample])
+    print("\nValeurs binaires (4 bits de poids faible):")
+    print([bin(v & 0x0F) for v in sample])
+
+    # Conclusion
+    print(f"\n{'='*60}")
+    print("CONCLUSION:")
+    print(f"{'='*60}")
+
+    max_possible_12bit = 4095 << 4  # 12-bit shifté de 4 bits = 65520
+
+    if percentage_mult_16 > 99.0:
+        print("✓ Format: 12-bit codé sur 16-bit (shifté de 4 bits)")
+        print(f"  Plage réelle: 0 - {max_possible_12bit} (0x0000 - 0xFFF0)")
+        print(f"  Bits utilisés: [15:4], bits [3:0] toujours à 0")
+        bit_depth = 12
+    elif raw_array.max() > max_possible_12bit:
+        print("✓ Format: Vrai 16-bit")
+        print(f"  Plage réelle: 0 - 65535 (0x0000 - 0xFFFF)")
+        print(f"  Tous les bits sont utilisés")
+        bit_depth = 16
+    elif len(unique_low_bits) > 1:
+        print("✓ Format: Probablement vrai 16-bit (bits de poids faible variables)")
+        bit_depth = 16
+    else:
+        print("? Format incertain, analyse manuelle recommandée")
+        bit_depth = None
+
+    print(f"{'='*60}\n")
+
+    return bit_depth
+
+
+# ============================================================================
+# MODE TEST 16-BIT - Test de profondeur réelle SRGGB16 vs SRGGB12
+# ============================================================================
+def test_bit_depth_16():
+    """
+    Test pour vérifier la profondeur réelle du format SRGGB16.
+    Détermine si c'est du 12-bit codé sur 16-bit ou du vrai 16-bit.
+    """
+    print("\n" + "="*70)
+    print("🔬 TEST PROFONDEUR BITS - SRGGB16 vs SRGGB12")
+    print("="*70)
+
+    try:
+        picam2 = Picamera2()
+
+        # Test 1: SRGGB16
+        print("\n\n### TEST 1: Format SRGGB16 ###")
+
+        try:
+            config = picam2.create_video_configuration(
+                raw={"format": "SRGGB16", "size": (3856, 2180)},
+                buffer_count=2
+            )
+            picam2.configure(config)
+
+            print(f"Configuration appliquée: {config['raw']}")
+
+            picam2.start()
+            time.sleep(2)  # Laisser l'AE/AWB se stabiliser
+
+            # Capturer
+            print("Capture en cours...")
+            start = time.time()
+            raw_array = picam2.capture_array("raw")
+            capture_time = (time.time() - start) * 1000
+
+            print(f"Capture: {capture_time:.1f} ms")
+
+            # Analyser
+            bit_depth_16 = analyze_bit_depth(raw_array, "SRGGB16")
+
+            picam2.stop()
+
+        except Exception as e:
+            print(f"❌ Erreur avec SRGGB16: {e}")
+            bit_depth_16 = None
+
+        # Test 2: SRGGB12 pour comparaison
+        print("\n\n### TEST 2: Format SRGGB12 (pour comparaison) ###")
+
+        try:
+            config = picam2.create_video_configuration(
+                raw={"format": "SRGGB12", "size": (3856, 2180)},
+                buffer_count=2
+            )
+            picam2.configure(config)
+
+            print(f"Configuration appliquée: {config['raw']}")
+
+            picam2.start()
+            time.sleep(2)
+
+            print("Capture en cours...")
+            start = time.time()
+            raw_array = picam2.capture_array("raw")
+            capture_time = (time.time() - start) * 1000
+
+            print(f"Capture: {capture_time:.1f} ms")
+
+            # Analyser
+            bit_depth_12 = analyze_bit_depth(raw_array, "SRGGB12")
+
+            picam2.stop()
+
+        except Exception as e:
+            print(f"❌ Erreur avec SRGGB12: {e}")
+            bit_depth_12 = None
+
+        picam2.close()
+
+        # Résumé final
+        print("\n" + "="*70)
+        print("RÉSUMÉ FINAL")
+        print("="*70)
+
+        if bit_depth_16:
+            print(f"SRGGB16: {bit_depth_16}-bit effectifs")
+        else:
+            print("SRGGB16: Non testé ou erreur")
+
+        if bit_depth_12:
+            print(f"SRGGB12: {bit_depth_12}-bit effectifs")
+        else:
+            print("SRGGB12: Non testé ou erreur")
+
+        print("\nRECOMMANDATION:")
+        if bit_depth_16 == 16 and bit_depth_12 == 12:
+            print("✓ SRGGB16 offre plus de profondeur que SRGGB12")
+            print("  → Utiliser SRGGB16 pour DSO/Lunaire (meilleure qualité)")
+            print("  → Tester les performances pour voir si acceptable")
+        elif bit_depth_16 == 12 and bit_depth_12 == 12:
+            print("⚠️  SRGGB16 et SRGGB12 ont la même profondeur effective (12-bit)")
+            print("  → Utiliser SRGGB12 (probablement plus rapide)")
+        else:
+            print("? Résultats inattendus, analyse manuelle recommandée")
+
+        print("="*70)
+        sys.exit(0)
+
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Tests interrompus")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n❌ ERREUR : {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+# ============================================================================
+# MODE TEST DEBAYER - Test de debayerisation SRGGB12
+# ============================================================================
+def test_debayer_srggb12():
+    """
+    Test complet de debayerisation SRGGB12
+    Vérifie l'unpacking, le pattern Bayer et la qualité finale
+    """
+    print("\n" + "="*70)
+    print("🔬 TEST DEBAYERISATION SRGGB12 - Point critique")
+    print("="*70)
+
+    try:
+        # Créer répertoire de sortie
+        test_dir = Path("./test_debayer_output")
+        test_dir.mkdir(exist_ok=True)
+        print(f"\n📁 Répertoire de sortie : {test_dir.absolute()}")
+
+        # Initialiser caméra
+        print("\n📷 Initialisation caméra IMX585...")
+        test_picam2 = Picamera2()
+
+        sensor_res = test_picam2.sensor_resolution
+        print(f"   Résolution capteur : {sensor_res}")
+
+        # ====================================================================
+        # TEST 1 : Capture et analyse SRGGB12
+        # ====================================================================
+        print("\n" + "="*70)
+        print("TEST 1 : CAPTURE SRGGB12 - Analyse de la structure")
+        print("="*70)
+
+        config_12bit = test_picam2.create_still_configuration(
+            main={"size": (1920, 1080), "format": "RGB888"},
+            raw={"size": sensor_res, "format": "SRGGB12"}
+        )
+
+        print(f"\n📋 Configuration SRGGB12 :")
+        print(f"   Main : {config_12bit['main']}")
+        print(f"   Raw  : {config_12bit['raw']}")
+
+        test_picam2.configure(config_12bit)
+        test_picam2.start()
+        time.sleep(1)
+
+        # Capturer RGB de référence
+        print("\n📸 Capture RGB888 (référence)...")
+        rgb_ref = test_picam2.capture_array("main")
+        print(f"   ✅ RGB Shape: {rgb_ref.shape}, dtype: {rgb_ref.dtype}")
+        print(f"   📊 RGB Min/Max: {rgb_ref.min()} / {rgb_ref.max()}")
+
+        # Capturer RAW SRGGB12
+        print("\n📸 Capture SRGGB12 (raw)...")
+        raw_12bit = test_picam2.capture_array("raw")
+        print(f"   ✅ RAW Shape: {raw_12bit.shape}, dtype: {raw_12bit.dtype}")
+        print(f"   📊 RAW Min/Max: {raw_12bit.min()} / {raw_12bit.max()}")
+        print(f"   💾 RAW Taille: {raw_12bit.nbytes / 1024 / 1024:.2f} MB")
+
+        # Capturer les métadonnées pour comprendre le stride
+        metadata = test_picam2.capture_metadata()
+        print(f"\n📊 Métadonnées :")
+        if 'stride' in metadata:
+            print(f"   Stride : {metadata.get('stride', 'N/A')} bytes")
+
+        # ====================================================================
+        # TEST 2 : Unpacking des données SRGGB12
+        # ====================================================================
+        print("\n" + "="*70)
+        print("TEST 2 : UNPACKING SRGGB12 - Extraction des pixels 12-bit")
+        print("="*70)
+
+        print("\n🔧 Analyse de la structure des données...")
+
+        # Le format est généralement : (height, stride_in_bytes)
+        height, stride_bytes = raw_12bit.shape
+        print(f"   Hauteur : {height}")
+        print(f"   Stride  : {stride_bytes} bytes")
+
+        # Calculer la largeur réelle
+        # SRGGB12 peut être packed (1.5 bytes par pixel) ou unpacked (2 bytes par pixel)
+        width_packed = (stride_bytes * 2) // 3  # Si packed 12-bit
+        width_unpacked = stride_bytes // 2       # Si unpacked (12-bit dans 16-bit)
+
+        print(f"   Si packed   : largeur = {width_packed} pixels")
+        print(f"   Si unpacked : largeur = {width_unpacked} pixels")
+        print(f"   Attendu     : {sensor_res[0]} pixels")
+
+        # Déterminer le bon format
+        if abs(width_unpacked - sensor_res[0]) < 100:
+            # Format unpacked (12-bit dans 16-bit container)
+            print("\n   ✅ Format détecté : UNPACKED (12-bit dans 16-bit)")
+
+            # Convertir en uint16
+            raw_uint16 = raw_12bit.view(np.uint16)
+            raw_image = raw_uint16[:, :sensor_res[0]]  # Prendre seulement la largeur réelle
+
+        elif abs(width_packed - sensor_res[0]) < 100:
+            # Format packed (vrai 12-bit packed)
+            print("\n   ✅ Format détecté : PACKED (vrai 12-bit)")
+            print("   ⚠️  Unpacking nécessaire...")
+
+            # Unpacking 12-bit packed : 2 pixels = 3 bytes
+            # [AAAAAAAA][AAAABBBB][BBBBBBBB]
+            # Pixel A = byte0 + 4 bits MSB de byte1
+            # Pixel B = 4 bits LSB de byte1 + byte2
+
+            width = sensor_res[0]
+            raw_image = np.zeros((height, width), dtype=np.uint16)
+
+            for i in range(0, width, 2):
+                if i + 1 < width:
+                    byte_idx = (i * 3) // 2
+                    if byte_idx + 2 < stride_bytes:
+                        # Premier pixel (12 bits)
+                        raw_image[:, i] = (raw_12bit[:, byte_idx].astype(np.uint16) << 4) | \
+                                         ((raw_12bit[:, byte_idx + 1].astype(np.uint16) >> 4) & 0x0F)
+                        # Deuxième pixel (12 bits)
+                        raw_image[:, i + 1] = ((raw_12bit[:, byte_idx + 1].astype(np.uint16) & 0x0F) << 8) | \
+                                              raw_12bit[:, byte_idx + 2].astype(np.uint16)
+        else:
+            print("\n   ❌ Format non reconnu, tentative avec reshape simple...")
+            raw_image = raw_12bit.view(np.uint16).reshape(height, -1)[:, :sensor_res[0]]
+
+        print(f"\n   ✅ Image unpacked :")
+        print(f"      Shape : {raw_image.shape}")
+        print(f"      dtype : {raw_image.dtype}")
+        print(f"      Min/Max : {raw_image.min()} / {raw_image.max()}")
+        print(f"      Profondeur réelle : {np.log2(raw_image.max() + 1):.1f} bits")
+
+        # ====================================================================
+        # TEST 3 : Debayerisation avec pattern RGGB
+        # ====================================================================
+        print("\n" + "="*70)
+        print("TEST 3 : DEBAYERISATION - Application pattern RGGB")
+        print("="*70)
+
+        print("\n🎨 Test des 4 patterns Bayer...")
+
+        patterns = [
+            (cv2.COLOR_BayerRG2RGB, "RGGB", "Pattern correct IMX585"),
+            (cv2.COLOR_BayerGR2RGB, "GRBG", "Pattern alternatif 1"),
+            (cv2.COLOR_BayerGB2RGB, "GBRG", "Pattern alternatif 2"),
+            (cv2.COLOR_BayerBG2RGB, "BGGR", "Pattern alternatif 3"),
+        ]
+
+        debayer_results = {}
+
+        for pattern_code, pattern_name, description in patterns:
+            try:
+                print(f"\n   🔬 Test pattern {pattern_name} ({description})...")
+
+                # Convertir 12-bit → 8-bit pour debayerisation OpenCV
+                # Méthode 1 : Division simple (perd la dynamique)
+                raw_8bit_simple = (raw_image / 16).astype(np.uint8)
+
+                # Méthode 2 : Étirement auto (préserve la dynamique)
+                raw_stretched = np.clip((raw_image - raw_image.min()) * 255.0 /
+                                       (raw_image.max() - raw_image.min()), 0, 255).astype(np.uint8)
+
+                # Debayerisation
+                rgb_simple = cv2.cvtColor(raw_8bit_simple, pattern_code)
+                rgb_stretched = cv2.cvtColor(raw_stretched, pattern_code)
+
+                print(f"      ✅ Débayer OK : {rgb_simple.shape}")
+
+                # Sauvegarder les images
+                simple_path = test_dir / f"debayer_{pattern_name}_simple.png"
+                stretched_path = test_dir / f"debayer_{pattern_name}_stretched.png"
+
+                cv2.imwrite(str(simple_path), cv2.cvtColor(rgb_simple, cv2.COLOR_RGB2BGR))
+                cv2.imwrite(str(stretched_path), cv2.cvtColor(rgb_stretched, cv2.COLOR_RGB2BGR))
+
+                print(f"      💾 Sauvegardé : {simple_path.name}")
+                print(f"      💾 Sauvegardé : {stretched_path.name}")
+
+                debayer_results[pattern_name] = {
+                    'simple': rgb_simple,
+                    'stretched': rgb_stretched,
+                    'path_simple': simple_path,
+                    'path_stretched': stretched_path
+                }
+
+            except Exception as e:
+                print(f"      ❌ Erreur : {e}")
+
+        # ====================================================================
+        # TEST 4 : Comparaison avec RGB888 de référence
+        # ====================================================================
+        print("\n" + "="*70)
+        print("TEST 4 : VALIDATION - Comparaison avec RGB888")
+        print("="*70)
+
+        # Sauvegarder RGB référence
+        rgb_ref_path = test_dir / "reference_RGB888.png"
+        cv2.imwrite(str(rgb_ref_path), cv2.cvtColor(rgb_ref, cv2.COLOR_RGB2BGR))
+        print(f"\n💾 RGB888 référence : {rgb_ref_path.name}")
+
+        # Comparer les couleurs moyennes
+        print("\n📊 Comparaison des couleurs moyennes :")
+        rgb_ref_mean = rgb_ref.mean(axis=(0,1))
+        print(f"   RGB888 référence : R={rgb_ref_mean[0]:.1f}, G={rgb_ref_mean[1]:.1f}, B={rgb_ref_mean[2]:.1f}")
+
+        for pattern_name, results in debayer_results.items():
+            rgb_mean = results['stretched'].mean(axis=(0,1))
+            diff = np.abs(rgb_mean - rgb_ref_mean)
+            print(f"   {pattern_name:4s} stretched  : R={rgb_mean[0]:.1f}, G={rgb_mean[1]:.1f}, B={rgb_mean[2]:.1f} "
+                  f"(Δ={diff.mean():.1f})")
+
+        # ====================================================================
+        # TEST 5 : Performance
+        # ====================================================================
+        print("\n" + "="*70)
+        print("TEST 5 : PERFORMANCE - Vitesse de debayerisation")
+        print("="*70)
+
+        print("\n⏱️  Test de vitesse (20 frames)...")
+
+        times = {
+            'capture_rgb': [],
+            'capture_raw': [],
+            'unpack': [],
+            'debayer_8bit': [],
+            'debayer_16bit': []
+        }
+
+        for i in range(20):
+            # Capture RGB
+            t0 = time.time()
+            _ = test_picam2.capture_array("main")
+            times['capture_rgb'].append(time.time() - t0)
+
+            # Capture RAW
+            t0 = time.time()
+            raw = test_picam2.capture_array("raw")
+            times['capture_raw'].append(time.time() - t0)
+
+            # Unpack
+            t0 = time.time()
+            raw_uint16 = raw.view(np.uint16)[:, :sensor_res[0]]
+            times['unpack'].append(time.time() - t0)
+
+            # Debayer 8-bit
+            t0 = time.time()
+            raw_8bit = (raw_uint16 / 16).astype(np.uint8)
+            _ = cv2.cvtColor(raw_8bit, cv2.COLOR_BayerRG2RGB)
+            times['debayer_8bit'].append(time.time() - t0)
+
+            # Debayer 16-bit (si possible)
+            # Note: OpenCV ne supporte pas directement 16-bit, on simule
+            t0 = time.time()
+            raw_stretched = np.clip((raw_uint16 - raw_uint16.min()) * 255.0 /
+                                   (raw_uint16.max() - raw_uint16.min()), 0, 255).astype(np.uint8)
+            _ = cv2.cvtColor(raw_stretched, cv2.COLOR_BayerRG2RGB)
+            times['debayer_16bit'].append(time.time() - t0)
+
+        print("\n📊 Résultats (moyenne sur 20 frames) :")
+        print(f"   Capture RGB888     : {np.mean(times['capture_rgb'])*1000:.1f} ms ({1.0/np.mean(times['capture_rgb']):.1f} fps)")
+        print(f"   Capture SRGGB12    : {np.mean(times['capture_raw'])*1000:.1f} ms ({1.0/np.mean(times['capture_raw']):.1f} fps)")
+        print(f"   Unpack 12→16 bit   : {np.mean(times['unpack'])*1000:.1f} ms")
+        print(f"   Debayer simple     : {np.mean(times['debayer_8bit'])*1000:.1f} ms")
+        print(f"   Debayer stretched  : {np.mean(times['debayer_16bit'])*1000:.1f} ms")
+
+        total_raw_pipeline = np.mean(times['capture_raw']) + np.mean(times['unpack']) + np.mean(times['debayer_8bit'])
+        total_rgb_pipeline = np.mean(times['capture_rgb'])
+
+        print(f"\n💡 Pipeline complet :")
+        print(f"   RGB888 direct      : {total_rgb_pipeline*1000:.1f} ms ({1.0/total_rgb_pipeline:.1f} fps)")
+        print(f"   RAW12→RGB pipeline : {total_raw_pipeline*1000:.1f} ms ({1.0/total_raw_pipeline:.1f} fps)")
+        print(f"   Overhead RAW       : {(total_raw_pipeline/total_rgb_pipeline - 1)*100:.1f}%")
+
+        if total_raw_pipeline < 1.0/25:  # < 40ms = > 25 fps
+            print(f"\n   ✅ Performance suffisante pour Lucky Imaging (>25 fps) !")
+        else:
+            print(f"\n   ⚠️  Performance limite pour Lucky Imaging (<25 fps)")
+
+        test_picam2.stop()
+        test_picam2.close()
+
+        # ====================================================================
+        # RÉSUMÉ FINAL
+        # ====================================================================
+        print("\n" + "="*70)
+        print("✅ RÉSUMÉ DES TESTS")
+        print("="*70)
+
+        print(f"\n📁 Images de test sauvegardées dans : {test_dir.absolute()}")
+        print(f"\n💡 Pour vérifier visuellement :")
+        print(f"   1. Ouvrez les images debayer_RGGB_*.png")
+        print(f"   2. Comparez avec reference_RGB888.png")
+        print(f"   3. Les couleurs doivent correspondre (ciel bleu, végétation verte)")
+        print(f"   4. debayer_RGGB doit être la meilleure correspondance")
+
+        print(f"\n🎯 Recommandation :")
+        if 1.0/total_raw_pipeline >= 25:
+            print(f"   ✅ SRGGB12 viable pour Lucky/Live Stack !")
+            print(f"   ✅ Profondeur 12-bit préservée (vs 8-bit RGB)")
+            print(f"   ✅ Dynamique 15× supérieure (4096 vs 256 niveaux)")
+        else:
+            print(f"   ⚠️  SRGGB12 plus lent que souhaité")
+            print(f"   💡 Options : SRGGB10_CSI2P ou résolution réduite")
+
+        print("\n" + "="*70)
+        sys.exit(0)
+
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Tests interrompus")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n❌ ERREUR : {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+# Vérifier si mode test activé
+if len(sys.argv) > 1:
+    if sys.argv[1] == '--test-raw':
+        test_raw_modes()
+    elif sys.argv[1] == '--test-debayer':
+        test_debayer_srggb12()
+    elif sys.argv[1] == '--test-16bit':
+        test_bit_depth_16()
+
 pygame.init()
 
 if frame == 1:
@@ -1765,15 +2769,15 @@ def text(col,row,fColor,top,upd,msg,fsize,bkgnd_Color):
     msgRectobj = msgSurfaceObj.get_rect()
     if top == 0:
         if menu != 0:
-             pygame.draw.rect(windowSurfaceObj,bColor,Rect(bx+2,by+int(bh/3),bw-4,int(bh/3)))
+             pygame.draw.rect(windowSurfaceObj,bColor,Rect(bx+1,by+int(bh/3),bw-2,int(bh/3)))
         msgRectobj.topleft = (bx + 5, by + int(bh/3)-int(preview_width/640))
     elif msg == "Config":
         if menu != 0:
-            pygame.draw.rect(windowSurfaceObj,bColor,Rect(bx+2,by+int(bh/1.5),int(bw/2)-1,int(bh/3)-1))
+            pygame.draw.rect(windowSurfaceObj,bColor,Rect(bx+1,by+int(bh/1.5),int(bw/2)-1,int(bh/3)-1))
         msgRectobj.topleft = (bx+5,  by + int(bh/1.5)-1)
     elif top == 1:
         if menu != 0 :
-            pygame.draw.rect(windowSurfaceObj,bColor,Rect(bx+20,by+int(bh/1.5)-1,int(bw-21)-1,int(bh/3)))
+            pygame.draw.rect(windowSurfaceObj,bColor,Rect(bx+20,by+int(bh/1.5)-1,int(bw-20)-1,int(bh/3)))
         elif timelapse == 1:
             pygame.draw.rect(windowSurfaceObj,bColor,Rect(bx+20,by+int(bh/1.5)-1,int(bw-101),int(bh/5)))
         elif video == 1 or stream == 1:
@@ -2140,8 +3144,17 @@ def init_focus_graph():
         focus_ax.set_facecolor('#0a0a0a')
     return focus_fig, focus_ax
 
-def update_focus_graph(focus_val):
-    """Met à jour le graphique Focus et retourne une surface pygame"""
+def update_focus_graph(focus_val, method_name='Laplacian'):
+    """
+    Met à jour le graphique Focus et retourne une surface pygame
+
+    Args:
+        focus_val: Valeur du focus
+        method_name: Nom de la méthode de focus (Laplacian, Gradient, Sobel, Tenengrad)
+
+    Returns:
+        Surface pygame du graphique ou None
+    """
     global focus_history, focus_times, focus_start_time, focus_fig, focus_ax
     global _focus_frame_counter, _graphs_update_interval
 
@@ -2200,7 +3213,8 @@ def update_focus_graph(focus_val):
 
     ax.set_xlabel('Temps (s)', color='white', fontsize=11, fontweight='bold')
     ax.set_ylabel('Focus', color='white', fontsize=11, fontweight='bold')
-    ax.set_title('Évolution Focus (Laplacian)', color='white', fontsize=12, fontweight='bold')
+    # CORRECTION : Utiliser le nom de la méthode passé en paramètre
+    ax.set_title(f'Évolution Focus ({method_name})', color='white', fontsize=12, fontweight='bold')
     ax.tick_params(colors='white', labelsize=10)
     ax.grid(True, alpha=0.3, color='gray', linestyle='--', linewidth=0.8)
 
@@ -2337,6 +3351,108 @@ def update_combined_hfr_fwhm_graph(hfr_val, fwhm_val):
     except:
         return None
 
+def update_star_metric_graph(metric_val, metric_name):
+    """
+    Met à jour un graphique pour une métrique stellaire (HFR ou FWHM)
+
+    Args:
+        metric_val: Valeur de la métrique (HFR ou FWHM)
+        metric_name: 'HFR' ou 'FWHM'
+
+    Returns:
+        Surface pygame du graphique ou None
+    """
+    global hfr_history, hfr_times, hfr_start_time
+    global fwhm_history, fwhm_times, fwhm_start_time
+    global _hfr_fwhm_frame_counter, _graphs_update_interval
+
+    # Sélectionner l'historique approprié
+    if metric_name == 'HFR':
+        history = hfr_history
+        times = hfr_times
+        if hfr_start_time == 0:
+            hfr_start_time = time.time()
+        start_time = hfr_start_time
+        color_primary = '#00ff88'  # Vert
+        threshold_excellent = 2
+        threshold_good = 3.5
+        ylabel = 'HFR (px)'
+        y_max_default = 8
+    else:  # FWHM
+        history = fwhm_history
+        times = fwhm_times
+        if fwhm_start_time == 0:
+            fwhm_start_time = time.time()
+        start_time = fwhm_start_time
+        color_primary = '#ff00ff'  # Magenta
+        threshold_excellent = 5
+        threshold_good = 10
+        ylabel = 'FWHM (px)'
+        y_max_default = 15
+
+    if metric_val is None:
+        return None
+
+    current_time = time.time() - start_time
+    history.append(metric_val)
+    times.append(current_time)
+
+    if len(history) < 2:
+        return None
+
+    # Limiter la fréquence de mise à jour
+    _hfr_fwhm_frame_counter += 1
+    if _hfr_fwhm_frame_counter < _graphs_update_interval:
+        return None
+    _hfr_fwhm_frame_counter = 0
+
+    # Créer ou réutiliser la figure
+    fig, ax = plt.subplots(figsize=(6, 3), dpi=100)
+    fig.patch.set_facecolor('#1a1a1a')
+    ax.set_facecolor('#0a0a0a')
+
+    # Tracer les données avec couleurs dynamiques
+    times_list = list(times)
+    values_list = list(history)
+
+    for i in range(len(values_list) - 1):
+        if values_list[i] < threshold_excellent:
+            color = '#00ff00'  # vert
+        elif values_list[i] < threshold_good:
+            color = '#ffff00'  # jaune
+        else:
+            color = '#ff6600'  # orange
+
+        ax.plot(times_list[i:i+2], values_list[i:i+2],
+                color=color, linewidth=2.5, marker='o', markersize=4)
+
+    ax.set_xlabel('Temps (s)', color='white', fontsize=11, fontweight='bold')
+    ax.set_ylabel(ylabel, color=color_primary, fontsize=11, fontweight='bold')
+    ax.set_title(f'{metric_name} des étoiles', color='white', fontsize=12, fontweight='bold')
+    ax.tick_params(colors='white', labelsize=10)
+    ax.grid(True, alpha=0.3, color='gray', linestyle='--', linewidth=0.8)
+
+    max_val = max(values_list)
+    ax.set_ylim(0, max(max_val * 1.2, y_max_default))
+
+    for spine in ax.spines.values():
+        spine.set_color('white')
+        spine.set_linewidth(1.5)
+
+    plt.tight_layout()
+
+    try:
+        canvas = FigureCanvasAgg(fig)
+        canvas.draw()
+        buf = canvas.buffer_rgba()
+        w, h = canvas.get_width_height()
+        graph_surface = pygame.image.frombuffer(buf, (w, h), 'RGBA')
+        plt.close(fig)  # Libérer la mémoire
+        return graph_surface
+    except:
+        plt.close(fig)
+        return None
+
 def reset_focus_history():
     """Réinitialise l'historique Focus"""
     global focus_history, focus_times, focus_start_time
@@ -2347,21 +3463,22 @@ def reset_focus_history():
 def ghs_stretch(array, D, b, SP, LP, HP):
     """
     Generalized Hyperbolic Stretch (GHS) - Algorithme conforme Siril/PixInsight
-    
+    VERSION AMÉLIORÉE: Préserve le bit depth (float32 ou uint8)
+
     Basé sur les travaux de Dave Payne et Mike Cranfield (ghsastro.co.uk)
     Implémentation conforme à la documentation officielle GHS.
-    
+
     Args:
-        array: numpy array de l'image (H, W, 3) ou (H, W) en uint8
+        array: numpy array de l'image (H, W, 3) ou (H, W) en uint8 OU float32 [0-255]
         D: Stretch factor (0.0 à 5.0) - force de l'étirement
         b: Local intensity (-5.0 à 15.0) - concentration du contraste autour de SP
         SP: Symmetry point (0.0 à 1.0) - point focal du contraste maximum
         LP: Protect shadows (0.0 à SP) - protection des basses lumières (linéaire)
         HP: Protect highlights (SP à 1.0) - protection des hautes lumières (linéaire)
-    
+
     Returns:
-        numpy array étiré de même dimension uint8
-    
+        numpy array étiré de même dimension (préserve dtype: float32 ou uint8)
+
     Notes:
         - D = 0 : pas de transformation (identité)
         - b = 0 : transformation exponentielle
@@ -2370,16 +3487,26 @@ def ghs_stretch(array, D, b, SP, LP, HP):
         - b < 0 : transformation intégrale/logarithmique
         - LP protège les shadows en appliquant une transformation linéaire sous LP
         - HP protège les highlights en appliquant une transformation linéaire au-dessus de HP
-    
+        - NOUVEAU: Si entrée float32 → sortie float32 (préserve dynamique RAW12/16)
+
     Exemple d'utilisation pour galaxie:
         ghs_stretch(img, D=2.0, b=6.0, SP=0.15, LP=0.0, HP=0.85)
-    
+
     Exemple pour stretch initial (linéaire -> non-linéaire):
         ghs_stretch(img, D=3.5, b=12.0, SP=0.08, LP=0.0, HP=1.0)
     """
-    
+
+    # Détection du type d'entrée pour préserver le bit depth
+    input_dtype = array.dtype
+    input_is_float = np.issubdtype(input_dtype, np.floating)
+
     # Normaliser l'image entre 0 et 1
-    img_float = array.astype(np.float64) / 255.0
+    if input_is_float:
+        # Float32 [0-255] provenant de RAW12/16 débayérisé
+        img_float = array.astype(np.float64) / 255.0
+    else:
+        # uint8 [0-255] classique
+        img_float = array.astype(np.float64) / 255.0
     
     # Constante pour éviter divisions par zéro
     epsilon = 1e-10
@@ -2542,10 +3669,16 @@ def ghs_stretch(array, D, b, SP, LP, HP):
     # Normaliser entre 0 et 1
     img_stretched = (img_stretched - T1_0) / norm_range
     
-    # Clip et reconvertir en uint8
+    # Clip et reconvertir dans le type d'origine (préserve bit depth)
     img_stretched = np.clip(img_stretched, 0.0, 1.0)
-    img_stretched = (img_stretched * 255.0).astype(np.uint8)
-    
+
+    if input_is_float:
+        # Retourner float32 [0-255] pour préserver la dynamique RAW12/16
+        img_stretched = (img_stretched * 255.0).astype(np.float32)
+    else:
+        # Retourner uint8 [0-255] pour compatibilité pygame avec YUV420
+        img_stretched = (img_stretched * 255.0).astype(np.uint8)
+
     return img_stretched
 
 
@@ -2580,7 +3713,12 @@ def astro_stretch(array):
         return ghs_stretch(array, D, b, SP, LP, HP)
 
     elif stretch_preset == 2:
-        # Arcsinh stretch (code original)
+        # Arcsinh stretch - VERSION AMÉLIORÉE: Préserve le bit depth (float32 ou uint8)
+
+        # Détection du type d'entrée pour préserver le bit depth
+        input_dtype = array.dtype
+        input_is_float = np.issubdtype(input_dtype, np.floating)
+
         # Convertir en float pour les calculs
         img_float = array.astype(np.float32)
 
@@ -2603,8 +3741,13 @@ def astro_stretch(array):
         factor = stretch_factor / 10.0
         img_stretched = np.arcsinh(img_normalized * factor) / np.arcsinh(factor)
 
-        # Reconvertir en uint8
-        img_stretched = (img_stretched * 255).astype(np.uint8)
+        # Reconvertir dans le type d'origine (préserve bit depth comme GHS)
+        if input_is_float:
+            # Retourner float32 [0-255] pour préserver la dynamique RAW12/16
+            img_stretched = (img_stretched * 255.0).astype(np.float32)
+        else:
+            # Retourner uint8 [0-255] pour compatibilité pygame avec YUV420
+            img_stretched = (img_stretched * 255.0).astype(np.uint8)
 
         return img_stretched
 
@@ -2616,6 +3759,7 @@ def preview():
     global count,p, brightness,contrast,modes,mode,red,blue,gain,sspeed,ev,preview_width,preview_height,zoom,igw,igh,zx,zy,awbs,awb,saturations
     global saturation,meters,meter,flickers,flicker,sharpnesss,sharpness,rotate,v3_hdrs,mjpeg_extractor
     global picam2, use_picamera2, Pi_Cam, camera, v3_af, v5_af, vflip, hflip, denoise, denoises, quality, use_native_sensor_mode, zfs
+    global livestack_active, luckystack_active, raw_format, raw_stream_size, capture_size
 
     # Variables statiques pour mémoriser la configuration précédente
     if not hasattr(preview, 'prev_config'):
@@ -2636,10 +3780,15 @@ def preview():
             if roi_height % 2 != 0:
                 roi_height -= 1
             capture_size = (roi_width, roi_height)
+            # Pour le flux RAW en mode natif : toujours utiliser la résolution native complète
+            # même avec zoom. Le ScalerCrop définit le ROI au niveau capteur (→ cadence augmentée)
+            # Après capture, on extraira la région ROI du tableau RAW
+            raw_stream_size = (igw, igh)
         # Mode natif sans zoom : utiliser la résolution native complète
         elif use_native_sensor_mode == 1:
             # Utiliser la résolution native complète du capteur
             capture_size = (igw, igh)
+            raw_stream_size = capture_size
         # Si zoom actif en mode binning, utiliser la résolution correspondante au niveau de zoom
         elif zoom > 0:
             # Résolutions correspondant aux niveaux de zoom
@@ -2650,18 +3799,26 @@ def preview():
                 5: (640, 368)     # 6x zoom
             }
             capture_size = zoom_capture_sizes.get(zoom, (vwidth, vheight))
+            raw_stream_size = capture_size
         elif (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8) and focus_mode == 1:
             capture_size = (3280, 2464)
+            raw_stream_size = capture_size
         elif (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8):
             capture_size = (1920, 1440)
+            raw_stream_size = capture_size
         elif Pi_Cam == 3:
             capture_size = (2304, 1296)
+            raw_stream_size = capture_size
         elif Pi_Cam == 10:
             capture_size = (1928, 1090)
+            raw_stream_size = capture_size
         else:
             capture_size = (preview_width, preview_height)
+            raw_stream_size = capture_size
 
         # Détecter si recréation nécessaire (changements majeurs de config)
+        # Note: Le stream raw SRGGB12 est toujours créé (comme dans la version originale)
+        # donc pas besoin de recréer si on change juste raw_format (ça n'affecte que la capture)
         need_recreation = (
             picam2 is None or
             preview.prev_config.get('camera') != camera or
@@ -2815,19 +3972,34 @@ def preview():
         # Utiliser le minimum du capteur IMX585, pas une valeur arbitraire
         min_frame_duration = 11415 if Pi_Cam == 10 else 100  # 11.415ms pour IMX585
 
+        # Afficher les paramètres de configuration (traceur)
+        if show_cmds == 1:
+            sensor_mode_name = "NATIVE" if use_native_sensor_mode == 1 else "BINNING"
+            stacking_status = "STACKING ACTIF" if (livestack_active or luckystack_active) else "PREVIEW"
+            print(f"  [CONFIG] Mode: {stacking_status}, Sensor: {sensor_mode_name}, Size: {capture_size}")
+            print(f"  [CONFIG] RAW Format: {raw_formats[raw_format]} (index {raw_format})")
+
         # Créer la configuration adaptée au mode
         # En mode manuel ou avec exposition > 80ms, utiliser still_configuration
         # (preview_configuration limite l'exposition à ~83ms pour l'IMX585)
+        # IMPORTANT: Toujours créer un stream raw SRGGB12 (comme dans la version originale)
+        # mais ne l'utiliser QUE si stacking actif ET raw_format != 0
         if mode == 0 or sspeed > 80000:
             config = picam2.create_still_configuration(
                 main={"size": capture_size, "format": "RGB888"},
-                raw={"size": capture_size, "format": "SRGGB12"}  # Forcer 12-bit
+                raw={"size": raw_stream_size, "format": "SRGGB12"}  # Utilise raw_stream_size au lieu de capture_size
             )
+            if show_cmds == 1:
+                print(f"  [CONFIG] Type: STILL, Stream RAW: SRGGB12 (fixe, utilisation selon stacking)")
+                print(f"  [CONFIG] Requested capture_size: {capture_size}")
         else:
             config = picam2.create_preview_configuration(
                 main={"size": capture_size, "format": "RGB888"},
-                raw={"size": capture_size, "format": "SRGGB12"}  # Forcer 12-bit
+                raw={"size": raw_stream_size, "format": "SRGGB12"}  # Utilise raw_stream_size au lieu de capture_size
             )
+            if show_cmds == 1:
+                print(f"  [CONFIG] Type: PREVIEW, Stream RAW: SRGGB12 (fixe, utilisation selon stacking)")
+                print(f"  [CONFIG] Requested capture_size: {capture_size}")
 
         # Préparer TOUS les contrôles pour application après start()
         controls_dict = {}
@@ -2903,7 +4075,24 @@ def preview():
         if vflip == 1 or hflip == 1:
             config["transform"] = Transform(vflip=(vflip == 1), hflip=(hflip == 1))
 
+        # DEBUG: Afficher la config réelle avant de la passer à picamera2
+        if show_cmds == 1:
+            print(f"  [DEBUG] Config avant picam2.configure():")
+            print(f"    main: {config.get('main', 'N/A')}")
+            print(f"    raw: {config.get('raw', 'N/A')}")
+            if 'raw' in config and config['raw'] is not None:
+                print(f"    ⚠ WARNING: Config contient un stream raw alors qu'on ne le voulait pas!")
+
         picam2.configure(config)
+
+        # DEBUG: Vérifier les tailles réelles après configuration
+        if show_cmds == 1:
+            actual_config = picam2.camera_configuration()
+            print(f"  [DEBUG] Config APRÈS picam2.configure():")
+            for stream_name in ['main', 'raw']:
+                if stream_name in actual_config:
+                    stream_cfg = actual_config[stream_name]
+                    print(f"    {stream_name}: size={stream_cfg.get('size', 'N/A')}, format={stream_cfg.get('format', 'N/A')}")
 
         # CRITIQUE: En mode manuel, appliquer TOUS les contrôles AVANT start()
         # Cela évite que libcamera garde un état résiduel d'une configuration précédente
@@ -3220,6 +4409,7 @@ def preview():
 
 def Menu():
     global vwidths2,vheights2,Pi_Cam,scientif,mode,v3_hdr,scientific,tinterval,zoom,vwidth,vheight,preview_width,preview_height,ft,fv,focus,fxz,v3_hdr,v3_hdrs,bw,bh,ft,fv,cam1,v3_f_mode,v3_af,button_row,xx,xy,use_native_sensor_mode
+    global allsky_mode,allsky_mean_target,allsky_mean_threshold,allsky_video_fps,allsky_max_gain,allsky_apply_stretch,allsky_cleanup_jpegs,allsky_modes
     pygame.draw.rect(windowSurfaceObj,(0,0,0),Rect(preview_width,0,bw,preview_height))
     if menu > 0: 
         # set button sizes
@@ -3249,6 +4439,7 @@ def Menu():
                 button(0,d,0,4)
         text(0,0,1,0,1,"MAIN MENU ",ft,7)
       
+    # ========== MENU 0 - MAIN MENU ==========
     if menu == 0:
         # set button sizes
         bw = int(preview_width/5.66)
@@ -3257,15 +4448,15 @@ def Menu():
         fv = int(preview_width/46)
         # Effacer la zone des boutons pour éviter les sliders résiduels
         pygame.draw.rect(windowSurfaceObj,blackColor,Rect(preview_width,0,bw,preview_height))
-        button(0,0,4,4)
-        button(0,1,2,4)
-        button(0,2,3,4)
-        button(0,3,9,4)
+        button(0,0,4,4)  # STILL
+        button(0,1,2,4)  # VIDEO
+        button(0,2,3,4)  # TIMELAPSE
+        button(0,3,9,4)  # LIVE STACK
         button(0,4,10,4)  # LUCKY STACK button - bleu marine avec texte rouge
-        button(0,5,5,4)  # STRETCH (décalé)
-        button(0,6,0,4)  # CAMERA Settings (décalé)
-        button(0,7,0,4)  # OTHER Settings (décalé)
-        button(0,8,0,4)  # EXIT (décalé)
+        button(0,5,5,4)  # STRETCH
+        button(0,6,0,4)  # CAMERA Settings
+        button(0,7,0,4)  # OTHER Settings
+        button(0,8,0,4)  # EXIT
         text(0,0,8,0,1,"         STILL ",ft,1)
         text(0,1,8,0,1,"         VIDEO",ft,2)
         text(0,2,8,0,1,"       TIMELAPSE",ft-1,4)
@@ -3278,6 +4469,7 @@ def Menu():
         text(0,7,1,1,1,"    Settings",ft,7)
         text(0,8,2,0,1,"     EXIT",fv+10,7)
       
+    # ========== MENU 1 - CAMERA SETTINGS ==========
     elif menu == 1:
       text(0,1,1,0,1,"STILL",ft,7)
       text(0,1,1,1,1,"Settings",ft,7)
@@ -3338,6 +4530,7 @@ def Menu():
           draw_Vbar(0,7,greyColor,'v3_f_range',v3_f_range)
         
                  
+    # ========== MENU 2 - OTHER SETTINGS ==========
     elif menu == 2:
         if cam1 != "1":
             text(0,1,2,0,1,"Switch Camera",ft,7)
@@ -3365,9 +4558,10 @@ def Menu():
         text(0,6,5,0,1,"Horiz Flip",ft,7)
         text(0,6,3,1,1,str(hflip),fv,7)
 
-        # Ligne 7 - STILL -t time
-        text(0,7,5,0,1," STILL -t time ",fv,7)
-        text(0,7,3,1,1,str(timet),fv,7)
+        # Ligne 7 - RAW Format (remplace STILL -t time)
+        text(0,7,5,0,1,"RAW Format",ft,7)
+        text(0,7,3,1,1,raw_formats[raw_format],fv,7)
+        draw_Vbar(0,7,greyColor,'raw_format',raw_format)
 
         # Ligne 8 - Sensor Mode
         text(0,8,2,0,1,"Sensor Mode",ft,7)
@@ -3378,8 +4572,10 @@ def Menu():
         draw_Vbar(0,8,greyColor,'use_native_sensor_mode',use_native_sensor_mode)
 
         # Ligne 9 - SAVE CONFIG
+        button(0,9,0,4)
         text(0,9,2,0,1,"SAVE CONFIG",fv,7)
       
+    # ========== MENU 3 - STILL SETTINGS (Page 1) ==========
     elif menu == 3:
       text(0,1,5,0,1,"Mode",ft,10)
       text(0,1,3,1,1,modes[mode],fv,10)
@@ -3426,6 +4622,7 @@ def Menu():
       draw_bar(0,7,lgrnColor,'blue',blue)
       draw_bar(0,8,lgrnColor,'red',red)
                 
+    # ========== MENU 4 - STILL SETTINGS (Page 2) ==========
     elif menu == 4:
 
         # Ligne 1 - Page 1 (retour)
@@ -3486,6 +4683,7 @@ def Menu():
         button(0,9,6,4)
         text(0,9,2,0,1,"SAVE CONFIG",fv,10)
       
+    # ========== MENU 5 - VIDEO SETTINGS ==========
     elif menu == 5:
         text(0,1,5,0,1,"V_Length",ft,11)
         td = timedelta(seconds=vlen)
@@ -3500,6 +4698,7 @@ def Menu():
         text(0,7,5,0,1,"V_Preview",ft,11)
         text(0,7,3,1,1,"ON ",fv,11)
         draw_Vbar(0,3,lpurColor,'vformat',vformat)
+        button(0,8,7,4)
         text(0,8,2,0,1,"SAVE CONFIG",fv,11)
         # determine if camera native format
         vw = 0
@@ -3519,23 +4718,109 @@ def Menu():
         draw_Vbar(0,4,lpurColor,'codec',codec)
         draw_Vbar(0,5,lpurColor,'profile',profile)
       
+    # ========== MENU 6 - TIMELAPSE SETTINGS ==========
     elif menu == 6:
-        td = timedelta(seconds=tduration)
-        text(0,1,5,0,1,"Duration",ft,12)
-        text(0,1,3,1,1,str(td),fv,12)
-        td = timedelta(seconds=tinterval)
-        text(0,2,5,0,1,"Interval",ft,12)
-        text(0,2,3,1,1,str(td),fv,12)
-        text(0,3,5,0,1,"No. of Shots",ft,12)
-        if tinterval > 0:
-            text(0,3,3,1,1,str(tshots),fv,12)
-        else:
-            text(0,3,3,1,1," ",fv,12)
-        text(0,8,2,0,1,"SAVE CONFIG",fv,12)
-        draw_Vbar(0,1,lyelColor,'tduration',tduration)
-        draw_Vbar(0,2,lyelColor,'tinterval',tinterval)
-        draw_Vbar(0,3,lyelColor,'tshots',tshots)
+        # TIMELAPSE Settings - Multi-pages
+        current_page = menu_page.get(6, 1)  # Page par défaut = 1
 
+        if current_page == 1:
+            # ========== PAGE 1 - Standard Timelapse Parameters ==========
+            # Ligne 1 - Duration
+            td = timedelta(seconds=tduration)
+            text(0,1,5,0,1,"Duration",ft,12)
+            text(0,1,3,1,1,str(td),fv,12)
+            draw_Vbar(0,1,lyelColor,'tduration',tduration)
+
+            # Ligne 2 - Interval
+            td = timedelta(seconds=tinterval)
+            text(0,2,5,0,1,"Interval",ft,12)
+            text(0,2,3,1,1,str(td),fv,12)
+            draw_Vbar(0,2,lyelColor,'tinterval',tinterval)
+
+            # Ligne 3 - No. of Shots
+            text(0,3,5,0,1,"No. of Shots",ft,12)
+            if tinterval > 0:
+                text(0,3,3,1,1,str(tshots),fv,12)
+            else:
+                text(0,3,3,1,1," ",fv,12)
+            draw_Vbar(0,3,lyelColor,'tshots',tshots)
+
+            # Ligne 8 - SAVE CONFIG
+            button(0,8,8,4)
+            text(0,8,2,0,1,"SAVE CONFIG",fv,12)
+
+            # Ligne 9 - Navigation to Page 2
+            button(0,9,0,9)
+            text(0,9,3,0,1,"ALLSKY",ft,12)
+            text(0,9,3,1,1,"Page 2 ->",fv,12)
+
+        elif current_page == 2:
+            # ========== PAGE 2 - Allsky Parameters ==========
+            # Ligne 1 - Navigation retour
+            button(0,1,0,1)
+            text(0,1,3,0,1,"<- Page 1",ft,10)
+            text(0,1,3,1,1,"Standard",fv,10)
+
+            # Ligne 2 - Allsky Mode
+            text(0,2,5,0,1,"Allsky Mode",ft,10)
+            text(0,2,3,1,1,allsky_modes[allsky_mode],fv,10)
+            draw_Vbar(0,2,greyColor,'allsky_mode',allsky_mode)
+
+            # Ligne 3 - Mean Target (only if Auto-Gain)
+            text(0,3,5,0,1,"Mean Target",ft,10)
+            if allsky_mode == 2:
+                text(0,3,3,1,1,str(allsky_mean_target/100.0)[0:4],fv,10)
+                draw_Vbar(0,3,greyColor,'allsky_mean_target',allsky_mean_target)
+            else:
+                text(0,3,3,1,1,"N/A",fv,10)
+
+            # Ligne 4 - Mean Threshold (only if Auto-Gain)
+            text(0,4,5,0,1,"Mean Thresh",ft,10)
+            if allsky_mode == 2:
+                text(0,4,3,1,1,str(allsky_mean_threshold/100.0)[0:4],fv,10)
+                draw_Vbar(0,4,greyColor,'allsky_mean_threshold',allsky_mean_threshold)
+            else:
+                text(0,4,3,1,1,"N/A",fv,10)
+
+            # Ligne 5 - Video FPS (only if Allsky ON or Auto-Gain)
+            text(0,5,5,0,1,"Video FPS",ft,10)
+            if allsky_mode > 0:
+                text(0,5,3,1,1,str(allsky_video_fps),fv,10)
+                draw_Vbar(0,5,greyColor,'allsky_video_fps',allsky_video_fps)
+            else:
+                text(0,5,3,1,1,"N/A",fv,10)
+
+            # Ligne 6 - Max Gain (only if Auto-Gain)
+            text(0,6,5,0,1,"Max Gain",ft,10)
+            if allsky_mode == 2:
+                text(0,6,3,1,1,str(allsky_max_gain),fv,10)
+                draw_Vbar(0,6,greyColor,'allsky_max_gain',allsky_max_gain)
+            else:
+                text(0,6,3,1,1,"N/A",fv,10)
+
+            # Ligne 7 - Apply Stretch (only if Allsky ON or Auto-Gain)
+            text(0,7,5,0,1,"Apply Stretch",ft,10)
+            if allsky_mode > 0:
+                stretch_text = "ON" if allsky_apply_stretch == 1 else "OFF"
+                text(0,7,3,1,1,stretch_text,fv,10)
+                draw_Vbar(0,7,greyColor,'allsky_apply_stretch',allsky_apply_stretch)
+            else:
+                text(0,7,3,1,1,"N/A",fv,10)
+
+            # Ligne 8 - Cleanup JPEGs (only if Allsky ON or Auto-Gain)
+            text(0,8,5,0,1,"Cleanup JPEGs",ft,10)
+            if allsky_mode > 0:
+                cleanup_text = "YES" if allsky_cleanup_jpegs == 1 else "NO"
+                text(0,8,3,1,1,cleanup_text,fv,10)
+                draw_Vbar(0,8,greyColor,'allsky_cleanup_jpegs',allsky_cleanup_jpegs)
+            else:
+                text(0,8,3,1,1,"N/A",fv,10)
+
+            # Ligne 9 - SAVE CONFIG (on Page 2)
+            button(0,9,0,4)
+            text(0,9,2,0,1,"SAVE CONFIG",fv,10)
+
+    # ========== MENU 7 - STRETCH SETTINGS ==========
     elif menu == 7:
         # STRETCH Settings - Multi-pages (Phase 2)
         current_page = menu_page.get(7, 1)  # Page par défaut = 1
@@ -3563,6 +4848,7 @@ def Menu():
             draw_Vbar(0,4,greyColor,'stretch_preset',stretch_preset)
 
             # Ligne 8 - SAVE CONFIG
+            button(0,8,0,4)
             text(0,8,2,0,1,"SAVE CONFIG",fv,7)
 
             # Ligne 9 - Navigation
@@ -3613,6 +4899,7 @@ def Menu():
             draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
 
             # Ligne 8 - SAVE CONFIG
+            button(0,8,0,4)
             text(0,8,2,0,1,"SAVE CONFIG",fv,7)
 
             # Ligne 9 - Retour menu principal
@@ -3620,6 +4907,7 @@ def Menu():
             text(0,9,1,0,1,"CAMERA",ft,7)
             text(0,9,1,1,1,"Settings",ft,7)
 
+    # ========== MENU 8 - LIVE STACK SETTINGS ==========
     elif menu == 8:
         # LIVE STACK Settings - Multi-pages
         current_page = menu_page.get(8, 1)  # Page par défaut = 1
@@ -3716,6 +5004,7 @@ def Menu():
             text(0,9,1,0,1,"<<< Page 1",ft,7)
             text(0,9,1,1,1,"",ft,7)
 
+    # ========== MENU 9 - LUCKY STACK SETTINGS ==========
     elif menu == 9:
         # LUCKY STACK Settings - Complet
         # (Lucky Enable géré par le bouton LUCKY STACK lui-même)
@@ -3756,6 +5045,7 @@ def Menu():
         # Ligne 7 - (vide pour l'instant)
 
         # Ligne 8 - SAVE CONFIG
+        button(0,8,0,4)
         text(0,8,2,0,1,"SAVE CONFIG",fv,7)
 
         # Ligne 9 - Retour
@@ -3763,6 +5053,7 @@ def Menu():
         text(0,9,1,0,1,"CAMERA",ft,7)
         text(0,9,1,1,1,"Settings",ft,7)
 
+    # ========== MENU 10 - METRICS SETTINGS ==========
     elif menu == 10:
         # ========== MENU 10 - METRICS Settings ==========
 
@@ -3945,7 +5236,59 @@ while True:
             pygame._picam2_section_debug = True
         try:
             # Capturer l'image directement depuis Picamera2
-            array = picam2.capture_array("main")
+            # Si livestack/luckystack actif ET format RAW sélectionné → capturer et débayériser en uint16
+            if (livestack_active or luckystack_active) and raw_format != 0:
+                # Capturer flux RAW (SRGGB12 ou SRGGB16)
+                raw_array = picam2.capture_array("raw")
+                # Débayériser en RGB uint16 [0-65535] (préserve dynamique 12/16-bit)
+                # *** NOUVEAU : Passer les gains AWB pour corriger la balance des blancs en RAW ***
+                # INVERSÉS pour compenser le pattern Bayer RGGB qui inverse les canaux
+                array_uint16 = debayer_raw_array(raw_array, raw_formats[raw_format],
+                                                  red_gain=(blue/10),   # Le curseur BLEU contrôle le rouge
+                                                  blue_gain=(red/10))   # Le curseur ROUGE contrôle le bleu
+                # Convertir en float32 [0-255] pour être compatible avec libastrostack (comme YUV)
+                # Utilise facteur exact 255/65535 pour préserver la dynamique complète
+                array = array_uint16.astype(np.float32) * (255.0 / 65535.0)
+
+                # Appliquer boost de contraste SEULEMENT si ISP libastrostack est désactivé
+                # Si ISP activé, on passe les données RAW brutes à libastrostack qui fera le traitement
+                if isp_enable == 0:
+                    # Appliquer boost de contraste au lieu du gamma (préserve mieux les noirs)
+                    # Méthode : (value - 128) × factor + 128 + brightness_offset
+                    # Le YUV a l'ISP qui applique des courbes tonales, on simule avec contraste + luminosité
+                    contrast_factor = 1.15  # Léger boost de contraste
+                    brightness_offset = 8   # Légère augmentation de luminosité générale
+                    array = np.clip((array - 128.0) * contrast_factor + 128.0 + brightness_offset, 0, 255.0)
+                if show_cmds == 1 and not hasattr(pygame, '_stacking_mode_shown'):
+                    metadata = picam2.capture_metadata()
+                    print(f"\n[STACKING] Mode actif, capture depuis stream RAW")
+                    print(f"  Format RAW: {raw_formats[raw_format]}")
+                    print(f"  Array débayérisé uint16: shape={array_uint16.shape}, range=[{array_uint16.min()}, {array_uint16.max()}]")
+                    print(f"  Array après conversion float32: shape={array.shape}, dtype={array.dtype}, range=[{array.min():.2f}, {array.max():.2f}]")
+                    print(f"  Dynamique préservée: {len(np.unique(array_uint16))} niveaux distincts")
+                    if isp_enable == 1:
+                        print(f"  Traitement ISP software: DÉSACTIVÉ (libastrostack ISP actif)")
+                    else:
+                        print(f"  Traitement ISP software: ACTIVÉ (Contraste ×1.15 + Luminosité +8)")
+                    print(f"  Métadonnées caméra:")
+                    print(f"    ExposureTime: {metadata.get('ExposureTime', 'N/A')}µs")
+                    print(f"    AnalogueGain: {metadata.get('AnalogueGain', 'N/A')}")
+                    print(f"    ColourGains: {metadata.get('ColourGains', 'N/A')}")
+                    print(f"    Sensor Mode: {'NATIVE' if use_native_sensor_mode == 1 else 'BINNING'}")
+                    pygame._stacking_mode_shown = True
+            else:
+                # Capture RGB normale uint8 (YUV420 ou livestack inactif)
+                array = picam2.capture_array("main")
+                if show_cmds == 1 and (livestack_active or luckystack_active) and not hasattr(pygame, '_stacking_yuv_shown'):
+                    metadata = picam2.capture_metadata()
+                    print(f"\n[STACKING] Mode YUV420, capture depuis stream MAIN")
+                    print(f"  Array uint8: shape={array.shape}, dtype={array.dtype}, range=[{array.min()}, {array.max()}]")
+                    print(f"  Métadonnées caméra:")
+                    print(f"    ExposureTime: {metadata.get('ExposureTime', 'N/A')}µs")
+                    print(f"    AnalogueGain: {metadata.get('AnalogueGain', 'N/A')}")
+                    print(f"    ColourGains: {metadata.get('ColourGains', 'N/A')}")
+                    print(f"    Sensor Mode: {'NATIVE' if use_native_sensor_mode == 1 else 'BINNING'}")
+                    pygame._stacking_yuv_shown = True
 
             # DEBUG: afficher une fois au démarrage (si show_cmds activé)
             if show_cmds == 1 and not hasattr(pygame, '_picam2_debug_done'):
@@ -3995,12 +5338,17 @@ while True:
                         else:
                             normalized = master_stack.astype(np.float32)
 
-                        # Convertir en uint8
-                        stacked_array = (normalized / 256).astype(np.uint8)
+                        # Convertir en float32 [0-255] pour préserver dynamique dans le stretch
+                        # CORRECTION: Ne plus convertir en uint8 ici pour éviter perte de précision
+                        stacked_array = (normalized / 256).astype(np.float32)
 
                         # Appliquer le stretch du programme principal si activé
                         if stretch_mode == 1 and stretch_preset != 0:
                             stacked_array = astro_stretch(stacked_array)
+
+                        # Convertir float32 → uint8 pour pygame (APRÈS le stretch)
+                        if stacked_array.dtype == np.float32:
+                            stacked_array = np.clip(stacked_array, 0, 255).astype(np.uint8)
 
                         # Convertir en surface pygame
                         if len(stacked_array.shape) == 3:
@@ -4031,11 +5379,11 @@ while True:
                         # Afficher les statistiques Live Stack
                         stats = livestack.get_stats()
                         stats_text = f"LiveStack: {stats['accepted_frames']}/{stats['total_frames']} | Rejected: {stats['rejected_frames']}"
-                        text(0, 0, 2, 0, 1, stats_text, ft, 1)
+                        text(0, 0, 2, 2, 1, stats_text, ft, 1)  # top=2 pour position absolue à gauche
 
-                        # Sauvegarder PNG intermédiaire tous les 5 stacks
+                        # Sauvegarder PNG intermédiaire (si activé)
                         accepted = stats['accepted_frames']
-                        if accepted > 0 and accepted % 5 == 0:
+                        if ls_save_progress == 1 and accepted > 0:
                             if not hasattr(pygame, '_livestack_last_saved'):
                                 pygame._livestack_last_saved = 0
                             if accepted > pygame._livestack_last_saved:
@@ -4056,12 +5404,12 @@ while True:
                         # Afficher message d'attente avec stats détaillées
                         stats = livestack.get_stats()
                         wait_text = f"LiveStack: {stats['accepted_frames']}/{stats['total_frames']} acceptées | Rejetées: {stats['rejected_frames']}"
-                        text(0, 0, 2, 0, 1, wait_text, ft, 1)
+                        text(0, 0, 2, 2, 1, wait_text, ft, 1)  # top=2 pour position absolue à gauche
 
                         # Afficher aussi un warning si trop de rejets (QC trop strict)
                         if stats['total_frames'] > 20 and stats['accepted_frames'] == 0:
                             warning_text = "⚠ Toutes les frames rejetées! Désactiver QC ou réduire min_stars"
-                            text(0, 1, 2, 0, 1, warning_text, ft, 1)
+                            text(0, 1, 2, 2, 1, warning_text, ft, 1)  # top=2 pour position absolue à gauche
 
                 except Exception as e:
                     if show_cmds == 1:
@@ -4109,12 +5457,17 @@ while True:
                             else:
                                 normalized = master_stack.astype(np.float32)
 
-                            # 3. Convertir en uint8 (0-255)
-                            stacked_array = (normalized / 256).astype(np.uint8)
+                            # 3. Convertir en float32 [0-255] pour préserver dynamique dans le stretch
+                            # CORRECTION: Ne plus convertir en uint8 ici pour éviter perte de précision
+                            stacked_array = (normalized / 256).astype(np.float32)
 
                             # 4. Appliquer le stretch du programme principal si activé
                             if stretch_mode == 1 and stretch_preset != 0:
                                 stacked_array = astro_stretch(stacked_array)
+
+                            # Convertir float32 → uint8 pour pygame (APRÈS le stretch)
+                            if stacked_array.dtype == np.float32:
+                                stacked_array = np.clip(stacked_array, 0, 255).astype(np.uint8)
 
                             # 5. Convertir en surface pygame
                             if len(stacked_array.shape) == 3:
@@ -4146,8 +5499,8 @@ while True:
                             pygame._lucky_cached_image = image
                             pygame._lucky_last_displayed = stacks_done
 
-                            # 9. Sauvegarder PNG intermédiaire tous les 2 stacks
-                            if stacks_done > 0 and stacks_done % 2 == 0:
+                            # 9. Sauvegarder PNG intermédiaire tous les 2 stacks (si activé)
+                            if ls_lucky_save_progress == 1 and stacks_done > 0 and stacks_done % 2 == 0:
                                 if not hasattr(pygame, '_lucky_last_saved'):
                                     pygame._lucky_last_saved = 0
                                 if stacks_done > pygame._lucky_last_saved:
@@ -4187,6 +5540,11 @@ while True:
                 # Appliquer le stretch astro si le mode est activé ET que le preset n'est pas OFF
                 if stretch_mode == 1 and stretch_preset != 0:
                     array = astro_stretch(array)
+
+                # Convertir float32 → uint8 pour pygame (si nécessaire)
+                # Le stretch GHS préserve maintenant float32 pour garder la dynamique RAW12/16
+                if array.dtype == np.float32:
+                    array = np.clip(array, 0, 255).astype(np.uint8)
 
                 # Convertir numpy array → pygame surface
                 # Picamera2 retourne (height, width, 3) en RGB
@@ -4410,6 +5768,9 @@ while True:
             metrics_frame_counter = 0  # Réinitialiser le compteur
 
             # *** FOCUS METRIC (configurable via menu METRICS) ***
+            # Initialiser la variable pour le graphique
+            foc = None
+
             if focus_method > 0:
                 foc = calculate_focus(gray, focus_method)
 
@@ -4453,6 +5814,10 @@ while True:
                     text(20,2,0,2,0,"SNR = N/A",fv* 2,0)
 
             # *** STAR METRIC (configurable via menu METRICS: OFF/HFR/FWHM) ***
+            # Initialiser les variables pour les graphiques
+            hfr_val = None
+            fwhm_val = None
+
             if star_metric > 0 and (focus_mode == 1 or histogram > 0):
                 # Utiliser la même zone que le réticule (histarea)
                 star_val = None
@@ -4461,6 +5826,7 @@ while True:
                 if star_metric == 1:
                     # HFR : Half Flux Radius (robuste aux aigrettes)
                     star_val = calculate_hfr(image, xx, xy, histarea)
+                    hfr_val = star_val  # Stocker pour le graphique
                     star_label = "HFR"
                     # Seuils HFR (en pixels, plus petit = meilleur)
                     threshold_excellent = 2
@@ -4470,6 +5836,7 @@ while True:
                 elif star_metric == 2:
                     # FWHM : Full Width Half Maximum
                     star_val = calculate_fwhm(image, xx, xy, histarea)
+                    fwhm_val = star_val  # Stocker pour le graphique
                     star_label = "FWHM"
                     # Seuils FWHM (en pixels, plus petit = meilleur)
                     threshold_excellent = 5
@@ -4497,45 +5864,70 @@ while True:
                     text(20, star_line, 0, 2, 0, f"{star_label}: N/A", fv * 2, 0)
 
             # En mode focus : afficher 2 graphiques élégants dans le bandeau noir
-            # Graphique 1 (gauche) : HFR + FWHM combinés
-            # Graphique 2 (droite) : Focus (Laplacian variance)
-            try:
-                graph_y = int(preview_height * 0.75) + 1
-                graph_height = preview_height - graph_y - 2
+            # Graphique 1 (gauche) : HFR ou FWHM selon star_metric
+            # Graphique 2 (droite) : Focus selon focus_method
+            # CORRECTION : Afficher seulement en mode focus (focus_mode == 1)
+            if focus_mode == 1:
+                try:
+                    graph_y = int(preview_height * 0.75) + 1
+                    graph_height = preview_height - graph_y - 2
 
-                # Largeur de chaque graphique = moitié du bandeau moins marges
-                graph_width = int((preview_width - 40) / 2)  # -40 pour marges (10+10+10+10)
+                    # Largeur de chaque graphique = moitié du bandeau moins marges
+                    graph_width = int((preview_width - 40) / 2)  # -40 pour marges (10+10+10+10)
 
-                # Graphique HFR+FWHM combiné (gauche)
-                hfr_fwhm_surface = update_combined_hfr_fwhm_graph(hfr_val, fwhm_val)
-                if hfr_fwhm_surface is not None and alt_dis < 2:
-                    graph1_x = 10
-                    graph1_resized = pygame.transform.scale(hfr_fwhm_surface, (graph_width, graph_height))
+                    # DEBUG: Afficher les valeurs des métriques
+                    if show_cmds == 1:
+                        print(f"[DEBUG GRAPHS] focus_method={focus_method}, star_metric={star_metric}, foc={foc}, hfr_val={hfr_val}, fwhm_val={fwhm_val}")
 
-                    # Cadre élégant avec couleur gradient
-                    pygame.draw.rect(windowSurfaceObj, (100, 255, 200),
-                                   Rect(graph1_x - 2, graph_y - 2,
-                                        graph1_resized.get_width() + 4,
-                                        graph1_resized.get_height() + 4), 2)
+                    # Graphique 1 (gauche) : Métrique stellaire (HFR ou FWHM selon star_metric)
+                    star_surface = None
+                    if star_metric == 1 and hfr_val is not None:  # HFR
+                        star_surface = update_star_metric_graph(hfr_val, 'HFR')
+                        if show_cmds == 1 and star_surface is None:
+                            print(f"[DEBUG GRAPHS] update_star_metric_graph('HFR') returned None")
+                    elif star_metric == 2 and fwhm_val is not None:  # FWHM
+                        star_surface = update_star_metric_graph(fwhm_val, 'FWHM')
+                        if show_cmds == 1 and star_surface is None:
+                            print(f"[DEBUG GRAPHS] update_star_metric_graph('FWHM') returned None")
 
-                    windowSurfaceObj.blit(graph1_resized, (graph1_x, graph_y))
+                    if star_surface is not None and alt_dis < 2:
+                        graph1_x = 10
+                        graph1_resized = pygame.transform.scale(star_surface, (graph_width, graph_height))
 
-                # Graphique Focus (droite)
-                focus_surface = update_focus_graph(foc)
-                if focus_surface is not None and alt_dis < 2:
-                    graph2_x = 10 + graph_width + 20  # Après le premier graphique + marge
-                    graph2_resized = pygame.transform.scale(focus_surface, (graph_width, graph_height))
+                        # Cadre élégant avec couleur gradient
+                        pygame.draw.rect(windowSurfaceObj, (100, 255, 200),
+                                       Rect(graph1_x - 2, graph_y - 2,
+                                            graph1_resized.get_width() + 4,
+                                            graph1_resized.get_height() + 4), 2)
 
-                    # Cadre élégant avec couleur gradient
-                    pygame.draw.rect(windowSurfaceObj, (100, 200, 255),
-                                   Rect(graph2_x - 2, graph_y - 2,
-                                        graph2_resized.get_width() + 4,
-                                        graph2_resized.get_height() + 4), 2)
+                        windowSurfaceObj.blit(graph1_resized, (graph1_x, graph_y))
+                        if show_cmds == 1:
+                            print(f"[DEBUG GRAPHS] Star metric graph displayed")
 
-                    windowSurfaceObj.blit(graph2_resized, (graph2_x, graph_y))
+                    # Graphique 2 (droite) : Focus selon focus_method
+                    if focus_method > 0 and foc is not None:
+                        focus_surface = update_focus_graph(foc, focus_methods[focus_method])
+                        if show_cmds == 1 and focus_surface is None:
+                            print(f"[DEBUG GRAPHS] update_focus_graph() returned None")
+                        if focus_surface is not None and alt_dis < 2:
+                            graph2_x = 10 + graph_width + 20  # Après le premier graphique + marge
+                            graph2_resized = pygame.transform.scale(focus_surface, (graph_width, graph_height))
 
-            except Exception as e:
-                pass  # Ignorer les erreurs des graphiques
+                            # Cadre élégant avec couleur gradient
+                            pygame.draw.rect(windowSurfaceObj, (100, 200, 255),
+                                           Rect(graph2_x - 2, graph_y - 2,
+                                                graph2_resized.get_width() + 4,
+                                                graph2_resized.get_height() + 4), 2)
+
+                            windowSurfaceObj.blit(graph2_resized, (graph2_x, graph_y))
+                            if show_cmds == 1:
+                                print(f"[DEBUG GRAPHS] Focus graph displayed")
+
+                except Exception as e:
+                    if show_cmds == 1:
+                        print(f"[DEBUG GRAPHS] Exception: {e}")
+                        import traceback
+                        traceback.print_exc()
 
         # Rectangle rouge et croix d'analyse - SEULEMENT en mode focus
         if focus_mode == 1:
@@ -4647,12 +6039,15 @@ while True:
             livestack_active = False
             stretch_mode = 0  # Désactiver aussi le stretch
             if livestack is not None:
-                # Sauvegarder le résultat final avant de stopper
-                try:
-                    livestack.save()
-                    print("[LIVESTACK] Image finale sauvegardée")
-                except Exception as e:
-                    print(f"[LIVESTACK] Erreur sauvegarde: {e}")
+                # Sauvegarder le résultat final avant de stopper (si activé)
+                if ls_save_final == 1:
+                    try:
+                        livestack.save(raw_format_name=raw_formats[raw_format])
+                        print("[LIVESTACK] Image finale sauvegardée")
+                    except Exception as e:
+                        print(f"[LIVESTACK] Erreur sauvegarde: {e}")
+                else:
+                    print("[LIVESTACK] Sauvegarde finale désactivée (ls_save_final=0)")
                 livestack.stop()
             print("[LIVESTACK] Mode désactivé (clic)")
             # Restaurer le mode d'affichage normal (avec l'interface)
@@ -4675,12 +6070,15 @@ while True:
             luckystack_active = False
             stretch_mode = 0  # Désactiver aussi le stretch
             if luckystack is not None:
-                # Sauvegarder le résultat final avant de stopper
-                try:
-                    luckystack.save()
-                    print("[LUCKYSTACK] Image finale sauvegardée")
-                except Exception as e:
-                    print(f"[LUCKYSTACK] Erreur sauvegarde: {e}")
+                # Sauvegarder le résultat final avant de stopper (si activé)
+                if ls_lucky_save_final == 1:
+                    try:
+                        luckystack.save(raw_format_name=raw_formats[raw_format])
+                        print("[LUCKYSTACK] Image finale sauvegardée")
+                    except Exception as e:
+                        print(f"[LUCKYSTACK] Erreur sauvegarde: {e}")
+                else:
+                    print("[LUCKYSTACK] Sauvegarde finale désactivée (ls_lucky_save_final=0)")
                 luckystack.stop()
             print("[LUCKYSTACK] Mode désactivé (clic)")
             # Restaurer le mode d'affichage normal (avec l'interface)
@@ -5652,7 +7050,11 @@ while True:
                         now = datetime.datetime.now()
                         timestamp = now.strftime("%y%m%d%H%M%S")
                         count = 0
-                        fname =  pic_dir + str(timestamp) + '_%04d.' + extns2[extn]
+                        # Forcer .jpg pour Allsky
+                        if allsky_mode > 0:
+                            fname =  pic_dir + str(timestamp) + '_%04d.jpg'
+                        else:
+                            fname =  pic_dir + str(timestamp) + '_%04d.' + extns2[extn]
                         if lver != "bookwo" and lver != "trixie":
                             datastr = "libcamera-still"
                         else:
@@ -5749,6 +7151,18 @@ while True:
                         pics3 = []
                         count = 0
                         old_count = 0
+
+                        # ALLSKY: Initialiser contrôleur Mean Target si mode Auto-Gain
+                        allsky_controller = None
+                        original_gain = gain  # Sauvegarder gain initial
+                        if allsky_mode == 2:
+                            allsky_controller = AllskyMeanController(
+                                mean_target=allsky_mean_target / 100.0,
+                                mean_threshold=allsky_mean_threshold / 100.0,
+                                max_gain=allsky_max_gain
+                            )
+                            print(f"[Allsky] Auto-Gain activé: target={allsky_mean_target/100.0:.2f}, threshold={allsky_mean_threshold/100.0:.2f}, max_gain={allsky_max_gain}")
+
                         while count < tshots and stop == 0:
                             if time.monotonic() - start2 >= tinterval:
                                 if lver != "bookwo" and lver != "trixie":
@@ -5782,6 +7196,24 @@ while True:
                                                 count = tshots
                                                                                         
                                 old_count = count
+
+                                # ALLSKY: Appliquer stretch si activé
+                                if allsky_mode > 0 and count > 0 and allsky_apply_stretch == 1:
+                                    latest_jpeg = counts[-1]
+                                    apply_stretch_to_jpeg(latest_jpeg, stretch_preset)
+
+                                # ALLSKY: Ajuster gain automatiquement
+                                if allsky_controller is not None and count > 0:
+                                    latest_jpeg = counts[-1]
+                                    measured_mean = allsky_controller.calculate_mean(latest_jpeg)
+                                    if measured_mean is not None:
+                                        new_gain = allsky_controller.update(gain, measured_mean)
+                                        if new_gain != gain:
+                                            print(f"[Allsky] Auto-Gain: mean={measured_mean:.3f}, {gain} -> {new_gain}")
+                                            gain = new_gain
+                                            # Mettre à jour la commande libcamera-still avec le nouveau gain
+                                            # Note: Le nouveau gain sera utilisé pour la PROCHAINE capture
+
                                 text(0,2,1,1,1,str(tshots - count),fv,0)
                                 tdur = tinterval * (tshots - count)
                                 td = timedelta(seconds=tdur)
@@ -5815,7 +7247,42 @@ while True:
                             os.system('pkill -SIGUSR2 libcamera-still')
                         else:
                             os.system('pkill -SIGUSR2 rpicam-still')
-                            
+
+                        # ALLSKY: Assembler vidéo si mode activé
+                        if allsky_mode > 0 and stop == 0:
+                            video_filename = pic_dir + timestamp + "_allsky.mp4"
+                            text(0,0,6,2,1,"Assemblage vidéo Allsky...", int(fv*1.7), 1)
+                            pygame.display.update()
+
+                            success = assemble_allsky_video(pic_dir, timestamp, allsky_video_fps, video_filename)
+
+                            if success:
+                                print(f"[Allsky] Vidéo créée : {video_filename}")
+                                text(0,0,6,2,1,f"Vidéo créée: {video_filename}", int(fv*1.5), 1)
+                                pygame.display.update()
+                                time.sleep(2)
+
+                                # Nettoyer JPEGs si activé
+                                if allsky_cleanup_jpegs == 1:
+                                    text(0,0,6,2,1,"Nettoyage JPEGs...", int(fv*1.7), 1)
+                                    pygame.display.update()
+                                    for jpeg_path in counts:
+                                        try:
+                                            os.remove(jpeg_path)
+                                        except Exception as e:
+                                            print(f"[Allsky] Erreur suppression {jpeg_path}: {e}")
+                                    print(f"[Allsky] {len(counts)} JPEGs supprimés")
+                            else:
+                                print("[Allsky] Échec assemblage - JPEGs conservés")
+                                text(0,0,6,2,1,"Échec assemblage vidéo", int(fv*1.5), 1)
+                                pygame.display.update()
+                                time.sleep(2)
+
+                        # ALLSKY: Restaurer gain initial
+                        if allsky_controller is not None:
+                            gain = original_gain
+                            print(f"[Allsky] Gain restauré: {gain}")
+
                     elif tinterval > 0 and mode == 0: # manual mode
                         text(0,0,6,2,1,"Please Wait, taking Timelapse ...",int(fv*1.7),1)
                         now = datetime.datetime.now()
@@ -5827,6 +7294,18 @@ while True:
                         old_count = 0
                         trig = 1
                         p = None
+
+                        # ALLSKY: Initialiser contrôleur Mean Target si mode Auto-Gain
+                        allsky_controller = None
+                        original_gain = gain  # Sauvegarder gain initial
+                        if allsky_mode == 2:
+                            allsky_controller = AllskyMeanController(
+                                mean_target=allsky_mean_target / 100.0,
+                                mean_threshold=allsky_mean_threshold / 100.0,
+                                max_gain=allsky_max_gain
+                            )
+                            print(f"[Allsky] Auto-Gain activé: target={allsky_mean_target/100.0:.2f}, threshold={allsky_mean_threshold/100.0:.2f}, max_gain={allsky_max_gain}")
+
                         while count < tshots and stop == 0:
                             if time.monotonic() - start2 > tinterval:
                                 start2 = time.monotonic()
@@ -5835,7 +7314,11 @@ while True:
                                     while poll == None:
                                         poll = p.poll()
                                         time.sleep(0.1)
-                                fname =  pic_dir + str(timestamp) + "_" + str(count) + "." + extns2[extn]
+                                # Forcer .jpg pour Allsky (format %04d pour cohérence avec mode normal)
+                                if allsky_mode > 0:
+                                    fname =  pic_dir + str(timestamp) + "_%04d.jpg" % count
+                                else:
+                                    fname =  pic_dir + str(timestamp) + "_" + str(count) + "." + extns2[extn]
                                 if lver != "bookwo" and lver != "trixie":
                                     datastr = "libcamera-still"
                                 else:
@@ -5952,6 +7435,23 @@ while True:
                                                 count = tshots
                                         
                                 old_count = count
+
+                                # ALLSKY: Appliquer stretch si activé
+                                if allsky_mode > 0 and count > 0 and allsky_apply_stretch == 1 and len(counts) > 0:
+                                    latest_jpeg = counts[-1]
+                                    apply_stretch_to_jpeg(latest_jpeg, stretch_preset)
+
+                                # ALLSKY: Ajuster gain automatiquement
+                                if allsky_controller is not None and count > 0 and len(counts) > 0:
+                                    latest_jpeg = counts[-1]
+                                    measured_mean = allsky_controller.calculate_mean(latest_jpeg)
+                                    if measured_mean is not None:
+                                        new_gain = allsky_controller.update(gain, measured_mean)
+                                        if new_gain != gain:
+                                            print(f"[Allsky] Auto-Gain: mean={measured_mean:.3f}, {gain} -> {new_gain}")
+                                            gain = new_gain
+                                            # Note: Le nouveau gain sera utilisé pour la PROCHAINE capture
+
                                 text(0,2,1,1,1,str(tshots - count),fv,12)
                                 tdur = tinterval * (tshots - count)
                                 td = timedelta(seconds=tdur)
@@ -5968,6 +7468,41 @@ while True:
                                         text(0,2,3,1,1,str(tshots),fv,0)
                                         stop = 1
                                         count = tshots
+
+                        # ALLSKY: Assembler vidéo si mode activé
+                        if allsky_mode > 0 and stop == 0:
+                            video_filename = pic_dir + timestamp + "_allsky.mp4"
+                            text(0,0,6,2,1,"Assemblage vidéo Allsky...", int(fv*1.7), 1)
+                            pygame.display.update()
+
+                            success = assemble_allsky_video(pic_dir, timestamp, allsky_video_fps, video_filename)
+
+                            if success:
+                                print(f"[Allsky] Vidéo créée : {video_filename}")
+                                text(0,0,6,2,1,f"Vidéo créée: {video_filename}", int(fv*1.5), 1)
+                                pygame.display.update()
+                                time.sleep(2)
+
+                                # Nettoyer JPEGs si activé
+                                if allsky_cleanup_jpegs == 1:
+                                    text(0,0,6,2,1,"Nettoyage JPEGs...", int(fv*1.7), 1)
+                                    pygame.display.update()
+                                    for jpeg_path in counts:
+                                        try:
+                                            os.remove(jpeg_path)
+                                        except Exception as e:
+                                            print(f"[Allsky] Erreur suppression {jpeg_path}: {e}")
+                                    print(f"[Allsky] {len(counts)} JPEGs supprimés")
+                            else:
+                                print("[Allsky] Échec assemblage - JPEGs conservés")
+                                text(0,0,6,2,1,"Échec assemblage vidéo", int(fv*1.5), 1)
+                                pygame.display.update()
+                                time.sleep(2)
+
+                        # ALLSKY: Restaurer gain initial
+                        if allsky_controller is not None:
+                            gain = original_gain
+                            print(f"[Allsky] Gain restauré: {gain}")
 
                     elif tinterval == 0:
                         if tduration == 0:
@@ -6135,7 +7670,8 @@ while True:
                                 'exposure': sspeed,  # Déjà en microsecondes
                                 'gain': gain,
                                 'red': red / 10,  # Divisé par 10 pour ColourGains
-                                'blue': blue / 10
+                                'blue': blue / 10,
+                                'raw_format': raw_formats[raw_format]  # YUV420/SRGGB12/SRGGB16
                             }
                             # Utiliser le module avancé
                             livestack = create_advanced_livestack_session(camera_params)
@@ -6184,14 +7720,32 @@ while True:
                                 # PNG avec stretch selon paramètres interface
                                 png_stretch=['off', 'ghs', 'asinh'][stretch_preset],
                                 png_factor=stretch_factor / 10.0,
-                                png_clip_low=stretch_p_low / 10.0,
-                                png_clip_high=stretch_p_high / 100.0,
+                                # Pour GHS: pas de normalisation par percentiles (clip 0-100 = désactivé)
+                                # Pour Arcsinh: normalisation active (stretch_p_low/high)
+                                png_clip_low=0.0 if stretch_preset == 1 else stretch_p_low / 10.0,
+                                png_clip_high=100.0 if stretch_preset == 1 else stretch_p_high / 100.0,
                                 ghs_D=ghs_D / 10.0,
                                 ghs_b=ghs_b / 10.0,
                                 ghs_SP=ghs_SP / 100.0,
+                                ghs_LP=ghs_LP / 100.0,
+                                ghs_HP=ghs_HP / 100.0,
                                 preview_refresh=ls_preview_refresh,
-                                save_dng="none"
+                                save_dng="none",
+
+                                # ISP (Image Signal Processor)
                             )
+                            # Debug ISP avant passage à configure
+                            print(f"[DEBUG AVANT CONFIGURE] isp_enable variable = {isp_enable} (type: {type(isp_enable)})")
+                            print(f"[DEBUG AVANT CONFIGURE] isp_config_path variable = {isp_config_path}")
+
+                            # Passer les paramètres ISP séparément après la première configuration
+                            livestack.configure(
+                                isp_enable=bool(isp_enable),
+                                isp_config_path=isp_config_path if isp_enable else None
+                            )
+
+                        # Mettre à jour le format RAW actuel avant de démarrer
+                        livestack.camera_params['raw_format'] = raw_formats[raw_format]
 
                         # Démarrer la session
                         livestack.start()
@@ -6207,12 +7761,15 @@ while True:
                         livestack_active = False
                         stretch_mode = 0  # Désactiver aussi le stretch
                         if livestack is not None:
-                            # Sauvegarder le résultat final avant de stopper
-                            try:
-                                livestack.save()
-                                print("[LIVESTACK] Image finale sauvegardée")
-                            except Exception as e:
-                                print(f"[LIVESTACK] Erreur sauvegarde: {e}")
+                            # Sauvegarder le résultat final avant de stopper (si activé)
+                            if ls_save_final == 1:
+                                try:
+                                    livestack.save(raw_format_name=raw_formats[raw_format])
+                                    print("[LIVESTACK] Image finale sauvegardée")
+                                except Exception as e:
+                                    print(f"[LIVESTACK] Erreur sauvegarde: {e}")
+                            else:
+                                print("[LIVESTACK] Sauvegarde finale désactivée (ls_save_final=0)")
                             livestack.stop()
 
                         # Restaurer le mode d'affichage normal (avec l'interface)
@@ -6261,7 +7818,8 @@ while True:
                                 'exposure': sspeed,  # Déjà en microsecondes
                                 'gain': gain,
                                 'red': red / 10,  # Divisé par 10 pour ColourGains
-                                'blue': blue / 10
+                                'blue': blue / 10,
+                                'raw_format': raw_formats[raw_format]  # YUV420/SRGGB12/SRGGB16
                             }
                             luckystack = create_advanced_livestack_session(camera_params)
 
@@ -6303,14 +7861,21 @@ while True:
                                 # PNG avec stretch selon paramètres interface
                                 png_stretch=['off', 'ghs', 'asinh'][stretch_preset],
                                 png_factor=stretch_factor / 10.0,
-                                png_clip_low=stretch_p_low / 10.0,
-                                png_clip_high=stretch_p_high / 100.0,
+                                # Pour GHS: pas de normalisation par percentiles (clip 0-100 = désactivé)
+                                # Pour Arcsinh: normalisation active (stretch_p_low/high)
+                                png_clip_low=0.0 if stretch_preset == 1 else stretch_p_low / 10.0,
+                                png_clip_high=100.0 if stretch_preset == 1 else stretch_p_high / 100.0,
                                 ghs_D=ghs_D / 10.0,
                                 ghs_b=ghs_b / 10.0,
                                 ghs_SP=ghs_SP / 100.0,
+                                ghs_LP=ghs_LP / 100.0,
+                                ghs_HP=ghs_HP / 100.0,
                                 preview_refresh=ls_preview_refresh,
                                 save_dng="none"
                             )
+
+                        # Mettre à jour le format RAW actuel avant de démarrer
+                        luckystack.camera_params['raw_format'] = raw_formats[raw_format]
 
                         # Démarrer la session
                         luckystack.start()
@@ -6326,12 +7891,15 @@ while True:
                         luckystack_active = False
                         stretch_mode = 0  # Désactiver aussi le stretch
                         if luckystack is not None:
-                            # Sauvegarder le résultat final avant de stopper
-                            try:
-                                luckystack.save()
-                                print("[LUCKYSTACK] Image finale sauvegardée")
-                            except Exception as e:
-                                print(f"[LUCKYSTACK] Erreur sauvegarde: {e}")
+                            # Sauvegarder le résultat final avant de stopper (si activé)
+                            if ls_lucky_save_final == 1:
+                                try:
+                                    luckystack.save(raw_format_name=raw_formats[raw_format])
+                                    print("[LUCKYSTACK] Image finale sauvegardée")
+                                except Exception as e:
+                                    print(f"[LUCKYSTACK] Erreur sauvegarde: {e}")
+                            else:
+                                print("[LUCKYSTACK] Sauvegarde finale désactivée (ls_lucky_save_final=0)")
                             luckystack.stop()
 
                         # Restaurer le mode d'affichage normal (avec l'interface)
@@ -6852,15 +8420,23 @@ while True:
                 time.sleep(.25)
 
               elif button_row == 7:
-                # STILL -t time
+                # RAW Format (YUV420/SRGGB12/SRGGB16)
                 if alt_dis == 0 and mousex < preview_width + (bw/2):
-                    timet -=100
-                    timet  = max(timet ,100)
+                    raw_format -= 1
+                    if raw_format < 0:
+                        raw_format = 2
                 else:
-                    timet  +=100
-                    timet = min(timet ,10000)
-                text(0,7,3,1,1,str(timet),fv,7)
-                time.sleep(0.05)
+                    raw_format += 1
+                    if raw_format > 2:
+                        raw_format = 0
+                text(0,7,3,1,1,raw_formats[raw_format],fv,7)
+                draw_Vbar(0,7,greyColor,'raw_format',raw_format)
+                # Mettre à jour camera_params si livestack/luckystack actif
+                if livestack is not None and livestack_active:
+                    livestack.camera_params['raw_format'] = raw_formats[raw_format]
+                if luckystack is not None and luckystack_active:
+                    luckystack.camera_params['raw_format'] = raw_formats[raw_format]
+                time.sleep(0.25)
 
               elif button_row == 8:
                 # SENSOR MODE (Native/Binning)
@@ -6911,7 +8487,7 @@ while True:
                    config[32] = IRF
                    config[33] = str_cap
                    config[34] = v3_hdr
-                   config[35] = timet
+                   config[35] = raw_format  # Remplace timet (fixé à 100ms)
                    config[36] = vflip
                    config[37] = hflip
                    config[38] = stretch_p_low
@@ -6958,6 +8534,18 @@ while True:
                    config[79] = star_metric
                    config[80] = snr_display
                    config[81] = metrics_interval
+                   config[82] = ls_lucky_save_progress
+                   config[83] = isp_enable
+                   config[84] = allsky_mode
+                   config[85] = allsky_mean_target
+                   config[86] = allsky_mean_threshold
+                   config[87] = allsky_video_fps
+                   config[88] = allsky_max_gain
+                   config[89] = allsky_apply_stretch
+                   config[90] = allsky_cleanup_jpegs
+                   config[91] = ls_save_progress
+                   config[92] = ls_save_final
+                   config[93] = ls_lucky_save_final
                    with open(config_file, 'w') as f:
                       for item in range(0,len(titles)):
                           f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -7513,7 +9101,7 @@ while True:
                    config[32] = IRF
                    config[33] = str_cap
                    config[34] = v3_hdr
-                   config[35] = timet
+                   config[35] = raw_format  # Remplace timet (fixé à 100ms)
                    config[36] = vflip
                    config[37] = hflip
                    config[38] = stretch_p_low
@@ -7863,7 +9451,7 @@ while True:
                    config[32] = IRF
                    config[33] = str_cap
                    config[34] = v3_hdr
-                   config[35] = timet
+                   config[35] = raw_format  # Remplace timet (fixé à 100ms)
                    config[36] = vflip
                    config[37] = hflip
                    config[38] = stretch_p_low
@@ -7876,162 +9464,357 @@ while True:
                    time.sleep(1)
                    text(0,8,2,0,1,"SAVE CONFIG",fv,11)
 
-            # MENU 6
+            # MENU 6 - TIMELAPSE (Multi-pages)
             elif menu == 6:
-              if button_row == 1:
-                # TIMELAPSE DURATION
-                for f in range(0,len(video_limits)-1,3):
-                    if video_limits[f] == 'tduration':
-                        pmin = video_limits[f+1]
-                        pmax = video_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
-                    tduration = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
-                    tduration = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75 + (bh*3)  and mousey < preview_height * .75 + (bh*3) + int(bh/3)) and alt_dis == 2:
-                    tduration = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        tduration -=1
-                        tduration = max(tduration,pmin)
-                    else:
-                        tduration +=1
-                        tduration = min(tduration,pmax)
-                td = timedelta(seconds=tduration)
-                text(0,1,3,1,1,str(td),fv,12)
-                draw_Vbar(0,1,lyelColor,'tduration',tduration)
-                if tinterval > 0:
-                    tshots = int(tduration / tinterval)
-                    text(0,3,3,1,1,str(tshots),fv,12)
-                else:
-                    text(0,3,3,1,1," ",fv,12)
-                draw_Vbar(0,3,lyelColor,'tshots',tshots)
-                time.sleep(.25)
+              # Get current page
+              current_page = menu_page.get(6, 1)
 
-              elif button_row == 2:
-                # TIMELAPSE INTERVAL
-                for f in range(0,len(video_limits)-1,3):
-                    if video_limits[f] == 'tinterval':
-                        pmin = video_limits[f+1]
-                        pmax = video_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
-                    tinterval = round(((mousex-preview_width) / bw) * (pmax-pmin) + pmin, 2)
-                elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
-                    tinterval = round(((mousex-((button_row - 9)*bw)) / bw) * (pmax-pmin) + pmin, 2)
-                elif (mousey > preview_height * .75 + (bh*3)  and mousey < preview_height * .75 + (bh*3) + int(bh/3)) and alt_dis == 2:
-                    tinterval = round(((mousex-((button_row - 9)*bw)) / bw) * (pmax-pmin) + pmin, 2)
-                else:
-                    # Pas intelligent: 0.01s si < 1s, sinon 0.1s
-                    step = 0.01 if tinterval < 1 else 0.1
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        tinterval = round(tinterval - step, 2)
-                        tinterval = max(tinterval, pmin)
+              # ========== PAGE NAVIGATION ==========
+              if button_row == 9:
+                  if current_page == 1:
+                      # Page 1 -> Page 2 (Allsky)
+                      menu_page[6] = 2
+                      Menu()
+                  elif current_page == 2:
+                      # Page 2 -> Save Config (button_row 9 on page 2 is SAVE CONFIG)
+                      text(0,9,3,0,1,"SAVE Config",fv,10)
+                      config[0] = mode
+                      config[1] = speed
+                      config[2] = gain
+                      config[3] = int(brightness)
+                      config[4] = int(contrast)
+                      config[5] = frame
+                      config[6] = int(red)
+                      config[7] = int(blue)
+                      config[8] = ev
+                      config[9] = vlen
+                      config[10] = fps
+                      config[11] = vformat
+                      config[12] = codec
+                      config[13] = tinterval
+                      config[14] = tshots
+                      config[15] = extn
+                      config[16] = zx
+                      config[17] = zy
+                      config[18] = zoom
+                      config[19] = int(saturation)
+                      config[20] = meter
+                      config[21] = awb
+                      config[22] = sharpness
+                      config[23] = int(denoise)
+                      config[24] = quality
+                      config[25] = profile
+                      config[26] = level
+                      config[27] = histogram
+                      config[28] = histarea
+                      config[29] = v3_f_speed
+                      config[30] = v3_f_range
+                      config[31] = rotate
+                      config[32] = IRF
+                      config[33] = str_cap
+                      config[34] = v3_hdr
+                      config[35] = raw_format
+                      config[36] = vflip
+                      config[37] = hflip
+                      config[38] = stretch_p_low
+                      config[39] = stretch_p_high
+                      config[40] = stretch_factor
+                      config[41] = stretch_preset
+                      # Add allsky parameters
+                      config[84] = allsky_mode
+                      config[85] = allsky_mean_target
+                      config[86] = allsky_mean_threshold
+                      config[87] = allsky_video_fps
+                      config[88] = allsky_max_gain
+                      config[89] = allsky_apply_stretch
+                      config[90] = allsky_cleanup_jpegs
+                      config[91] = ls_save_progress
+                      config[92] = ls_save_final
+                      config[93] = ls_lucky_save_final
+
+                      with open(config_file, 'w') as f:
+                         for item in range(0,len(titles)):
+                             f.write(titles[item] + " : " + str(config[item]) + "\n")
+                      time.sleep(1)
+                      text(0,9,2,0,1,"SAVE CONFIG",fv,10)
+
+              # ========== PAGE 1 HANDLERS ==========
+              if current_page == 1:
+                  if button_row == 1:
+                    # TIMELAPSE DURATION
+                    for f in range(0,len(video_limits)-1,3):
+                        if video_limits[f] == 'tduration':
+                            pmin = video_limits[f+1]
+                            pmax = video_limits[f+2]
+                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                        tduration = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                    elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
+                        tduration = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
+                    elif (mousey > preview_height * .75 + (bh*3)  and mousey < preview_height * .75 + (bh*3) + int(bh/3)) and alt_dis == 2:
+                        tduration = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
                     else:
-                        tinterval = round(tinterval + step, 2)
-                        tinterval = min(tinterval, pmax)
-                td = timedelta(seconds=tinterval)
-                text(0,2,3,1,1,str(td),fv,12)
-                draw_Vbar(0,2,lyelColor,'tinterval',tinterval)
-                if tinterval != 0:
-                    tduration = tinterval * tshots
+                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                            tduration -=1
+                            tduration = max(tduration,pmin)
+                        else:
+                            tduration +=1
+                            tduration = min(tduration,pmax)
                     td = timedelta(seconds=tduration)
                     text(0,1,3,1,1,str(td),fv,12)
                     draw_Vbar(0,1,lyelColor,'tduration',tduration)
-                if tinterval == 0:
-                    text(0,3,3,1,1," ",fv,12)
-                    if mode == 0:
-                        speed = 15
-                        shutter = shutters[speed]
-                        if shutter < 0:
-                            shutter = abs(1/shutter)
-                        sspeed = int(shutter * 1000000)
-                        if (shutter * 1000000) - int(shutter * 1000000) > 0.5:
-                            sspeed +=1
-                        restart = 1
-                else:
-                    text(0,3,3,1,1,str(tshots),fv,12)
-                time.sleep(.25)
-                
-              elif button_row == 3 and tinterval > 0:
-                # TIMELAPSE SHOTS
-                for f in range(0,len(video_limits)-1,3):
-                    if video_limits[f] == 'tshots':
-                        pmin = video_limits[f+1]
-                        pmax = video_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
-                    tshots = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
-                    tshots = int(((mousex-((button_row -9)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75 + (bh*3)  and mousey < preview_height * .75 + (bh*3) + int(bh/3)) and alt_dis == 2:
-                    tshots = int(((mousex-((button_row -9)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        tshots -=1
-                        tshots = max(tshots,pmin)
+                    if tinterval > 0:
+                        tshots = int(tduration / tinterval)
+                        text(0,3,3,1,1,str(tshots),fv,12)
                     else:
-                        tshots +=1
-                        tshots = min(tshots,pmax)
-                text(0,3,3,1,1,str(tshots),fv,12)
-                draw_Vbar(0,3,lyelColor,'tshots',tshots)
-                if tduration > 0:
-                    tduration = tinterval * tshots
-                if tduration == 0:
-                    tduration = 1
-                td = timedelta(seconds=tduration)
-                text(0,1,3,1,1,str(td),fv,12)
-                draw_Vbar(0,1,lyelColor,'tduration',tduration)
-                time.sleep(.25)
+                        text(0,3,3,1,1," ",fv,12)
+                    draw_Vbar(0,3,lyelColor,'tshots',tshots)
+                    time.sleep(.25)
+
+                  elif button_row == 2:
+                    # TIMELAPSE INTERVAL
+                    for f in range(0,len(video_limits)-1,3):
+                        if video_limits[f] == 'tinterval':
+                            pmin = video_limits[f+1]
+                            pmax = video_limits[f+2]
+                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                        tinterval = round(((mousex-preview_width) / bw) * (pmax-pmin) + pmin, 2)
+                    elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
+                        tinterval = round(((mousex-((button_row - 9)*bw)) / bw) * (pmax-pmin) + pmin, 2)
+                    elif (mousey > preview_height * .75 + (bh*3)  and mousey < preview_height * .75 + (bh*3) + int(bh/3)) and alt_dis == 2:
+                        tinterval = round(((mousex-((button_row - 9)*bw)) / bw) * (pmax-pmin) + pmin, 2)
+                    else:
+                        # Pas intelligent: 0.01s si < 1s, sinon 0.1s
+                        step = 0.01 if tinterval < 1 else 0.1
+                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                            tinterval = round(tinterval - step, 2)
+                            tinterval = max(tinterval, pmin)
+                        else:
+                            tinterval = round(tinterval + step, 2)
+                            tinterval = min(tinterval, pmax)
+                    td = timedelta(seconds=tinterval)
+                    text(0,2,3,1,1,str(td),fv,12)
+                    draw_Vbar(0,2,lyelColor,'tinterval',tinterval)
+                    if tinterval != 0:
+                        tduration = tinterval * tshots
+                        td = timedelta(seconds=tduration)
+                        text(0,1,3,1,1,str(td),fv,12)
+                        draw_Vbar(0,1,lyelColor,'tduration',tduration)
+                    if tinterval == 0:
+                        text(0,3,3,1,1," ",fv,12)
+                        if mode == 0:
+                            speed = 15
+                            shutter = shutters[speed]
+                            if shutter < 0:
+                                shutter = abs(1/shutter)
+                            sspeed = int(shutter * 1000000)
+                            if (shutter * 1000000) - int(shutter * 1000000) > 0.5:
+                                sspeed +=1
+                            restart = 1
+                    else:
+                        text(0,3,3,1,1,str(tshots),fv,12)
+                    time.sleep(.25)
+                
+                  elif button_row == 3 and tinterval > 0:
+                    # TIMELAPSE SHOTS
+                    for f in range(0,len(video_limits)-1,3):
+                        if video_limits[f] == 'tshots':
+                            pmin = video_limits[f+1]
+                            pmax = video_limits[f+2]
+                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                        tshots = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                    elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
+                        tshots = int(((mousex-((button_row -9)*bw)) / bw) * (pmax+1-pmin))
+                    elif (mousey > preview_height * .75 + (bh*3)  and mousey < preview_height * .75 + (bh*3) + int(bh/3)) and alt_dis == 2:
+                        tshots = int(((mousex-((button_row -9)*bw)) / bw) * (pmax+1-pmin))
+                    else:
+                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                            tshots -=1
+                            tshots = max(tshots,pmin)
+                        else:
+                            tshots +=1
+                            tshots = min(tshots,pmax)
+                    text(0,3,3,1,1,str(tshots),fv,12)
+                    draw_Vbar(0,3,lyelColor,'tshots',tshots)
+                    if tduration > 0:
+                        tduration = tinterval * tshots
+                    if tduration == 0:
+                        tduration = 1
+                    td = timedelta(seconds=tduration)
+                    text(0,1,3,1,1,str(td),fv,12)
+                    draw_Vbar(0,1,lyelColor,'tduration',tduration)
+                    time.sleep(.25)
               
-              elif button_row == 8:
-                   # SAVE CONFIG
-                   text(0,8,3,0,1,"SAVE Config",fv,12)
-                   config[0] = mode
-                   config[1] = speed
-                   config[2] = gain
-                   config[3] = int(brightness)
-                   config[4] = int(contrast)
-                   config[5] = frame
-                   config[6] = int(red)
-                   config[7] = int(blue)
-                   config[8] = ev
-                   config[9] = vlen
-                   config[10] = fps
-                   config[11] = vformat
-                   config[12] = codec
-                   config[13] = tinterval
-                   config[14] = tshots
-                   config[15] = extn
-                   config[16] = zx
-                   config[17] = zy
-                   config[18] = zoom
-                   config[19] = int(saturation)
-                   config[20] = meter
-                   config[21] = awb
-                   config[22] = sharpness
-                   config[23] = int(denoise)
-                   config[24] = quality
-                   config[25] = profile
-                   config[26] = level
-                   config[27] = histogram
-                   config[28] = histarea
-                   config[29] = v3_f_speed
-                   config[30] = v3_f_range
-                   config[31] = rotate
-                   config[32] = IRF
-                   config[33] = str_cap
-                   config[34] = v3_hdr
-                   config[35] = timet
-                   config[36] = vflip
-                   config[37] = hflip
-                   config[38] = stretch_p_low
-                   config[39] = stretch_p_high
-                   config[40] = stretch_factor
-                   config[41] = stretch_preset
-                   with open(config_file, 'w') as f:
-                      for item in range(0,len(titles)):
-                          f.write(titles[item] + " : " + str(config[item]) + "\n")
-                   time.sleep(1)
-                   text(0,8,2,0,1,"SAVE CONFIG",fv,12)
+                  elif button_row == 8:
+                      # SAVE CONFIG (Page 1)
+                      text(0,8,3,0,1,"SAVE Config",fv,12)
+                      config[0] = mode
+                      config[1] = speed
+                      config[2] = gain
+                      config[3] = int(brightness)
+                      config[4] = int(contrast)
+                      config[5] = frame
+                      config[6] = int(red)
+                      config[7] = int(blue)
+                      config[8] = ev
+                      config[9] = vlen
+                      config[10] = fps
+                      config[11] = vformat
+                      config[12] = codec
+                      config[13] = tinterval
+                      config[14] = tshots
+                      config[15] = extn
+                      config[16] = zx
+                      config[17] = zy
+                      config[18] = zoom
+                      config[19] = int(saturation)
+                      config[20] = meter
+                      config[21] = awb
+                      config[22] = sharpness
+                      config[23] = int(denoise)
+                      config[24] = quality
+                      config[25] = profile
+                      config[26] = level
+                      config[27] = histogram
+                      config[28] = histarea
+                      config[29] = v3_f_speed
+                      config[30] = v3_f_range
+                      config[31] = rotate
+                      config[32] = IRF
+                      config[33] = str_cap
+                      config[34] = v3_hdr
+                      config[35] = raw_format
+                      config[36] = vflip
+                      config[37] = hflip
+                      config[38] = stretch_p_low
+                      config[39] = stretch_p_high
+                      config[40] = stretch_factor
+                      config[41] = stretch_preset
+                      # Add allsky parameters
+                      config[84] = allsky_mode
+                      config[85] = allsky_mean_target
+                      config[86] = allsky_mean_threshold
+                      config[87] = allsky_video_fps
+                      config[88] = allsky_max_gain
+                      config[89] = allsky_apply_stretch
+                      config[90] = allsky_cleanup_jpegs
+                      config[91] = ls_save_progress
+                      config[92] = ls_save_final
+                      config[93] = ls_lucky_save_final
+                      with open(config_file, 'w') as f:
+                          for item in range(0,len(titles)):
+                              f.write(titles[item] + " : " + str(config[item]) + "\n")
+                      time.sleep(1)
+                      text(0,8,2,0,1,"SAVE CONFIG",fv,12)
+
+              # ========== PAGE 2 HANDLERS (ALLSKY) ==========
+              elif current_page == 2:
+                  if button_row == 1:
+                      # Navigation back to Page 1
+                      menu_page[6] = 1
+                      Menu()
+
+                  elif button_row == 2:
+                      # ALLSKY MODE (0=OFF, 1=ON, 2=Auto-Gain)
+                      for f in range(0,len(video_limits)-1,3):
+                          if video_limits[f] == 'allsky_mode':
+                              pmin = video_limits[f+1]
+                              pmax = video_limits[f+2]
+                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                          allsky_mode = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                      else:
+                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                              allsky_mode = max(pmin, allsky_mode - 1)
+                          else:
+                              allsky_mode = min(pmax, allsky_mode + 1)
+                      text(0,2,3,1,1,allsky_modes[allsky_mode],fv,10)
+                      draw_Vbar(0,2,greyColor,'allsky_mode',allsky_mode)
+                      Menu()  # Refresh to update N/A fields
+                      time.sleep(.25)
+
+                  elif button_row == 3 and allsky_mode == 2:
+                      # MEAN TARGET (10-60 → 0.10-0.60)
+                      for f in range(0,len(video_limits)-1,3):
+                          if video_limits[f] == 'allsky_mean_target':
+                              pmin = video_limits[f+1]
+                              pmax = video_limits[f+2]
+                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                          allsky_mean_target = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
+                      else:
+                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                              allsky_mean_target = max(pmin, allsky_mean_target - 1)
+                          else:
+                              allsky_mean_target = min(pmax, allsky_mean_target + 1)
+                      text(0,3,3,1,1,str(allsky_mean_target/100.0)[0:4],fv,10)
+                      draw_Vbar(0,3,greyColor,'allsky_mean_target',allsky_mean_target)
+                      time.sleep(.05)
+
+                  elif button_row == 4 and allsky_mode == 2:
+                      # MEAN THRESHOLD (2-15 → 0.02-0.15)
+                      for f in range(0,len(video_limits)-1,3):
+                          if video_limits[f] == 'allsky_mean_threshold':
+                              pmin = video_limits[f+1]
+                              pmax = video_limits[f+2]
+                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                          allsky_mean_threshold = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
+                      else:
+                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                              allsky_mean_threshold = max(pmin, allsky_mean_threshold - 1)
+                          else:
+                              allsky_mean_threshold = min(pmax, allsky_mean_threshold + 1)
+                      text(0,4,3,1,1,str(allsky_mean_threshold/100.0)[0:4],fv,10)
+                      draw_Vbar(0,4,greyColor,'allsky_mean_threshold',allsky_mean_threshold)
+                      time.sleep(.05)
+
+                  elif button_row == 5 and allsky_mode > 0:
+                      # VIDEO FPS (15-60)
+                      for f in range(0,len(video_limits)-1,3):
+                          if video_limits[f] == 'allsky_video_fps':
+                              pmin = video_limits[f+1]
+                              pmax = video_limits[f+2]
+                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                          allsky_video_fps = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
+                      else:
+                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                              allsky_video_fps = max(pmin, allsky_video_fps - 1)
+                          else:
+                              allsky_video_fps = min(pmax, allsky_video_fps + 1)
+                      text(0,5,3,1,1,str(allsky_video_fps),fv,10)
+                      draw_Vbar(0,5,greyColor,'allsky_video_fps',allsky_video_fps)
+                      time.sleep(.25)
+
+                  elif button_row == 6 and allsky_mode == 2:
+                      # MAX GAIN (50-500, step=10)
+                      for f in range(0,len(video_limits)-1,3):
+                          if video_limits[f] == 'allsky_max_gain':
+                              pmin = video_limits[f+1]
+                              pmax = video_limits[f+2]
+                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                          allsky_max_gain = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
+                      else:
+                          step = 10
+                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                              allsky_max_gain = max(pmin, allsky_max_gain - step)
+                          else:
+                              allsky_max_gain = min(pmax, allsky_max_gain + step)
+                      text(0,6,3,1,1,str(allsky_max_gain),fv,10)
+                      draw_Vbar(0,6,greyColor,'allsky_max_gain',allsky_max_gain)
+                      time.sleep(.25)
+
+                  elif button_row == 7 and allsky_mode > 0:
+                      # APPLY STRETCH (toggle)
+                      allsky_apply_stretch = 1 - allsky_apply_stretch
+                      stretch_text = "ON" if allsky_apply_stretch == 1 else "OFF"
+                      text(0,7,3,1,1,stretch_text,fv,10)
+                      draw_Vbar(0,7,greyColor,'allsky_apply_stretch',allsky_apply_stretch)
+                      time.sleep(.25)
+
+                  elif button_row == 8 and allsky_mode > 0:
+                      # CLEANUP JPEGs (toggle)
+                      allsky_cleanup_jpegs = 1 - allsky_cleanup_jpegs
+                      cleanup_text = "YES" if allsky_cleanup_jpegs == 1 else "NO"
+                      text(0,8,3,1,1,cleanup_text,fv,10)
+                      draw_Vbar(0,8,greyColor,'allsky_cleanup_jpegs',allsky_cleanup_jpegs)
+                      time.sleep(.25)
 
             # MENU 7 - STRETCH Settings
             elif menu == 7:
@@ -8089,7 +9872,7 @@ while True:
                     draw_Vbar(0,2,greyColor,'stretch_p_high',stretch_p_high)
                     time.sleep(.05)
                 elif current_page == 2:
-                    # PAGE 2 - GHS D (Force) : 0-50 -> 0.0-5.0
+                    # PAGE 2 - GHS D (Force) : -10 à 100 -> -1.0 à 10.0
                     for f in range(0,len(video_limits)-1,3):
                         if video_limits[f] == 'ghs_D':
                             pmin = video_limits[f+1]
@@ -8111,6 +9894,11 @@ while True:
                     draw_Vbar(0,2,greyColor,'ghs_D',ghs_D)
                     text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
                     draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
+                    # Mettre à jour livestack/luckystack si actif
+                    if livestack is not None:
+                        livestack.configure(ghs_D=ghs_D / 10.0)
+                    if luckystack is not None:
+                        luckystack.configure(ghs_D=ghs_D / 10.0)
                     time.sleep(.05)
 
               elif button_row == 3:
@@ -8120,7 +9908,7 @@ while True:
                 if current_page == 1:
                     # PAGE 1: STRETCH FACTOR (0 à 5, stocké x10)
                     pmin = 0    # 0.0
-                    pmax = 50   # 5.0
+                    pmax = 80   # 8.0 (augmenté pour plus de flexibilité)
                     if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
                         stretch_factor = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                     else:
@@ -8153,6 +9941,11 @@ while True:
                     draw_Vbar(0,3,greyColor,'ghs_b',ghs_b)
                     text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
                     draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
+                    # Mettre à jour livestack/luckystack si actif
+                    if livestack is not None:
+                        livestack.configure(ghs_b=ghs_b / 10.0)
+                    if luckystack is not None:
+                        luckystack.configure(ghs_b=ghs_b / 10.0)
 
                 time.sleep(.05)
 
@@ -8179,10 +9972,10 @@ while True:
                         # OFF - Pas de stretch
                         pass
                     elif stretch_preset == 1:
-                        # GHS - Paramètres par défaut
-                        ghs_D = 0    # 0.0
-                        ghs_b = 0    # 0.0
-                        ghs_SP = 0   # 0.0
+                        # GHS - Paramètres optimisés
+                        ghs_D = 31   # 3.1
+                        ghs_b = 1    # 0.1
+                        ghs_SP = 19  # 0.19
                     elif stretch_preset == 2:
                         # Arcsinh - Paramètres par défaut
                         stretch_p_low = 0      # 0%
@@ -8211,6 +10004,20 @@ while True:
 
                     Menu()  # Redessiner le menu pour afficher/cacher les sliders GHS
 
+                    # Mettre à jour livestack/luckystack avec le nouveau mode de stretch
+                    if livestack is not None:
+                        livestack.configure(
+                            png_stretch=['off', 'ghs', 'asinh'][stretch_preset],
+                            png_clip_low=0.0 if stretch_preset == 1 else stretch_p_low / 10.0,
+                            png_clip_high=100.0 if stretch_preset == 1 else stretch_p_high / 100.0
+                        )
+                    if luckystack is not None:
+                        luckystack.configure(
+                            png_stretch=['off', 'ghs', 'asinh'][stretch_preset],
+                            png_clip_low=0.0 if stretch_preset == 1 else stretch_p_low / 10.0,
+                            png_clip_high=100.0 if stretch_preset == 1 else stretch_p_high / 100.0
+                        )
+
                 elif current_page == 2:
                     # PAGE 2: GHS SP - Symmetry point (0.0 à 1.0, stocké x100)
                     pmin = 0    # 0.0
@@ -8236,6 +10043,11 @@ while True:
                     draw_Vbar(0,4,greyColor,'ghs_SP',ghs_SP)
                     text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
                     draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
+                    # Mettre à jour livestack/luckystack si actif (SP peut modifier LP/HP via contraintes)
+                    if livestack is not None:
+                        livestack.configure(ghs_SP=ghs_SP / 100.0, ghs_LP=ghs_LP / 100.0, ghs_HP=ghs_HP / 100.0)
+                    if luckystack is not None:
+                        luckystack.configure(ghs_SP=ghs_SP / 100.0, ghs_LP=ghs_LP / 100.0, ghs_HP=ghs_HP / 100.0)
 
                 time.sleep(.05)
 
@@ -8267,6 +10079,11 @@ while True:
                     draw_Vbar(0,5,greyColor,'ghs_LP',ghs_LP)
                     text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
                     draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
+                    # Mettre à jour livestack/luckystack si actif
+                    if livestack is not None:
+                        livestack.configure(ghs_LP=ghs_LP / 100.0)
+                    if luckystack is not None:
+                        luckystack.configure(ghs_LP=ghs_LP / 100.0)
                     time.sleep(.05)
 
               elif button_row == 6:
@@ -8275,8 +10092,8 @@ while True:
 
                 if current_page == 2:
                     # PAGE 2: GHS HP - Protect highlights (0.0 à 1.0, stocké x100)
-                    # Contrainte: HP >= SP
-                    pmin = ghs_SP     # Limité par SP
+                    # Note: HP = 0 désactive la protection (sera contraint à SP dans ghs_stretch)
+                    pmin = 0          # Permet 0 pour désactiver la protection
                     pmax = 100        # 1.0
                     if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
                         ghs_HP = int(((mousex-preview_width) / bw) * (pmax-pmin+1) + pmin)
@@ -8286,9 +10103,8 @@ while True:
                         else:
                             ghs_HP = min(pmax, ghs_HP + 1)
 
-                    # Forcer HP >= SP
-                    if ghs_HP < ghs_SP:
-                        ghs_HP = ghs_SP
+                    # Note: On autorise HP < SP (sera géré par ghs_stretch qui applique max(SP, HP))
+                    # HP = 0 signifie "pas de protection highlights"
 
                     # Passage automatique en mode Manual
                     ghs_preset = 0
@@ -8297,6 +10113,11 @@ while True:
                     draw_Vbar(0,6,greyColor,'ghs_HP',ghs_HP)
                     text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
                     draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
+                    # Mettre à jour livestack/luckystack si actif
+                    if livestack is not None:
+                        livestack.configure(ghs_HP=ghs_HP / 100.0)
+                    if luckystack is not None:
+                        luckystack.configure(ghs_HP=ghs_HP / 100.0)
                     time.sleep(.05)
 
               elif button_row == 7:
@@ -8319,34 +10140,34 @@ while True:
 
                     # Charger les valeurs du preset GHS
                     if ghs_preset == 1:
-                        # Galaxies (ciel profond)
-                        ghs_D = 20    # 2.0
-                        ghs_b = 60    # 6.0
-                        ghs_SP = 15   # 0.15
+                        # Galaxies (ciel profond) - Paramètres optimisés tests M81
+                        ghs_D = 31    # 3.1
+                        ghs_b = 1     # 0.1
+                        ghs_SP = 19   # 0.19
                         ghs_LP = 0    # 0.0
-                        ghs_HP = 85   # 0.85
+                        ghs_HP = 0    # 0.0
                     elif ghs_preset == 2:
-                        # Nébuleuses (émission)
-                        ghs_D = 25    # 2.5
-                        ghs_b = 40    # 4.0
-                        ghs_SP = 10   # 0.10
-                        ghs_LP = 2    # 0.02
-                        ghs_HP = 95   # 0.95
+                        # Nébuleuses (émission) - Extrapolé depuis optimisation Galaxies
+                        ghs_D = 39    # 3.9 (2.5 * 1.55)
+                        ghs_b = 1     # 0.1 (même réduction drastique que Galaxies)
+                        ghs_SP = 13   # 0.13 (0.10 * 1.27)
+                        ghs_LP = 0    # 0.0 (suppression comme Galaxies)
+                        ghs_HP = 0    # 0.0 (suppression comme Galaxies)
                     elif ghs_preset == 3:
-                        # Étirement initial (linéaire -> non-linéaire)
-                        ghs_D = 35    # 3.5
-                        ghs_b = 120   # 12.0
-                        ghs_SP = 8    # 0.08
+                        # Étirement initial (linéaire -> non-linéaire) - Extrapolé depuis optimisation Galaxies
+                        ghs_D = 54    # 5.4 (3.5 * 1.55, mais limité à 5.0 max pratique)
+                        ghs_b = 2     # 0.2 (même réduction drastique que Galaxies)
+                        ghs_SP = 10   # 0.10 (0.08 * 1.27)
                         ghs_LP = 0    # 0.0
-                        ghs_HP = 100  # 1.0
+                        ghs_HP = 0    # 0.0 (suppression comme Galaxies)
                     # Si ghs_preset == 0 (Manual), ne rien changer
 
                     # Mettre à jour l'affichage
                     text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
                     draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
 
-                    # Mettre à jour l'affichage de tous les paramètres GHS
-                    if ghs_preset > 0:  # Si ce n'est pas Manual, redessiner les sliders
+                    # Mettre à jour l'affichage de tous les paramètres GHS (UNIQUEMENT si Page 2)
+                    if current_page == 2 and ghs_preset > 0:  # Si Page 2 ET preset non-Manual
                         text(0,2,3,1,1,str(ghs_D/10.0)[0:5],fv,7)
                         draw_Vbar(0,2,greyColor,'ghs_D',ghs_D)
                         text(0,3,3,1,1,str(ghs_b/10.0)[0:5],fv,7)
@@ -8357,6 +10178,11 @@ while True:
                         draw_Vbar(0,5,greyColor,'ghs_LP',ghs_LP)
                         text(0,6,3,1,1,str(ghs_HP/100.0)[0:5],fv,7)
                         draw_Vbar(0,6,greyColor,'ghs_HP',ghs_HP)
+                        # Mettre à jour livestack/luckystack avec tous les paramètres GHS
+                        if livestack is not None:
+                            livestack.configure(ghs_D=ghs_D/10.0, ghs_b=ghs_b/10.0, ghs_SP=ghs_SP/100.0, ghs_LP=ghs_LP/100.0, ghs_HP=ghs_HP/100.0)
+                        if luckystack is not None:
+                            luckystack.configure(ghs_D=ghs_D/10.0, ghs_b=ghs_b/10.0, ghs_SP=ghs_SP/100.0, ghs_LP=ghs_LP/100.0, ghs_HP=ghs_HP/100.0)
 
                     time.sleep(.05)
 
@@ -8398,7 +10224,7 @@ while True:
                    config[32] = IRF
                    config[33] = str_cap
                    config[34] = v3_hdr
-                   config[35] = timet
+                   config[35] = raw_format  # Remplace timet (fixé à 100ms)
                    config[36] = vflip
                    config[37] = hflip
                    config[38] = stretch_p_low
@@ -8648,6 +10474,18 @@ while True:
                       config[79] = star_metric
                       config[80] = snr_display
                       config[81] = metrics_interval
+                      config[82] = ls_lucky_save_progress
+                      config[83] = isp_enable
+                      config[84] = allsky_mode
+                      config[85] = allsky_mean_target
+                      config[86] = allsky_mean_threshold
+                      config[87] = allsky_video_fps
+                      config[88] = allsky_max_gain
+                      config[89] = allsky_apply_stretch
+                      config[90] = allsky_cleanup_jpegs
+                      config[91] = ls_save_progress
+                      config[92] = ls_save_final
+                      config[93] = ls_lucky_save_final
                       with open(config_file, 'w') as f:
                           for item in range(0,len(titles)):
                               f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -8858,7 +10696,7 @@ while True:
                    config[32] = IRF
                    config[33] = str_cap
                    config[34] = v3_hdr
-                   config[35] = timet
+                   config[35] = raw_format  # Remplace timet (fixé à 100ms)
                    config[36] = vflip
                    config[37] = hflip
                    config[38] = stretch_p_low
@@ -8905,6 +10743,18 @@ while True:
                    config[79] = star_metric
                    config[80] = snr_display
                    config[81] = metrics_interval
+                   config[82] = ls_lucky_save_progress
+                   config[83] = isp_enable
+                   config[84] = allsky_mode
+                   config[85] = allsky_mean_target
+                   config[86] = allsky_mean_threshold
+                   config[87] = allsky_video_fps
+                   config[88] = allsky_max_gain
+                   config[89] = allsky_apply_stretch
+                   config[90] = allsky_cleanup_jpegs
+                   config[91] = ls_save_progress
+                   config[92] = ls_save_final
+                   config[93] = ls_lucky_save_final
                    with open(config_file, 'w') as f:
                        for item in range(0,len(titles)):
                            f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -9080,6 +10930,18 @@ while True:
                 config[79] = star_metric
                 config[80] = snr_display
                 config[81] = metrics_interval
+                config[82] = ls_lucky_save_progress
+                config[83] = isp_enable
+                config[84] = allsky_mode
+                config[85] = allsky_mean_target
+                config[86] = allsky_mean_threshold
+                config[87] = allsky_video_fps
+                config[88] = allsky_max_gain
+                config[89] = allsky_apply_stretch
+                config[90] = allsky_cleanup_jpegs
+                config[91] = ls_save_progress
+                config[92] = ls_save_final
+                config[93] = ls_lucky_save_final
                 with open(config_file, 'w') as f:
                     for item in range(0,len(titles)):
                         f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -9276,7 +11138,7 @@ while True:
                    config[32] = IRF
                    config[33] = str_cap
                    config[34] = v3_hdr
-                   config[35] = timet
+                   config[35] = raw_format  # Remplace timet (fixé à 100ms)
                    config[36] = vflip
                    config[37] = hflip
                    config[38] = stretch_p_low
@@ -9323,6 +11185,18 @@ while True:
                    config[79] = star_metric
                    config[80] = snr_display
                    config[81] = metrics_interval
+                   config[82] = ls_lucky_save_progress
+                   config[83] = isp_enable
+                   config[84] = allsky_mode
+                   config[85] = allsky_mean_target
+                   config[86] = allsky_mean_threshold
+                   config[87] = allsky_video_fps
+                   config[88] = allsky_max_gain
+                   config[89] = allsky_apply_stretch
+                   config[90] = allsky_cleanup_jpegs
+                   config[91] = ls_save_progress
+                   config[92] = ls_save_final
+                   config[93] = ls_lucky_save_final
                    with open(config_file, 'w') as f:
                        for item in range(0,len(titles)):
                            f.write(titles[item] + " : " + str(config[item]) + "\n")

@@ -56,37 +56,49 @@ class QualityConfig:
 
 class StackingConfig:
     """Configuration principale du stacking"""
-    
+
     def __init__(self):
         # Mode d'alignement
         self.alignment_mode = AlignmentMode.ROTATION
-        
+
         # Configuration qualité
         self.quality = QualityConfig()
-        
+
+        # Paramètres ISP (Image Signal Processor)
+        self.isp_enable = False            # Activer l'ISP (pour RAW12/16)
+        self.isp_config_path = None        # Chemin vers config ISP (ou None = auto-calibration)
+        self.isp_calibration_frames = None # Images de référence pour calibration (RAW, YUV)
+        self.video_format = None           # Format vidéo source: 'yuv420', 'raw12', 'raw16', None=auto
+
         # Paramètres PNG
         self.auto_png = True
+        self.png_bit_depth = None          # None=auto (détecté), 8, ou 16
         self.png_stretch_method = StretchMethod.ASINH
         self.png_stretch_factor = 10.0
         self.png_clip_low = 1.0           # Percentile bas (%)
         self.png_clip_high = 99.5         # Percentile haut (%)
 
-        # Paramètres GHS (Generalized Hyperbolic Stretch)
-        self.ghs_D = 0.0                  # Linked stretching parameter (-1.0 à 1.0)
-        self.ghs_B = 0.0                  # Blackpoint parameter
-        self.ghs_SP = 0.5                 # Symmetry point (0-1)
-        
+        # Paramètres GHS (Generalized Hyperbolic Stretch) - 5 paramètres
+        self.ghs_D = 3.0                  # Stretch factor (0.0 à 10.0) - force de l'étirement
+        self.ghs_b = 0.13                 # Local intensity (-5.0 à 20.0) - concentration du contraste
+        self.ghs_SP = 0.2                 # Symmetry point (0.0 à 1.0) - point focal du contraste
+        self.ghs_LP = 0.0                 # Protect shadows (0.0 à SP) - protection basses lumières
+        self.ghs_HP = 0.0                 # Protect highlights (SP à 1.0) - protection hautes lumières
+
+        # Paramètres FITS
+        self.fits_linear = True            # Sauvegarder FITS en linéaire (True=RAW, False=stretched)
+
         # Paramètres affichage (RPiCamera)
         self.preview_refresh_interval = 5  # Rafraîchir preview toutes les N images
-        
+
         # Paramètres sauvegarde DNG (mode hybride)
         self.save_dng_mode = "accepted"   # "none", "accepted", "all"
         self.output_directory = "/media/admin/THKAILAR/Stacks/"
         self.save_rejected_list = True
-        
+
         # Paramètres alignement avancés
         self.max_stars_alignment = 50     # Nb max étoiles pour alignement
-        
+
         # Statistiques (remplies pendant exécution)
         self.num_stacked = 0
         self.total_exposure = 0.0

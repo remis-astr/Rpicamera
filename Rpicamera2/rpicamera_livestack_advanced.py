@@ -501,7 +501,20 @@ class RPiCameraLiveStackAdvanced:
             self.config.preview_refresh_interval = int(kwargs['preview_refresh'])
         if 'save_dng' in kwargs:
             self.config.save_dng_mode = kwargs['save_dng']
-        
+
+        # ISP (Image Signal Processor)
+        print(f"[DEBUG CONFIGURE] isp_enable dans kwargs: {'isp_enable' in kwargs}")
+        print(f"[DEBUG CONFIGURE] isp_config_path dans kwargs: {'isp_config_path' in kwargs}")
+        if 'isp_enable' in kwargs:
+            print(f"[DEBUG CONFIGURE] isp_enable reçu: {kwargs['isp_enable']}")
+            self.config.isp_enable = bool(kwargs['isp_enable'])
+        if 'isp_config_path' in kwargs:
+            print(f"[DEBUG CONFIGURE] isp_config_path reçu: {kwargs['isp_config_path']}")
+            self.config.isp_config_path = kwargs['isp_config_path']
+
+        print(f"[DEBUG CONFIGURE] self.config.isp_enable final: {self.config.isp_enable}")
+        print(f"[DEBUG CONFIGURE] self.config.isp_config_path final: {self.config.isp_config_path}")
+
         print(f"[CONFIG] Méthode: {self.config.stacking.method.value}, "
               f"Drizzle: {'ON' if self.use_drizzle else 'OFF'}")
     
@@ -511,6 +524,18 @@ class RPiCameraLiveStackAdvanced:
 
         # Créer session standard
         legacy_config = self.config.to_legacy_config()
+
+        # Mapper le format RAW de la caméra vers video_format
+        if 'raw_format' in self.camera_params:
+            raw_format_name = self.camera_params['raw_format']  # 'YUV420', 'SRGGB12', 'SRGGB16'
+            format_mapping = {
+                'YUV420': 'yuv420',
+                'SRGGB12': 'raw12',
+                'SRGGB16': 'raw16'
+            }
+            legacy_config.video_format = format_mapping.get(raw_format_name, 'yuv420')
+            print(f"[CONFIG] Format vidéo configuré: {legacy_config.video_format} (source: {raw_format_name})")
+
         self.session = LiveStackSession(legacy_config)
         self.session.start()
 
@@ -789,19 +814,22 @@ class RPiCameraLiveStackAdvanced:
         
         return None
     
-    def save(self, filename: Optional[str] = None):
+    def save(self, filename: Optional[str] = None, raw_format_name: Optional[str] = None):
         """
         Sauvegarde le résultat final
-        
+
         Args:
             filename: Nom du fichier (sans extension) ou None pour auto
+            raw_format_name: Nom du format RAW actuel (YUV420/SRGGB12/SRGGB16)
         """
         if filename is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             method = self.config.stacking.method.value
             drizzle_str = f"_drizzle{self.config.drizzle.scale}x" if self.use_drizzle else ""
-            filename = f"stack_{method}{drizzle_str}_{timestamp}"
-        
+            # Ajouter le format RAW au nom de fichier (priorité au paramètre)
+            raw_format_str = raw_format_name or self.camera_params.get('raw_format', 'YUV420')
+            filename = f"stack_{raw_format_str}_{method}{drizzle_str}_{timestamp}"
+
         output_path = self.output_dir / f"{filename}.fit"
         
         # Récupérer résultat final
