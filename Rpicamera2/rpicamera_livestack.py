@@ -287,25 +287,28 @@ class RPiCameraLiveStack:
             'preview_updated': self.last_preview_update
         }
     
-    def save_result(self, filename=None):
+    def save_result(self, filename=None, raw_format_name=None):
         """
         Sauvegarde résultat final
-        
+
         Args:
             filename: Nom fichier optionnel (sinon timestamp)
-        
+            raw_format_name: Nom du format RAW actuel (YUV420/SRGGB12/SRGGB16)
+
         Returns:
             Path du fichier sauvegardé
         """
         if self.session is None or self.accepted_frames == 0:
             print("[LIVESTACK] Rien à sauvegarder")
             return None
-        
+
         # Nom fichier
         if filename is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"stack_{timestamp}.fit"
-        
+            # Ajouter le format RAW au nom de fichier (priorité au paramètre)
+            raw_format_str = raw_format_name or self.camera_params.get('raw_format', 'YUV420')
+            filename = f"stack_{raw_format_str}_{timestamp}.fit"
+
         output_path = self.output_dir / filename
         
         print(f"[LIVESTACK] Sauvegarde: {output_path}")
@@ -343,9 +346,9 @@ class RPiCameraLiveStack:
             # TODO: Implémenter sauvegarde DNG réelle
             pass
 
-    def save(self, filename=None):
+    def save(self, filename=None, raw_format_name=None):
         """Alias pour save_result() (compatibilité RPiCamera2.py)"""
-        return self.save_result(filename)
+        return self.save_result(filename, raw_format_name)
 
     def get_config_summary(self):
         """Retourne résumé config pour affichage"""
