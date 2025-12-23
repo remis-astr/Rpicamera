@@ -1077,7 +1077,7 @@ lucky_stack_methods = ['Mean', 'Median', 'Sigma-Clip']
 
 # RAW Format parameters (pour Lucky/Live Stack et vidéo RAW)
 raw_format = 1  # 0=YUV420, 1=SRGGB12, 2=SRGGB16
-raw_formats = ['YUV420', 'SRGGB12', 'SRGGB16']
+raw_formats = ['YUV420 8bit', 'RAW12 Bayer', 'RAW16 Clear HDR']
 raw_swap_rb = 0  # Inverser rouge et bleu en mode RAW (0=non, 1=oui)
 raw_stream_size = (1928, 1090)  # Taille du flux RAW (sera calculée dans preview())
 capture_size = (1928, 1090)  # Taille de capture/ROI (sera calculée dans preview())
@@ -1223,7 +1223,7 @@ v3_f_speeds  = ['normal','fast']
 histograms   = ["OFF","Red","Green","Blue","Lum","ALL"]
 strs         = ["Still","Video","Stream","Timelapse"]
 stretch_presets = ['OFF','GHS','Arcsinh']
-v3_hdrs      = ["off","single-exp","auto","sensor"]
+v3_hdrs      = ["OFF","Single-Exp","Multi-Exp","Clear HDR 16bit"]
 
 #check linux version.
 if os.path.exists ("/run/shm/lv.txt"): 
@@ -3817,8 +3817,7 @@ def preview():
             raw_stream_size = capture_size
 
         # Détecter si recréation nécessaire (changements majeurs de config)
-        # Note: Le stream raw SRGGB12 est toujours créé (comme dans la version originale)
-        # donc pas besoin de recréer si on change juste raw_format (ça n'affecte que la capture)
+        # Note: raw_format et v3_hdr nécessitent recréation car ils changent le stream RAW (SRGGB12/16) et HdrMode
         need_recreation = (
             picam2 is None or
             preview.prev_config.get('camera') != camera or
@@ -3827,7 +3826,9 @@ def preview():
             preview.prev_config.get('hflip') != hflip or
             preview.prev_config.get('mode_type') != (0 if mode == 0 or sspeed > 80000 else 1) or
             preview.prev_config.get('use_native_sensor_mode') != use_native_sensor_mode or
-            preview.prev_config.get('awb') != awb  # Changement AWB nécessite recréation (ColourGains persistent)
+            preview.prev_config.get('awb') != awb or  # Changement AWB nécessite recréation (ColourGains persistent)
+            preview.prev_config.get('raw_format') != raw_format or  # Changement RAW12/16 nécessite recréation
+            preview.prev_config.get('v3_hdr') != v3_hdr  # Changement mode HDR nécessite recréation
         )
 
         # Calculer speed2 et autres paramètres (avant le if/else)
@@ -3876,6 +3877,26 @@ def preview():
             # Saturation & Sharpness
             fast_controls["Saturation"] = saturation / 10
             fast_controls["Sharpness"] = sharpness / 10
+
+            # HDR Mode (pour IMX585 Clear HDR)
+            # SingleExposure/MultiExposure incompatibles avec mode manuel
+            if v3_hdr > 0 and Pi_Cam == 10:
+                if v3_hdr == 3:
+                    # Clear HDR 16-bit : désactiver HdrMode (traitement capteur)
+                    fast_controls["HdrMode"] = controls.HdrModeEnum.Off
+                elif mode == 0:
+                    # Mode manuel : désactiver HDR logiciel
+                    fast_controls["HdrMode"] = controls.HdrModeEnum.Off
+                else:
+                    # Mode auto : activer HDR logiciel
+                    hdr_modes = {
+                        1: controls.HdrModeEnum.SingleExposure,
+                        2: controls.HdrModeEnum.MultiExposure
+                    }
+                    if v3_hdr in hdr_modes:
+                        fast_controls["HdrMode"] = hdr_modes[v3_hdr]
+            elif v3_hdr == 0:
+                fast_controls["HdrMode"] = controls.HdrModeEnum.Off
 
             # Appliquer tous les contrôles en une seule fois (rapide!)
             try:
@@ -3982,23 +4003,42 @@ def preview():
         # Créer la configuration adaptée au mode
         # En mode manuel ou avec exposition > 80ms, utiliser still_configuration
         # (preview_configuration limite l'exposition à ~83ms pour l'IMX585)
-        # IMPORTANT: Toujours créer un stream raw SRGGB12 (comme dans la version originale)
-        # mais ne l'utiliser QUE si stacking actif ET raw_format != 0
+        # IMPORTANT: Format RAW dépend du mode sélectionné:
+        # - raw_format=0 (YUV420) ou stacking inactif: pas de stream raw
+        # - raw_format=1 (RAW12): SRGGB12
+        # - raw_format=2 (RAW16): SRGGB16 + activation automatique Clear HDR
+
+        # Déterminer le format RAW à utiliser
+        raw_stream_format = "SRGGB12"  # Par défaut RAW12
+        if raw_format == 2:
+            # RAW16 Clear HDR sélectionné
+            raw_stream_format = "SRGGB16"
+            # Activer automatiquement le mode Clear HDR sensor si pas déjà fait
+            if v3_hdr != 3:
+                print(f"  [AUTO-CONFIG] RAW16 sélectionné → activation Clear HDR (v3_hdr: {v3_hdr} → 3)")
+                v3_hdr = 3  # Force Clear HDR pour RAW16
+        elif v3_hdr == 3:
+            # Clear HDR activé → forcer RAW16
+            raw_stream_format = "SRGGB16"
+            if raw_format != 2:
+                print(f"  [AUTO-CONFIG] Clear HDR activé → passage en RAW16 (raw_format: {raw_format} → 2)")
+                raw_format = 2
+
         if mode == 0 or sspeed > 80000:
             config = picam2.create_still_configuration(
                 main={"size": capture_size, "format": "RGB888"},
-                raw={"size": raw_stream_size, "format": "SRGGB12"}  # Utilise raw_stream_size au lieu de capture_size
+                raw={"size": raw_stream_size, "format": raw_stream_format}
             )
             if show_cmds == 1:
-                print(f"  [CONFIG] Type: STILL, Stream RAW: SRGGB12 (fixe, utilisation selon stacking)")
+                print(f"  [CONFIG] Type: STILL, Stream RAW: {raw_stream_format}")
                 print(f"  [CONFIG] Requested capture_size: {capture_size}")
         else:
             config = picam2.create_preview_configuration(
                 main={"size": capture_size, "format": "RGB888"},
-                raw={"size": raw_stream_size, "format": "SRGGB12"}  # Utilise raw_stream_size au lieu de capture_size
+                raw={"size": raw_stream_size, "format": raw_stream_format}
             )
             if show_cmds == 1:
-                print(f"  [CONFIG] Type: PREVIEW, Stream RAW: SRGGB12 (fixe, utilisation selon stacking)")
+                print(f"  [CONFIG] Type: PREVIEW, Stream RAW: {raw_stream_format}")
                 print(f"  [CONFIG] Requested capture_size: {capture_size}")
 
         # Préparer TOUS les contrôles pour application après start()
@@ -4058,6 +4098,40 @@ def preview():
         # Saturation & Sharpness
         controls_dict["Saturation"] = saturation / 10
         controls_dict["Sharpness"] = sharpness / 10
+
+        # HDR Mode (pour IMX585 Clear HDR)
+        # 0=Off, 1=SingleExposure, 2=MultiExposure, 3=Clear HDR 16-bit (capteur IMX585)
+        # IMPORTANT: SingleExposure et MultiExposure sont conçus pour AE/AGC automatique
+        # En mode manuel, ils causent des conflits d'exposition → désactiver sauf Clear HDR
+        if v3_hdr > 0 and Pi_Cam == 10:  # Seulement pour IMX585
+            if v3_hdr == 3:
+                # Clear HDR 16-bit : le capteur IMX585 gère le HDR en interne
+                # On désactive le HdrMode de libcamera pour éviter un double traitement
+                controls_dict["HdrMode"] = controls.HdrModeEnum.Off
+                if show_cmds == 1:
+                    print(f"  [HDR] Clear HDR 16-bit: HdrMode=Off (traitement capteur IMX585)")
+            elif mode == 0:
+                # Mode manuel : désactiver HDR logiciel (incompatible)
+                controls_dict["HdrMode"] = controls.HdrModeEnum.Off
+                if show_cmds == 1:
+                    print(f"  [HDR] {v3_hdrs[v3_hdr]} désactivé en mode manuel (conflit ExposureTime)")
+                    print(f"       → Utilisez mode Auto ou Clear HDR 16-bit pour HDR")
+            else:
+                # Mode auto : activer HDR logiciel
+                hdr_modes = {
+                    1: controls.HdrModeEnum.SingleExposure,
+                    2: controls.HdrModeEnum.MultiExposure
+                }
+                if v3_hdr in hdr_modes:
+                    controls_dict["HdrMode"] = hdr_modes[v3_hdr]
+                    if show_cmds == 1:
+                        print(f"  [HDR] Mode activé: {v3_hdrs[v3_hdr]} (HdrMode={hdr_modes[v3_hdr]})")
+                        print(f"       ⚠ AE/AGC prendra le contrôle de l'exposition")
+        elif v3_hdr == 0:
+            # Explicitement désactiver HDR
+            controls_dict["HdrMode"] = controls.HdrModeEnum.Off
+            if show_cmds == 1 and Pi_Cam == 10:
+                print(f"  [HDR] Mode désactivé (HdrMode=Off)")
 
         # Focus (autofocus ou manuel) - sera appliqué séparément après start()
         focus_controls = {}
@@ -4245,7 +4319,9 @@ def preview():
             'hflip': hflip,
             'mode_type': 0 if mode == 0 or sspeed > 80000 else 1,
             'use_native_sensor_mode': use_native_sensor_mode,
-            'awb': awb
+            'awb': awb,
+            'raw_format': raw_format,
+            'v3_hdr': v3_hdr
         }
 
         restart = 0
@@ -5246,19 +5322,21 @@ while True:
                 array_uint16 = debayer_raw_array(raw_array, raw_formats[raw_format],
                                                   red_gain=(blue/10),   # Le curseur BLEU contrôle le rouge
                                                   blue_gain=(red/10))   # Le curseur ROUGE contrôle le bleu
-                # Convertir en float32 [0-255] pour être compatible avec libastrostack (comme YUV)
-                # Utilise facteur exact 255/65535 pour préserver la dynamique complète
-                array = array_uint16.astype(np.float32) * (255.0 / 65535.0)
+                # CORRECTION: Garder la pleine dynamique 16-bit [0-65535] pour RAW12/16
+                # Ne plus compresser à [0-255] car libastrostack gère correctement les données haute résolution
+                # Convertir juste en float32 pour compatibilité avec libastrostack
+                array = array_uint16.astype(np.float32)  # Garder [0-65535]
 
                 # Appliquer boost de contraste SEULEMENT si ISP libastrostack est désactivé
                 # Si ISP activé, on passe les données RAW brutes à libastrostack qui fera le traitement
                 if isp_enable == 0:
+                    # CORRECTION: Boost calibré pour plage 16-bit [0-65535]
                     # Appliquer boost de contraste au lieu du gamma (préserve mieux les noirs)
-                    # Méthode : (value - 128) × factor + 128 + brightness_offset
-                    # Le YUV a l'ISP qui applique des courbes tonales, on simule avec contraste + luminosité
+                    # Méthode : (value - midpoint) × factor + midpoint + brightness_offset
+                    midpoint = 32768.0  # Milieu de la plage 16-bit
                     contrast_factor = 1.15  # Léger boost de contraste
-                    brightness_offset = 8   # Légère augmentation de luminosité générale
-                    array = np.clip((array - 128.0) * contrast_factor + 128.0 + brightness_offset, 0, 255.0)
+                    brightness_offset = 2048  # Légère augmentation de luminosité (équivalent de +8 en 8-bit)
+                    array = np.clip((array - midpoint) * contrast_factor + midpoint + brightness_offset, 0, 65535.0)
                 if show_cmds == 1 and not hasattr(pygame, '_stacking_mode_shown'):
                     metadata = picam2.capture_metadata()
                     print(f"\n[STACKING] Mode actif, capture depuis stream RAW")
@@ -5329,18 +5407,17 @@ while True:
                     master_stack = livestack.get_current_preview()
 
                     if master_stack is not None:
-                        # Normaliser à 0-65535 (comme pour Lucky Stack)
-                        min_val = master_stack.min()
+                        # CORRECTION: Le master_stack est déjà en float32 [0-65535] ou [0-255]
+                        # Ne pas renormaliser, juste convertir pour pygame
+                        # Détecter la plage de données
                         max_val = master_stack.max()
 
-                        if max_val > min_val:
-                            normalized = ((master_stack - min_val) / (max_val - min_val) * 65535).astype(np.float32)
+                        if max_val > 256:
+                            # Données 16-bit: normaliser à [0-255] pour pygame
+                            stacked_array = (master_stack / 256.0).astype(np.float32)
                         else:
-                            normalized = master_stack.astype(np.float32)
-
-                        # Convertir en float32 [0-255] pour préserver dynamique dans le stretch
-                        # CORRECTION: Ne plus convertir en uint8 ici pour éviter perte de précision
-                        stacked_array = (normalized / 256).astype(np.float32)
+                            # Données déjà en [0-255]
+                            stacked_array = master_stack.astype(np.float32)
 
                         # Appliquer le stretch du programme principal si activé
                         if stretch_mode == 1 and stretch_preset != 0:
@@ -5446,20 +5523,17 @@ while True:
 
                         if master_stack is not None:
 
-                            # 2. Normaliser à 0-65535 (comme pour Live Stack)
-                            # Détecter la plage dynamique
-                            min_val = master_stack.min()
+                            # CORRECTION: Le master_stack est déjà en float32 [0-65535] ou [0-255]
+                            # Ne pas renormaliser, juste convertir pour pygame
+                            # Détecter la plage de données
                             max_val = master_stack.max()
 
-                            if max_val > min_val:
-                                # Normaliser à 0-65535
-                                normalized = ((master_stack - min_val) / (max_val - min_val) * 65535).astype(np.float32)
+                            if max_val > 256:
+                                # Données 16-bit: normaliser à [0-255] pour pygame
+                                stacked_array = (master_stack / 256.0).astype(np.float32)
                             else:
-                                normalized = master_stack.astype(np.float32)
-
-                            # 3. Convertir en float32 [0-255] pour préserver dynamique dans le stretch
-                            # CORRECTION: Ne plus convertir en uint8 ici pour éviter perte de précision
-                            stacked_array = (normalized / 256).astype(np.float32)
+                                # Données déjà en [0-255]
+                                stacked_array = master_stack.astype(np.float32)
 
                             # 4. Appliquer le stretch du programme principal si activé
                             if stretch_mode == 1 and stretch_preset != 0:
