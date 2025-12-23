@@ -256,25 +256,40 @@ class LiveStackSession:
         # Appliquer étirement
         is_color = len(result.shape) == 3
 
-        # CORRECTION: Normaliser [0-255] → [0-1] AVANT stretch pour éviter clip
-        # La fonction stretch_ghs() attend des données en [0-1], pas [0-255]
-        # Pour YUV420: normalisation simple /255 (comme RPiCamera2.py)
-        # Pour RAW: normalisation par percentiles (pour images brutes)
+        # CORRECTION: Normaliser vers [0-1] AVANT stretch pour éviter clip
+        # La fonction stretch_ghs() attend des données en [0-1]
+        # IMPORTANT: Les données viennent de RPiCamera2.py avec deux plages possibles:
+        #   - YUV420: [0-255] (8-bit)
+        #   - RAW12/16: [0-65535] (16-bit haute dynamique)
+        # Il faut détecter automatiquement la plage et normaliser en conséquence
+
+        # Détecter automatiquement la plage de données
+        max_val = result.max()
+
+        if max_val > 256:
+            # Données haute résolution (RAW12/16) : [0-65535]
+            normalization_factor = 65535.0
+            data_type_str = "RAW 16-bit"
+        else:
+            # Données 8-bit (YUV420) : [0-255]
+            normalization_factor = 255.0
+            data_type_str = "YUV420 8-bit"
+
+        # Normaliser à [0-1] (requis par apply_stretch)
+        result = result / normalization_factor
+        result = np.clip(result, 0, 1)
+
+        # Configurer le clipping par percentiles selon le format
         if is_raw_format:
             # RAW: normalisation par percentiles (data brute avec possibles pixels chauds)
-            # Les données RAW passent par ISP qui normalise déjà à [0-1]
             clip_low = self.config.png_clip_low
             clip_high = self.config.png_clip_high
-            print(f"  • Normalisation: Percentiles (RAW) - clip_low={clip_low}%, clip_high={clip_high}%")
+            print(f"  • Normalisation: {data_type_str} → [0-1] (/{normalization_factor:.0f}) + Percentiles - clip_low={clip_low}%, clip_high={clip_high}%")
         else:
-            # YUV420: normalisation simple /255 (déjà traité par ISP caméra, pas de pixels chauds)
-            # On normalise manuellement AVANT d'appeler stretch pour éviter le clip à [0-1]
-            result = result / 255.0  # [0-255] → [0-1]
-            result = np.clip(result, 0, 1)
-            # Désactiver la normalisation par percentiles dans stretch (déjà normalisé)
+            # YUV420: déjà traité par ISP caméra, pas de pixels chauds → pas de clipping par percentiles
             clip_low = 0.0
             clip_high = 100.0
-            print(f"  • Normalisation: Simple /255 (YUV420 déjà traité par ISP caméra)")
+            print(f"  • Normalisation: {data_type_str} → [0-1] (/{normalization_factor:.0f})")
 
         if is_color:
             stretched = np.zeros_like(result, dtype=np.float32)
