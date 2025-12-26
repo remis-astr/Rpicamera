@@ -636,6 +636,90 @@ def convert_yuv420_to_ser(yuv_file, ser_file, width, height, fps=25):
     except Exception as e:
         return False, 0, f"Erreur: {str(e)}"
 
+def convert_rgb888_to_ser(rgb_file, ser_file, width, height, fps=25, bytes_per_pixel=3):
+    """
+    Convertit un fichier RGB888 ou XRGB8888 brut en SER avec timestamps
+
+    Args:
+        rgb_file: Fichier .rgb/.raw d'entrée
+        ser_file: Fichier .ser de sortie
+        width: Largeur
+        height: Hauteur
+        fps: Framerate pour les timestamps
+        bytes_per_pixel: 3 pour RGB888, 4 pour XRGB8888
+
+    Returns:
+        (success, frame_count, message)
+    """
+
+    if not os.path.exists(rgb_file):
+        return False, 0, f"Fichier RGB introuvable: {rgb_file}"
+
+    # Calculer la taille d'une frame
+    frame_size = width * height * bytes_per_pixel
+    file_size = os.path.getsize(rgb_file)
+    frame_count = file_size // frame_size
+
+    if frame_count == 0:
+        return False, 0, "Aucune frame RGB trouvée"
+
+    format_name = "XRGB8888" if bytes_per_pixel == 4 else "RGB888"
+    print(f"📹 Conversion {format_name} → SER")
+    print(f"   Fichier: {rgb_file}")
+    print(f"   Résolution: {width}x{height}")
+    print(f"   Taille frame: {frame_size} bytes ({bytes_per_pixel} bytes/pixel)")
+    print(f"   Frames: {frame_count}")
+    print(f"   FPS: {fps}")
+    print()
+
+    # Si XRGB8888, convertir en RGB888
+    if bytes_per_pixel == 4:
+        temp_rgb = "/run/shm/temp_rgb888.raw"
+        try:
+            frames_converted = 0
+            with open(rgb_file, 'rb') as xrgbf, open(temp_rgb, 'wb') as rgbf:
+                for i in range(frame_count):
+                    # Lire frame XRGB8888
+                    xrgb_data = xrgbf.read(frame_size)
+                    if len(xrgb_data) < frame_size:
+                        print(f"   ⚠️  Frame {i+1} incomplète")
+                        break
+
+                    # Convertir XRGB8888 → RGB888 (enlever le canal X)
+                    xrgb = np.frombuffer(xrgb_data, dtype=np.uint8).reshape(height, width, 4)
+                    rgb = xrgb[:, :, :3]  # Prendre seulement RGB, ignorer X
+
+                    # Écrire RGB
+                    rgbf.write(rgb.tobytes())
+                    frames_converted += 1
+
+                    if (i + 1) % 10 == 0:
+                        print(f"   Frame {i+1}/{frame_count}...")
+
+            print(f"\n🎬 Création du SER avec timestamps @ {fps} fps...")
+
+            # Utiliser convert_raw_to_ser
+            success, frames, msg = convert_raw_to_ser(
+                temp_rgb, ser_file, width, height, fps=fps, bit_depth=8
+            )
+
+            # Nettoyer
+            try:
+                os.remove(temp_rgb)
+            except:
+                pass
+
+            return success, frames, msg
+
+        except Exception as e:
+            return False, 0, f"Erreur conversion XRGB8888: {str(e)}"
+    else:
+        # RGB888 déjà au bon format, utiliser directement
+        print(f"🎬 Création du SER avec timestamps @ {fps} fps...")
+        return convert_raw_to_ser(
+            rgb_file, ser_file, width, height, fps=fps, bit_depth=8
+        )
+
 def debayer_raw_array(raw_array, raw_format_str, red_gain=1.0, blue_gain=1.0, apply_denoise=True, swap_rb=False):
     """
     Débayérise un array RAW Bayer (SRGGB12 ou SRGGB16) en RGB uint16 avec balance des blancs.
@@ -904,6 +988,7 @@ vlen        = 10   # video length in seconds
 fps         = 15   # video fps - Réduit pour IMX585
 vformat     = 10   # set video format (10 = 1920x1080), see vwidths & vheights below
 codec       = 0    # set video codec  (0 = h264), see codecs below
+ser_format  = 1    # set SER capture format (0 = YUV420, 1 = RGB888, 2 = XRGB8888), see ser_formats below
 flicker     = 0    # anti-flicker mode (0=OFF, 1=50Hz, 2=60Hz, 3=AUTO)
 tinterval   = 5.0   # time between timelapse shots in seconds
 tshots      = 10   # number of timelapse shots
@@ -1076,8 +1161,8 @@ lucky_score_methods = ['Laplacian', 'Gradient', 'Sobel', 'Tenengrad']
 lucky_stack_methods = ['Mean', 'Median', 'Sigma-Clip']
 
 # RAW Format parameters (pour Lucky/Live Stack et vidéo RAW)
-raw_format = 1  # 0=YUV420, 1=SRGGB12, 2=SRGGB16
-raw_formats = ['YUV420 8bit', 'RAW12 Bayer', 'RAW16 Clear HDR']
+raw_format = 1  # 0=YUV420, 1=XRGB8888, 2=SRGGB12, 3=SRGGB16
+raw_formats = ['YUV420 8bit', 'XRGB8888 ISP', 'RAW12 Bayer', 'RAW16 Clear HDR']
 raw_swap_rb = 0  # Inverser rouge et bleu en mode RAW (0=non, 1=oui)
 raw_stream_size = (1928, 1090)  # Taille du flux RAW (sera calculée dans preview())
 capture_size = (1928, 1090)  # Taille de capture/ROI (sera calculée dans preview())
@@ -1110,32 +1195,47 @@ max_vfs      = [  10,      15,      16,      21,      20,        15,       22,  
 modes        = ['manual','normal','sport']
 extns        = ['jpg','png','bmp','rgb','yuv420','raw']
 extns2       = ['jpg','png','bmp','data','data','dng']
-vwidths      = [640,720,800,1280,1280,1296,1332,1456,1536,1640,1920,1928,2028,2028,2304,2592,3280,3840,3856,4032,4056,4608,4656,5472,8000,9152,9248]
-vheights     = [480,540,600, 720, 960, 972, 990,1088, 864,1232,1080,1090,1080,1520,1296,1944,2464,2160,2180,3024,3040,2592,3496,3648,6000,6944,6944]
-v_max_fps    = [200,120, 40,  40,  40,  30,  60,  30,  30,  30,  30,  30,  50,  40,  25,  20,  20,  20,  20,  20,  10,  20,  20,  20,  20,  20,  20]
-v3_max_fps   = [200,120,125, 120, 120, 120, 120, 120, 120, 100, 100,  50, 100,  56,  56,  20,  20,  20,  20,  20,  15,  20,  20,  20  ,20,  20,  20]
+vwidths      = [640,720,800,1280,1280,1296,1332,1456,1536,1640,1920,1928,2028,2028,2304,2880,2592,3280,3840,3856,4032,4056,4608,4656,5472,8000,9152,9248]
+vheights     = [480,540,600, 720, 960, 972, 990,1088, 864,1232,1080,1090,1080,1520,1296,2160,1944,2464,2160,2180,3024,3040,2592,3496,3648,6000,6944,6944]
+v_max_fps    = [200,120, 40,  40,  40,  30,  60,  30,  30,  30,  30,  30,  50,  40,  25,  40,  20,  20,  20,  20,  20,  10,  20,  20,  20,  20,  20,  20]
+v3_max_fps   = [200,120,125, 120, 120, 120, 120, 120, 120, 100, 100,  50, 100,  56,  56,  40,  20,  20,  20,  20,  20,  15,  20,  20,  20  ,20,  20,  20]
 v9_max_fps   = [240, 200, 150, 120, 100, 100, 80, 60, 60, 60, 60]
+v10_max_fps  = [150,120,150, 120, 100, 100, 100, 100, 100, 100, 90,  87,  90,  60,  56,  40,  30,  30,  30,  30,  30,  20,  20,  20,  20,  20,  20,  20]  # IMX585 crop modes
 v15_max_fps  = [240,200,200, 130]
 zwidths      = [640,800,1280,2592,3280,4056,4656,9152]
 zheights     = [480,600, 960,1944,2464,3040,3496,6944]
 zfs          = [1, 0.5, 0.333333, 0.25, 0.2, 0.166666]  # Zoom: 1x, 2x, 3x, 4x, 5x, 6x
+
+# NOUVEAU: Mapping zoom → modes IMX585 hardware crop
+# Pour IMX585 uniquement (Pi_Cam == 10)
+imx585_crop_modes = {
+    # zoom_level: (width, height, mode_name, max_fps_estimate)
+    0: None,  # Full frame - déterminé par use_native_sensor_mode
+    1: (1920, 1080, "Mode 3 Crop", 90),   # Hardware 1080p crop
+    2: (1280, 720, "Mode 4 Crop", 120),   # Hardware 720p crop
+    3: (2880, 2160, "Mode 2 Crop", 40),   # Hardware 2.8K crop (RÉACTIVÉ)
+    4: (800, 600, "Mode 5 Crop", 150),    # Hardware 800x600 crop
+    5: (800, 600, "Mode 5 Crop", 150)     # Identique à zoom 4
+}
+
 # Labels de résolution pour le slider de zoom
 zoom_res_labels = {
     0: "",
     1: "1920x1080",  # 2x zoom
     2: "1280x720",   # 3x zoom
-    3: "DISABLED",   # 3x désactivé
-    4: "640x480",    # 5x zoom
-    5: "640x368"     # 6x zoom
+    3: "2880x2160",  # CHANGÉ: RÉACTIVÉ pour IMX585 Mode 2 crop
+    4: "800x600",    # CHANGÉ: upgrade vers 800x600
+    5: "800x600"     # CHANGÉ: upgrade vers 800x600
 }
 
 # FPS optimaux pour chaque niveau de zoom (ROI permet des FPS plus élevés)
 # Format: {zoom_level: (fps_standard, fps_v3, fps_v9, fps_imx585)}
 zoom_optimal_fps = {
-    1: (60, 100, 120, 30),   # 1920x1080 - 2x zoom
-    2: (120, 120, 150, 60),  # 1280x720  - 3x zoom
-    4: (200, 200, 240, 120), # 640x480   - 5x zoom
-    5: (200, 200, 240, 120)  # 640x368   - 6x zoom
+    1: (60, 100, 120, 90),   # 1920x1080 - Mode 3 hardware
+    2: (120, 120, 150, 120), # 1280x720  - Mode 4 hardware
+    3: (30, 50, 60, 40),     # 2880x2160 - Mode 2 hardware (NOUVEAU)
+    4: (200, 200, 240, 150), # 800x600   - Mode 5 hardware
+    5: (200, 200, 240, 150)  # 800x600   - Mode 5 hardware
 }
 
 def sync_video_resolution_with_zoom():
@@ -1147,12 +1247,22 @@ def sync_video_resolution_with_zoom():
     global zoom, vwidth, vheight, vformat, vwidths, vheights, fps, video_limits, Pi_Cam
 
     # Résolutions correspondant aux niveaux de zoom
-    zoom_resolutions = {
-        1: (1920, 1080),  # 2x zoom
-        2: (1280, 720),   # 3x zoom
-        4: (640, 480),    # 5x zoom
-        5: (640, 368)     # 6x zoom
-    }
+    if Pi_Cam == 10:  # IMX585 - Utiliser modes hardware crop
+        zoom_resolutions = {
+            1: (1920, 1080),  # Mode 3 crop
+            2: (1280, 720),   # Mode 4 crop
+            3: (2880, 2160),  # Mode 2 crop (RÉACTIVÉ)
+            4: (800, 600),    # Mode 5 crop
+            5: (800, 600)     # Mode 5 crop
+        }
+    else:
+        # Autres caméras: conserver résolutions existantes
+        zoom_resolutions = {
+            1: (1920, 1080),  # 2x zoom
+            2: (1280, 720),   # 3x zoom
+            4: (640, 480),    # 5x zoom
+            5: (640, 368)     # 6x zoom
+        }
 
     # Si zoom actif, synchroniser avec la résolution du zoom
     if zoom > 0 and zoom in zoom_resolutions:
@@ -1208,11 +1318,51 @@ def sync_video_resolution_with_zoom():
             delattr(sync_video_resolution_with_zoom, 'fps_backup')
             delattr(sync_video_resolution_with_zoom, 'vfps_backup')
 
+def get_imx585_sensor_mode(zoom_level, use_native=False):
+    """
+    Retourne la résolution du mode sensor IMX585 pour un niveau de zoom donné.
+
+    Args:
+        zoom_level: 0-5 (niveau de zoom actuel)
+        use_native: Si True et zoom=0, utilise mode natif 4K au lieu de binning
+
+    Returns:
+        (width, height) du mode sensor à utiliser, ou None si pas IMX585
+
+    Usage:
+        sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode)
+        if sensor_mode:
+            config = picam2.create_preview_configuration(
+                main={"size": output_size},
+                raw={"size": sensor_mode}
+            )
+    """
+    if Pi_Cam != 10:
+        # Pas IMX585, retourner None (utiliser logique existante)
+        return None
+
+    # Zoom 0 (full frame): dépend de use_native_sensor_mode
+    if zoom_level == 0:
+        if use_native:
+            return (3856, 2180)  # Mode 1: Native 4K
+        else:
+            return (1928, 1090)  # Mode 0: Binning 2x2
+
+    # Zoom 1-5: utiliser les modes crop hardware
+    if zoom_level in imx585_crop_modes:
+        mode_info = imx585_crop_modes[zoom_level]
+        if mode_info:
+            return (mode_info[0], mode_info[1])
+
+    # Fallback: mode binning
+    return (1928, 1090)
+
 shutters     = [-4000,-2000,-1600,-1250,-1000,-800,-640,-500,-400,-320,-288,-250,-240,-200,-160,-144,-125,-120,-100,-96,-80,-60,-50,-48,-40,-30,-25,
                 -20,-15,-13,-10,-8,-6,-5,-4,-3,0.4,0.5,0.6,0.8,1,1.1,1.2,2,3,4,5,6,7,8,9,10,11,15,20,25,30,40,50,60,75,100,112,120,150,200,220,230,
                 239,435,500,600,650,660,670]
-codecs       = ['h264','mjpeg','yuv420','raw','ser']
-codecs2      = ['h264','mjpeg','data','raw','ser']
+codecs       = ['h264','mjpeg','yuv420','raw','ser_yuv','ser_rgb','ser_xrgb']
+codecs2      = ['h264','mjpeg','data','raw','SER-YUV','SER-RGB','SER-XRGB']
+ser_formats  = ['YUV420', 'RGB888', 'XRGB8888']
 h264profiles = ['baseline 4','baseline 4.1','baseline 4.2','main 4','main 4.1','main 4.2','high 4','high 4.1','high 4.2']
 meters       = ['centre','spot','average']
 awbs         = ['off','auto','incandescent','tungsten','fluorescent','indoor','daylight','cloudy']
@@ -1223,7 +1373,10 @@ v3_f_speeds  = ['normal','fast']
 histograms   = ["OFF","Red","Green","Blue","Lum","ALL"]
 strs         = ["Still","Video","Stream","Timelapse"]
 stretch_presets = ['OFF','GHS','Arcsinh']
-v3_hdrs      = ["OFF","Single-Exp","Multi-Exp","Clear HDR 16bit"]
+v3_hdrs      = ["OFF","Single-Exp","Multi-Exp","Night","Clear HDR 16bit"]
+# Mapping pour rpicam-still/rpicam-vid (valeurs CLI attendues)
+# Note: Night n'existe pas en CLI → fallback vers "off"
+v3_hdrs_cli  = ["off","single-exp","auto","off","sensor"]  # off, single-exp, multi-exp→auto, night→off, sensor
 
 #check linux version.
 if os.path.exists ("/run/shm/lv.txt"): 
@@ -1281,12 +1434,12 @@ ls_lucky_save_final = 1      # 0=OFF, 1=ON (sauvegarder PNG/FITS final LuckyStac
 
 still_limits = ['mode',0,len(modes)-1,'speed',0,len(shutters)-1,'gain',0,30,'brightness',-100,100,'contrast',0,200,'ev',-10,10,'blue',1,80,'sharpness',0,30,
                 'denoise',0,len(denoises)-1,'quality',0,100,'red',1,80,'extn',0,len(extns)-1,'saturation',0,20,'meter',0,len(meters)-1,'awb',0,len(awbs)-1,
-                'histogram',0,len(histograms)-1,'v3_f_speed',0,len(v3_f_speeds)-1,'focus_method',0,4,'star_metric',0,2,'snr_display',0,1,'metrics_interval',1,10]
+                'histogram',0,len(histograms)-1,'v3_f_speed',0,len(v3_f_speeds)-1,'v3_hdr',0,len(v3_hdrs)-1,'focus_method',0,4,'star_metric',0,2,'snr_display',0,1,'metrics_interval',1,10]
 video_limits = ['vlen',0,3600,'fps',1,40,'v5_focus',10,2500,'vformat',0,7,'0',0,0,'zoom',0,5,'Focus',0,1,'tduration',1,86400,'tinterval',0.01,10,'tshots',1,999,
-                'flicker',0,3,'codec',0,len(codecs)-1,'profile',0,len(h264profiles)-1,'v3_focus',10,2000,'histarea',10,300,'v3_f_range',0,len(v3_f_ranges)-1,
+                'flicker',0,3,'codec',0,len(codecs)-1,'ser_format',0,len(ser_formats)-1,'profile',0,len(h264profiles)-1,'v3_focus',10,2000,'histarea',10,300,'v3_f_range',0,len(v3_f_ranges)-1,
                 'str_cap',0,len(strs)-1,'v6_focus',10,1020,'stretch_p_low',0,2,'stretch_p_high',9995,10000,'stretch_factor',0,80,'stretch_preset',0,2,
                 'ghs_D',-10,100,'ghs_b',-300,100,'ghs_SP',0,100,'ghs_LP',0,100,'ghs_HP',0,100,'ghs_preset',0,3,'use_native_sensor_mode',0,1,
-                'raw_format',0,2,'focus_method',0,4,'star_metric',0,2,'snr_display',0,1,'metrics_interval',1,10,
+                'raw_format',0,3,'focus_method',0,4,'star_metric',0,2,'snr_display',0,1,'metrics_interval',1,10,
                 'allsky_mode',0,2,'allsky_mean_target',10,60,'allsky_mean_threshold',2,15,'allsky_video_fps',15,60,
                 'allsky_max_gain',50,500,'allsky_apply_stretch',0,1,'allsky_cleanup_jpegs',0,1]
 
@@ -1327,7 +1480,7 @@ livestack_limits = [
 ]
 
 # check config_file exists, if not then write default values
-titles = ['mode','speed','gain','brightness','contrast','frame','red','blue','ev','vlen','fps','vformat','codec','tinterval','tshots','extn','zx','zy','zoom','saturation',
+titles = ['mode','speed','gain','brightness','contrast','frame','red','blue','ev','vlen','fps','vformat','codec','ser_format','tinterval','tshots','extn','zx','zy','zoom','saturation',
           'meter','awb','sharpness','denoise','quality','profile','level','histogram','histarea','v3_f_speed','v3_f_range','rotate','IRF','str_cap','v3_hdr','raw_format','vflip','hflip',
           'stretch_p_low','stretch_p_high','stretch_factor','stretch_preset','ghs_D','ghs_b','ghs_SP','ghs_LP','ghs_HP','ghs_preset',
           'ls_preview_refresh','ls_alignment_mode','ls_enable_qc','ls_max_fwhm','ls_min_sharpness','ls_max_drift','ls_min_stars',
@@ -1337,7 +1490,7 @@ titles = ['mode','speed','gain','brightness','contrast','frame','red','blue','ev
           'focus_method','star_metric','snr_display','metrics_interval','ls_lucky_save_progress','isp_enable',
           'allsky_mode','allsky_mean_target','allsky_mean_threshold','allsky_video_fps','allsky_max_gain','allsky_apply_stretch','allsky_cleanup_jpegs',
           'ls_save_progress','ls_save_final','ls_lucky_save_final']
-points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat,codec,tinterval,tshots,extn,zx,zy,zoom,saturation,
+points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat,codec,ser_format,tinterval,tshots,extn,zx,zy,zoom,saturation,
           meter,awb,sharpness,denoise,quality,profile,level,histogram,histarea,v3_f_speed,v3_f_range,rotate,IRF,str_cap,v3_hdr,raw_format,vflip,hflip,
           stretch_p_low,stretch_p_high,stretch_factor,stretch_preset,ghs_D,ghs_b,ghs_SP,ghs_LP,ghs_HP,ghs_preset,
           ls_preview_refresh,ls_alignment_mode,ls_enable_qc,ls_max_fwhm,ls_min_sharpness,ls_max_drift,ls_min_stars,
@@ -1568,6 +1721,8 @@ if len(config) <= 89:
     config.append(1)     # allsky_apply_stretch par défaut (ON)
 if len(config) <= 90:
     config.append(0)     # allsky_cleanup_jpegs par défaut (keep JPEGs)
+if len(config) <= 91:
+    config.append(0)     # ser_format par défaut (YUV420)
 
 # Charger les paramètres ALLSKY
 allsky_mode           = config[84] if len(config) > 84 else 0
@@ -1577,6 +1732,7 @@ allsky_video_fps      = config[87] if len(config) > 87 else 25
 allsky_max_gain       = config[88] if len(config) > 88 else 200
 allsky_apply_stretch  = config[89] if len(config) > 89 else 1
 allsky_cleanup_jpegs  = config[90] if len(config) > 90 else 0
+ser_format            = config[91] if len(config) > 91 else 0
 
 # Options de sauvegarde LiveStack/LuckyStack
 ls_save_progress      = config[91] if len(config) > 91 else 1
@@ -1639,7 +1795,7 @@ star_metric = max(0, min(star_metric, 2))    # 0-2: OFF/HFR/FWHM
 snr_display = max(0, min(snr_display, 1))    # 0-1: OFF/ON
 
 # RAW Format parameter
-raw_format = max(0, min(raw_format, 2))      # 0-2: YUV420/SRGGB12/SRGGB16
+raw_format = max(0, min(raw_format, 3))      # 0-3: YUV420/XRGB8888/SRGGB12/SRGGB16
 metrics_interval = max(1, min(metrics_interval, 10))  # 1-10 frames
 
 # Sensor mode
@@ -1911,6 +2067,8 @@ def Camera_Version():
         vfps = v3_max_fps[vformat]
     elif Pi_Cam == 9:
         vfps = v9_max_fps[vformat]
+    elif Pi_Cam == 10:
+        vfps = v10_max_fps[vformat]
     elif Pi_Cam == 15:
         vfps = v15_max_fps[vformat]
     else:
@@ -3768,8 +3926,18 @@ def preview():
     # ===== MODE PICAMERA2 =====
     if use_picamera2:
         # Déterminer la taille de capture pour détecter si changement
+        # NOUVEAU: IMX585 - Utiliser modes hardware crop
+        if Pi_Cam == 10:
+            sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+            if sensor_mode:
+                capture_size = sensor_mode
+                raw_stream_size = sensor_mode  # Important: raw stream = sensor mode
+            else:
+                # Fallback (ne devrait jamais arriver)
+                capture_size = (1928, 1090)
+                raw_stream_size = capture_size
         # Mode natif avec zoom : calculer la taille ROI native
-        if use_native_sensor_mode == 1 and zoom > 0:
+        elif use_native_sensor_mode == 1 and zoom > 0:
             # Calculer la taille du ROI en pixels natifs du capteur
             # zfs[zoom] donne la fraction de la résolution native
             roi_width = int(igw * zfs[zoom])
@@ -3808,9 +3976,6 @@ def preview():
             raw_stream_size = capture_size
         elif Pi_Cam == 3:
             capture_size = (2304, 1296)
-            raw_stream_size = capture_size
-        elif Pi_Cam == 10:
-            capture_size = (1928, 1090)
             raw_stream_size = capture_size
         else:
             capture_size = (preview_width, preview_height)
@@ -3879,19 +4044,20 @@ def preview():
             fast_controls["Sharpness"] = sharpness / 10
 
             # HDR Mode (pour IMX585 Clear HDR)
-            # SingleExposure/MultiExposure incompatibles avec mode manuel
+            # Multi-Exp incompatible mode manuel, autres OK
             if v3_hdr > 0 and Pi_Cam == 10:
-                if v3_hdr == 3:
+                if v3_hdr == 4:
                     # Clear HDR 16-bit : désactiver HdrMode (traitement capteur)
                     fast_controls["HdrMode"] = controls.HdrModeEnum.Off
-                elif mode == 0:
-                    # Mode manuel : désactiver HDR logiciel
+                elif v3_hdr == 2 and mode == 0:
+                    # Multi-Exp en mode manuel : incompatible
                     fast_controls["HdrMode"] = controls.HdrModeEnum.Off
                 else:
-                    # Mode auto : activer HDR logiciel
+                    # Activer HDR (Single-Exp, Multi-Exp, Night)
                     hdr_modes = {
                         1: controls.HdrModeEnum.SingleExposure,
-                        2: controls.HdrModeEnum.MultiExposure
+                        2: controls.HdrModeEnum.MultiExposure,
+                        3: controls.HdrModeEnum.Night
                     }
                     if v3_hdr in hdr_modes:
                         fast_controls["HdrMode"] = hdr_modes[v3_hdr]
@@ -4004,41 +4170,105 @@ def preview():
         # En mode manuel ou avec exposition > 80ms, utiliser still_configuration
         # (preview_configuration limite l'exposition à ~83ms pour l'IMX585)
         # IMPORTANT: Format RAW dépend du mode sélectionné:
-        # - raw_format=0 (YUV420) ou stacking inactif: pas de stream raw
-        # - raw_format=1 (RAW12): SRGGB12
-        # - raw_format=2 (RAW16): SRGGB16 + activation automatique Clear HDR
+        # - raw_format=0 (YUV420): Pas de stream raw, ISP → YUV420
+        # - raw_format=1 (XRGB8888): Pas de stream raw, ISP → XRGB8888
+        # - raw_format=2 (RAW12): Stream raw SRGGB12, bypass ISP
+        # - raw_format=3 (RAW16): Stream raw SRGGB16 + activation automatique Clear HDR
 
-        # Déterminer le format RAW à utiliser
-        raw_stream_format = "SRGGB12"  # Par défaut RAW12
-        if raw_format == 2:
-            # RAW16 Clear HDR sélectionné
-            raw_stream_format = "SRGGB16"
-            # Activer automatiquement le mode Clear HDR sensor si pas déjà fait
-            if v3_hdr != 3:
-                print(f"  [AUTO-CONFIG] RAW16 sélectionné → activation Clear HDR (v3_hdr: {v3_hdr} → 3)")
-                v3_hdr = 3  # Force Clear HDR pour RAW16
-        elif v3_hdr == 3:
-            # Clear HDR activé → forcer RAW16
-            raw_stream_format = "SRGGB16"
-            if raw_format != 2:
-                print(f"  [AUTO-CONFIG] Clear HDR activé → passage en RAW16 (raw_format: {raw_format} → 2)")
-                raw_format = 2
+        # Déterminer le format MAIN et RAW à utiliser
+        main_format = "RGB888"  # Par défaut
+        raw_stream_format = None  # Pas de stream raw par défaut
+        use_raw_stream = False
 
+        # Sélectionner format selon raw_format
+        if raw_format == 1:
+            # XRGB8888 : format ISP direct, pas de stream RAW
+            main_format = "XRGB8888"
+            use_raw_stream = False
+        elif raw_format == 2:
+            # RAW12 Bayer
+            main_format = "RGB888"
+            raw_stream_format = "SRGGB12"
+            use_raw_stream = True
+        elif raw_format == 3:
+            # RAW16 Clear HDR
+            main_format = "RGB888"
+            raw_stream_format = "SRGGB16"
+            use_raw_stream = True
+
+        # AUTO-LINKING : Clear HDR 16-bit <-> RAW16
+        # LOGIQUE UNIDIRECTIONNELLE (corrigée) :
+        # - Clear HDR (v3_hdr=4) REQUIERT RAW16 → force raw_format=3
+        # - RAW16 (raw_format=3) PERMET tous les modes HDR (0,1,2,3,4) → ne force rien
+        # Ceci permet d'utiliser RAW16 avec OFF/Single/Multi/Night sans verrouillage
+
+        if v3_hdr == 4:
+            # Clear HDR 16-bit activé → FORCER RAW16 (obligatoire)
+            if raw_format != 3:
+                print(f"  [AUTO-CONFIG] Clear HDR 16-bit activé → passage en RAW16 (raw_format: {raw_format} → 3)")
+                raw_format = 3
+                main_format = "RGB888"
+                raw_stream_format = "SRGGB16"
+                use_raw_stream = True
+
+        # Créer la configuration selon le type de stream nécessaire
+        # IMPORTANT: Pour IMX585, spécifier TOUJOURS raw["size"] pour forcer le mode sensor
+        # Cela remplace ScalerCrop par sélection native du mode hardware
         if mode == 0 or sspeed > 80000:
-            config = picam2.create_still_configuration(
-                main={"size": capture_size, "format": "RGB888"},
-                raw={"size": raw_stream_size, "format": raw_stream_format}
-            )
+            if Pi_Cam == 10:  # IMX585
+                sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+                if use_raw_stream:
+                    config = picam2.create_still_configuration(
+                        main={"size": capture_size, "format": main_format},
+                        raw={"size": sensor_mode, "format": raw_stream_format}
+                    )
+                else:
+                    # Même sans raw stream, spécifier raw size force le mode
+                    config = picam2.create_still_configuration(
+                        main={"size": capture_size, "format": main_format},
+                        raw={"size": sensor_mode}
+                    )
+            elif use_raw_stream:
+                config = picam2.create_still_configuration(
+                    main={"size": capture_size, "format": main_format},
+                    raw={"size": raw_stream_size, "format": raw_stream_format}
+                )
+            else:
+                config = picam2.create_still_configuration(
+                    main={"size": capture_size, "format": main_format}
+                )
             if show_cmds == 1:
-                print(f"  [CONFIG] Type: STILL, Stream RAW: {raw_stream_format}")
+                print(f"  [CONFIG] Type: STILL, Main format: {main_format}")
+                if use_raw_stream or Pi_Cam == 10:
+                    print(f"  [CONFIG] Stream RAW: {raw_stream_format if use_raw_stream else 'sensor mode forced'}")
                 print(f"  [CONFIG] Requested capture_size: {capture_size}")
         else:
-            config = picam2.create_preview_configuration(
-                main={"size": capture_size, "format": "RGB888"},
-                raw={"size": raw_stream_size, "format": raw_stream_format}
-            )
+            if Pi_Cam == 10:  # IMX585
+                sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+                if use_raw_stream:
+                    config = picam2.create_preview_configuration(
+                        main={"size": capture_size, "format": main_format},
+                        raw={"size": sensor_mode, "format": raw_stream_format}
+                    )
+                else:
+                    # Même sans raw stream, spécifier raw size force le mode
+                    config = picam2.create_preview_configuration(
+                        main={"size": capture_size, "format": main_format},
+                        raw={"size": sensor_mode}
+                    )
+            elif use_raw_stream:
+                config = picam2.create_preview_configuration(
+                    main={"size": capture_size, "format": main_format},
+                    raw={"size": raw_stream_size, "format": raw_stream_format}
+                )
+            else:
+                config = picam2.create_preview_configuration(
+                    main={"size": capture_size, "format": main_format}
+                )
             if show_cmds == 1:
-                print(f"  [CONFIG] Type: PREVIEW, Stream RAW: {raw_stream_format}")
+                print(f"  [CONFIG] Type: PREVIEW, Main format: {main_format}")
+                if use_raw_stream or Pi_Cam == 10:
+                    print(f"  [CONFIG] Stream RAW: {raw_stream_format if use_raw_stream else 'sensor mode forced'}")
                 print(f"  [CONFIG] Requested capture_size: {capture_size}")
 
         # Préparer TOUS les contrôles pour application après start()
@@ -4100,33 +4330,36 @@ def preview():
         controls_dict["Sharpness"] = sharpness / 10
 
         # HDR Mode (pour IMX585 Clear HDR)
-        # 0=Off, 1=SingleExposure, 2=MultiExposure, 3=Clear HDR 16-bit (capteur IMX585)
-        # IMPORTANT: SingleExposure et MultiExposure sont conçus pour AE/AGC automatique
-        # En mode manuel, ils causent des conflits d'exposition → désactiver sauf Clear HDR
+        # 0=Off, 1=SingleExposure, 2=MultiExposure, 3=Night, 4=Clear HDR 16-bit (capteur IMX585)
+        # IMPORTANT: MultiExposure et Night nécessitent AE/AGC automatique
+        # SingleExposure peut fonctionner en mode manuel (exposition fixe)
         if v3_hdr > 0 and Pi_Cam == 10:  # Seulement pour IMX585
-            if v3_hdr == 3:
+            if v3_hdr == 4:
                 # Clear HDR 16-bit : le capteur IMX585 gère le HDR en interne
                 # On désactive le HdrMode de libcamera pour éviter un double traitement
                 controls_dict["HdrMode"] = controls.HdrModeEnum.Off
                 if show_cmds == 1:
                     print(f"  [HDR] Clear HDR 16-bit: HdrMode=Off (traitement capteur IMX585)")
-            elif mode == 0:
-                # Mode manuel : désactiver HDR logiciel (incompatible)
+            elif (v3_hdr == 2 or v3_hdr == 3) and mode == 0:
+                # Multi-Exp et Night en mode manuel : incompatibles (nécessitent AE/AGC)
                 controls_dict["HdrMode"] = controls.HdrModeEnum.Off
                 if show_cmds == 1:
-                    print(f"  [HDR] {v3_hdrs[v3_hdr]} désactivé en mode manuel (conflit ExposureTime)")
-                    print(f"       → Utilisez mode Auto ou Clear HDR 16-bit pour HDR")
+                    mode_name = "Multi-Exp" if v3_hdr == 2 else "Night"
+                    print(f"  [HDR] {mode_name} désactivé en mode manuel (nécessite AE/AGC)")
+                    print(f"       → Utilisez mode Auto, ou Single-Exp/Clear HDR en manuel")
             else:
-                # Mode auto : activer HDR logiciel
+                # Autres modes HDR : compatible manuel et auto
                 hdr_modes = {
                     1: controls.HdrModeEnum.SingleExposure,
-                    2: controls.HdrModeEnum.MultiExposure
+                    2: controls.HdrModeEnum.MultiExposure,
+                    3: controls.HdrModeEnum.Night
                 }
                 if v3_hdr in hdr_modes:
                     controls_dict["HdrMode"] = hdr_modes[v3_hdr]
                     if show_cmds == 1:
                         print(f"  [HDR] Mode activé: {v3_hdrs[v3_hdr]} (HdrMode={hdr_modes[v3_hdr]})")
-                        print(f"       ⚠ AE/AGC prendra le contrôle de l'exposition")
+                        if mode != 0 and (v3_hdr == 2 or v3_hdr == 3):
+                            print(f"       ⚠ Mode Auto: AE/AGC contrôle l'exposition et le gain")
         elif v3_hdr == 0:
             # Explicitement désactiver HDR
             controls_dict["HdrMode"] = controls.HdrModeEnum.Off
@@ -4230,15 +4463,20 @@ def preview():
                 picam2.set_controls(focus_controls)
                 time.sleep(0.05)
 
-            # ===== APPLIQUER LE ZOOM PREVIEW avec ScalerCrop =====
-            if zoom > 0 and zoom <= 5 and zoom != 3:  # Zoom 3 désactivé
+            # ===== ZOOM HARDWARE POUR IMX585 / SCALERCROP POUR AUTRES CAMÉRAS =====
+            if Pi_Cam == 10 and zoom > 0:
+                # IMX585: Le mode sensor a déjà été sélectionné via raw["size"]
+                # Pas besoin de ScalerCrop
+                if show_cmds == 1:
+                    sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+                    mode_name = imx585_crop_modes[zoom][2] if zoom in imx585_crop_modes and imx585_crop_modes[zoom] else "Full"
+                    print(f"  Zoom hardware IMX585: {mode_name} @ {sensor_mode}")
+            elif zoom > 0 and zoom <= 5 and zoom != 3:  # Autres caméras - Zoom 3 désactivé
+                # Autres caméras: conserver ScalerCrop
                 try:
                     # Obtenir la taille native du capteur pour ScalerCrop
                     # ScalerCrop utilise les coordonnées absolues du capteur natif
-                    if Pi_Cam == 10:  # IMX585
-                        sensor_width = 3856
-                        sensor_height = 2180
-                    elif Pi_Cam == 3:  # Pi v3
+                    if Pi_Cam == 3:  # Pi v3
                         sensor_width = 4608
                         sensor_height = 2592
                     elif Pi_Cam == 4:  # Pi HQ
@@ -4445,7 +4683,7 @@ def preview():
     if (Pi_Cam == 3 and v3_af == 1) and v3_f_range != 0:
         datastr += " --autofocus-range " + v3_f_ranges[v3_f_range]
     if Pi_Cam == 3 or Pi == 5:
-        datastr += " --hdr " + v3_hdrs[v3_hdr]
+        datastr += " --hdr " + v3_hdrs_cli[v3_hdr]
     if Pi_Cam == 9 and os.path.exists("/home/" + Home_Files[0] + "/imx290a.json") and Pi == 5:
             datastr += " --tuning-file /home/" + Home_Files[0] + "/imx290a.json"
     if Pi_Cam == 10 and os.path.exists("/home/" + Home_Files[0] + "/imx585_lowlight.json") and Pi == 5:
@@ -4456,7 +4694,13 @@ def preview():
         if os.path.exists('/usr/share/libcamera/ipa/rpi/pisp/imx477_scientific.json') and Pi == 5:
             datastr += " --tuning-file /usr/share/libcamera/ipa/rpi/pisp/imx477_scientific.json"
     # Zoom fixe 1x à 6x
-    if zoom > 0 and zoom <= 5 and zoom != 3:  # Zoom 3 désactivé
+    if Pi_Cam == 10 and zoom > 0:  # IMX585 - Hardware crop modes
+        sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+        if sensor_mode and zoom != 0:  # zoom > 0 déjà vérifié
+            # Spécifier le mode exact au lieu de --roi
+            datastr += f" --mode {sensor_mode[0]}:{sensor_mode[1]}:12"
+            # Note: zoom 3 maintenant activé pour IMX585
+    elif zoom > 0 and zoom <= 5 and zoom != 3:  # Autres caméras - ROI logiciel, zoom 3 désactivé
         zws = int(igw * zfs[zoom])
         zhs = int(igh * zfs[zoom])
         zxo = ((igw-zws)/2)/igw
@@ -4735,6 +4979,7 @@ def Menu():
             button(0,7,6,4)
             text(0,7,5,0,1,"HDR",ft,10)
             text(0,7,3,1,1,v3_hdrs[v3_hdr],fv,10)
+            draw_bar(0,7,lgrnColor,'v3_hdr',v3_hdr)
         elif Pi_Cam == 9:
             button(0,7,6,4)
             text(0,7,5,0,1,"IR Filter",ft,10)
@@ -5312,9 +5557,9 @@ while True:
             pygame._picam2_section_debug = True
         try:
             # Capturer l'image directement depuis Picamera2
-            # Si livestack/luckystack actif ET format RAW sélectionné → capturer et débayériser en uint16
-            if (livestack_active or luckystack_active) and raw_format != 0:
-                # Capturer flux RAW (SRGGB12 ou SRGGB16)
+            # Si livestack/luckystack actif ET format RAW Bayer sélectionné → capturer et débayériser en uint16
+            if (livestack_active or luckystack_active) and raw_format >= 2:
+                # Capturer flux RAW (SRGGB12 ou SRGGB16) - raw_format 2 ou 3
                 raw_array = picam2.capture_array("raw")
                 # Débayériser en RGB uint16 [0-65535] (préserve dynamique 12/16-bit)
                 # *** NOUVEAU : Passer les gains AWB pour corriger la balance des blancs en RAW ***
@@ -5355,9 +5600,40 @@ while True:
                     print(f"    Sensor Mode: {'NATIVE' if use_native_sensor_mode == 1 else 'BINNING'}")
                     pygame._stacking_mode_shown = True
             else:
-                # Capture RGB normale uint8 (YUV420 ou livestack inactif)
+                # Capture depuis stream MAIN (YUV420, XRGB8888, ou livestack inactif)
                 array = picam2.capture_array("main")
-                if show_cmds == 1 and (livestack_active or luckystack_active) and not hasattr(pygame, '_stacking_yuv_shown'):
+
+                # Si XRGB8888, extraire seulement BGR (ignorer le canal X)
+                if raw_format == 1 and len(array.shape) == 3 and array.shape[2] == 4:
+                    # DEBUG: Analyser les canaux AVANT extraction (si show_cmds activé)
+                    if show_cmds == 1 and not hasattr(pygame, '_xrgb_debug_shown'):
+                        print(f"\n[DEBUG XRGB8888] Array AVANT extraction:")
+                        print(f"  Shape: {array.shape}, dtype: {array.dtype}")
+                        for i in range(4):
+                            channel_mean = array[:,:,i].mean()
+                            channel_min = array[:,:,i].min()
+                            channel_max = array[:,:,i].max()
+                            print(f"  Canal {i}: mean={channel_mean:.1f}, min={channel_min}, max={channel_max}")
+                        pygame._xrgb_debug_shown = True
+
+                    # XRGB8888 format libcamera : B, G, R, X (BGR + padding)
+                    # PyGame et OpenCV utilisent BGR, donc on garde l'ordre natif
+                    # Ne PAS inverser les canaux !
+                    array = array[:, :, 0:3].copy()  # Prendre les 3 premiers canaux BGR tel quel
+
+                    if show_cmds == 1 and (livestack_active or luckystack_active) and not hasattr(pygame, '_stacking_xrgb_shown'):
+                        metadata = picam2.capture_metadata()
+                        print(f"\n[STACKING] Mode XRGB8888 ISP, capture depuis stream MAIN")
+                        print(f"  Array BGR uint8: shape={array.shape}, dtype={array.dtype}, range=[{array.min()}, {array.max()}]")
+                        print(f"  Canaux (ordre BGR): B={array[:,:,0].mean():.1f}, G={array[:,:,1].mean():.1f}, R={array[:,:,2].mean():.1f}")
+                        print(f"  ISP natif RPi5: Debayer + Denoise + AWB + Gamma")
+                        print(f"  Métadonnées caméra:")
+                        print(f"    ExposureTime: {metadata.get('ExposureTime', 'N/A')}µs")
+                        print(f"    AnalogueGain: {metadata.get('AnalogueGain', 'N/A')}")
+                        print(f"    ColourGains: {metadata.get('ColourGains', 'N/A')}")
+                        print(f"    Sensor Mode: {'NATIVE' if use_native_sensor_mode == 1 else 'BINNING'}")
+                        pygame._stacking_xrgb_shown = True
+                elif show_cmds == 1 and (livestack_active or luckystack_active) and not hasattr(pygame, '_stacking_yuv_shown'):
                     metadata = picam2.capture_metadata()
                     print(f"\n[STACKING] Mode YUV420, capture depuis stream MAIN")
                     print(f"  Array uint8: shape={array.shape}, dtype={array.dtype}, range=[{array.min()}, {array.max()}]")
@@ -6322,7 +6598,7 @@ while True:
                     if ((Pi_Cam == 3 and v3_af == 1) or (((Pi_Cam == 5 and v5_af == 1)or Pi_Cam == 6)) or Pi_Cam == 8) and zoom == 0 and fxz != 1:
                         datastr += " --autofocus-window " + str(fxx) + "," + str(fxy) + "," + str(fxz) + "," + str(fxz)
                     if Pi_Cam == 3 or Pi == 5:
-                        datastr += " --hdr " + v3_hdrs[v3_hdr]
+                        datastr += " --hdr " + v3_hdrs_cli[v3_hdr]
                     if (Pi_Cam == 6 or Pi_Cam == 8) and mode == 0 and button_pos == 1:
                         datastr += " --width 4624 --height 3472 " # 16MP superpixel mode for higher light sensitivity
                     elif Pi_Cam == 6 or Pi_Cam == 8:
@@ -6332,7 +6608,12 @@ while True:
                             datastr += " --width 9152 --height 6944"
                         elif Pi_Cam == 8:
                             datastr += " --width 9248 --height 6944"
-                    if zoom > 0 and zoom <= 5 and zoom != 3:  # Zoom fixe 1x à 6x (zoom 3 désactivé)
+                    if Pi_Cam == 10 and zoom > 0:  # IMX585 - Hardware crop
+                        sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+                        if sensor_mode:
+                            datastr += f" --mode {sensor_mode[0]}:{sensor_mode[1]}:12"
+                            datastr += f" --width {sensor_mode[0]} --height {sensor_mode[1]}"
+                    elif zoom > 0 and zoom <= 5 and zoom != 3:  # Autres caméras - ROI logiciel (zoom 3 désactivé)
                         # Arrondir à un nombre PAIR pour compatibilité formats vidéo
                         zws = int(igw * zfs[zoom])
                         zhs = int(igh * zfs[zoom])
@@ -6447,231 +6728,454 @@ while True:
                     text(0,0,6,2,1,"Please Wait, taking video ...",int(fv*1.7),1)
                     now = datetime.datetime.now()
                     timestamp = now.strftime("%y%m%d%H%M%S")
-                    vname =  vid_dir + str(timestamp) + "." + codecs2[codec]
-                    
-                    if codecs[codec] == 'ser':
-                        # Capture pour format SER - méthode YUV420 (SIMPLE ET FIABLE !)
-                        text(0,0,6,2,1,"Recording YUV420 for SER...",int(fv*1.7),1)
+                    # Déterminer l'extension du fichier
+                    if codecs[codec].startswith('ser_'):
+                        vname = vid_dir + str(timestamp) + ".ser"
+                    else:
+                        vname = vid_dir + str(timestamp) + "." + codecs2[codec]
 
-                        # Construire la commande pour capturer en YUV420
-                        if lver != "bookwo" and lver != "trixie":
-                            datastr = "libcamera-vid"
-                        else:
-                            datastr = "rpicam-vid"
+                    if codecs[codec].startswith('ser_'):
+                        # ==== CAPTURE POUR FORMAT SER ====
+                        # Déterminer le format SER selon le codec choisi
+                        if codecs[codec] == 'ser_yuv':
+                            ser_format = 0  # YUV420
+                        elif codecs[codec] == 'ser_rgb':
+                            ser_format = 1  # RGB888
+                        elif codecs[codec] == 'ser_xrgb':
+                            ser_format = 2  # XRGB8888
 
-                        # Capturer en fichier YUV420 dans /run/shm
-                        temp_video = "/run/shm/ser_temp_video.yuv"
+                        # Choix de la méthode selon ser_format:
+                        # 0 = YUV420 (rpicam-vid)
+                        # 1 = RGB888 (Picamera2)
+                        # 2 = XRGB8888 (Picamera2)
 
-                        datastr += " --camera " + str(camera) + " -t " + str(vlen * 1000)
-                        datastr += " -o " + temp_video
-                        datastr += " --codec yuv420"
+                        if ser_format == 0:
+                            # ==== MÉTHODE YUV420 (rpicam-vid) ====
+                            text(0,0,6,2,1,"Recording YUV420 for SER...",int(fv*1.7),1)
 
-                        # IMPORTANT: Pour un vrai ROI (méthode Test2), l'ordre doit être:
-                        # --codec yuv420 --mode ... --roi ... --width ... --height ...
-
-                        # Gestion du ROI (Region Of Interest) - DOIT venir AVANT --width/--height
-                        if zoom > 0 and zoom <= 5 and zoom != 3:  # Zoom fixe 1x à 6x (zoom 3 désactivé)
-                            # ROI centré sur le mode capteur natif (vrai ROI)
-                            # Déterminer la profondeur de bits selon la caméra
-                            if Pi_Cam == 4 or Pi_Cam == 10:  # Pi HQ ou IMX585
-                                sensor_bits = 12
+                            # Construire la commande pour capturer en YUV420
+                            if lver != "bookwo" and lver != "trixie":
+                                datastr = "libcamera-vid"
                             else:
-                                sensor_bits = 10
+                                datastr = "rpicam-vid"
 
-                            # Arrondir à un nombre PAIR pour compatibilité YUV420
-                            zws = int(igw * zfs[zoom])
-                            zhs = int(igh * zfs[zoom])
-                            if zws % 2 != 0:
-                                zws -= 1  # Forcer pair
-                            if zhs % 2 != 0:
-                                zhs -= 1  # Forcer pair
-                            zxo = ((igw-zws)/2)/igw
-                            zyo = ((igh-zhs)/2)/igh
-                            datastr += " --mode " + str(igw) + ":" + str(igh) + ":" + str(sensor_bits) + "  --roi " + str(zxo) + "," + str(zyo) + "," + str(zws/igw) + "," + str(zhs/igh)
-                        # Supprimé: ancien zoom manuel (zoom == 5)
-                        elif False and zoom == 5:
-                            # ROI manuel centré basé sur preview_width/height
-                            # Déterminer la profondeur de bits selon la caméra
-                            if Pi_Cam == 4 or Pi_Cam == 10:  # Pi HQ ou IMX585
-                                sensor_bits = 12
+                            # Capturer en fichier YUV420 dans /run/shm
+                            temp_video = "/run/shm/ser_temp_video.yuv"
+
+                            datastr += " --camera " + str(camera) + " -t " + str(vlen * 1000)
+                            datastr += " -o " + temp_video
+                            datastr += " --codec yuv420"
+
+                            # IMPORTANT: Pour un vrai ROI (méthode Test2), l'ordre doit être:
+                            # --codec yuv420 --mode ... --roi ... --width ... --height ...
+
+                            # Gestion du ROI (Region Of Interest) - DOIT venir AVANT --width/--height
+                            if zoom > 0 and zoom <= 5 and zoom != 3:  # Zoom fixe 1x à 6x (zoom 3 désactivé)
+                                # ROI centré sur le mode capteur natif (vrai ROI)
+                                # Déterminer la profondeur de bits selon la caméra
+                                if Pi_Cam == 4 or Pi_Cam == 10:  # Pi HQ ou IMX585
+                                    sensor_bits = 12
+                                else:
+                                    sensor_bits = 10
+
+                                # Arrondir à un nombre PAIR pour compatibilité YUV420
+                                zws = int(igw * zfs[zoom])
+                                zhs = int(igh * zfs[zoom])
+                                if zws % 2 != 0:
+                                    zws -= 1  # Forcer pair
+                                if zhs % 2 != 0:
+                                    zhs -= 1  # Forcer pair
+                                zxo = ((igw-zws)/2)/igw
+                                zyo = ((igh-zhs)/2)/igh
+                                datastr += " --mode " + str(igw) + ":" + str(igh) + ":" + str(sensor_bits) + "  --roi " + str(zxo) + "," + str(zyo) + "," + str(zws/igw) + "," + str(zhs/igh)
+                            # Supprimé: ancien zoom manuel (zoom == 5)
+                            elif False and zoom == 5:
+                                # ROI manuel centré basé sur preview_width/height
+                                # Déterminer la profondeur de bits selon la caméra
+                                if Pi_Cam == 4 or Pi_Cam == 10:  # Pi HQ ou IMX585
+                                    sensor_bits = 12
+                                else:
+                                    sensor_bits = 10
+
+                                zxo = ((igw/2)-(preview_width/2))/igw
+                                if igw/igh > 1.5:
+                                    zyo = ((igh/2)-((preview_height * .75)/2))/igh
+                                else:
+                                    zyo = ((igh/2)-(preview_height/2))/igh
+
+                                datastr += " --mode " + str(igw) + ":" + str(igh) + ":" + str(sensor_bits)
+                                if igw/igh > 1.5:
+                                    datastr += "  --roi " + str(zxo) + "," + str(zyo) + "," + str(int(preview_width)/igw) + "," + str(int(preview_height * .75)/igh)
+                                else:
+                                    datastr += "  --roi " + str(zxo) + "," + str(zyo) + "," + str(preview_width/igw) + "," + str(preview_height/igh)
+
+                            # Résolution et dimensions
+                            if zoom > 0 and zoom <= 5 and zoom != 3:  # Zoom fixe avec ROI (zoom 3 désactivé)
+                                # Toujours utiliser résolutions standards pour les vidéos (compatibilité rpicam-vid)
+                                # Le mode natif s'applique uniquement au livestack/luckystack
+                                zoom_resolutions = {
+                                    1: (1920, 1080),  # 2x zoom -> Full HD (16:9, standard)
+                                    2: (1280, 720),   # 3x zoom -> HD (16:9, standard)
+                                    4: (640, 480),    # 5x zoom -> VGA (4:3, confirmé compatible SER)
+                                    5: (640, 368),    # 6x zoom -> nHD (16:9, confirmé compatible SER)
+                                }
+                                if zoom in zoom_resolutions:
+                                    actual_vwidth, actual_vheight = zoom_resolutions[zoom]
+                                else:
+                                    # Fallback: utiliser la résolution du ROI
+                                    actual_vwidth = zws
+                                    actual_vheight = zhs
+
+                                # Ajouter --width et --height
+                                datastr += " --width " + str(actual_vwidth) + " --height " + str(actual_vheight)
+                            # Supprimé: ancien zoom manuel (zoom == 5)
+                            elif False and zoom == 5:
+                                # Zoom manuel : utiliser preview_width/height
+                                if igw/igh > 1.5:
+                                    actual_vwidth = preview_width
+                                    actual_vheight = int(preview_height * .75)
+                                else:
+                                    actual_vwidth = preview_width
+                                    actual_vheight = preview_height
+                                datastr += " --width " + str(actual_vwidth) + " --height " + str(actual_vheight)
                             else:
-                                sensor_bits = 10
+                                # Pas de zoom : utiliser les dimensions demandées
+                                actual_vwidth = vwidth
+                                actual_vheight = vheight
+                                # Spécifier le mode sensor pour IMX585
+                                if Pi_Cam == 10:
+                                    sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+                                    if sensor_mode:
+                                        datastr += f" --mode {sensor_mode[0]}:{sensor_mode[1]}:12"
+                                datastr += " --width " + str(vwidth) + " --height " + str(vheight)
 
-                            zxo = ((igw/2)-(preview_width/2))/igw
-                            if igw/igh > 1.5:
-                                zyo = ((igh/2)-((preview_height * .75)/2))/igh
+                            if mode != 0:
+                                datastr += " --framerate " + str(fps)
                             else:
-                                zyo = ((igh/2)-(preview_height/2))/igh
+                                speed7 = sspeed
+                                speed7 = max(speed7,int((1/fps)*1000000))
+                                datastr += " --framerate " + str(max(1, min(120, int(1000000/speed7))))
 
-                            datastr += " --mode " + str(igw) + ":" + str(igh) + ":" + str(sensor_bits)
-                            if igw/igh > 1.5:
-                                datastr += "  --roi " + str(zxo) + "," + str(zyo) + "," + str(int(preview_width)/igw) + "," + str(int(preview_height * .75)/igh)
+                            if vpreview == 0:
+                                datastr += " -n "
+                            datastr += " --brightness " + str(brightness/100) + " --contrast " + str(contrast/100)
+
+                            if mode == 0:
+                                datastr += " --shutter " + str(sspeed)
                             else:
-                                datastr += "  --roi " + str(zxo) + "," + str(zyo) + "," + str(preview_width/igw) + "," + str(preview_height/igh)
+                                datastr += " --exposure " + modes[mode]
 
-                        # Résolution et dimensions
-                        if zoom > 0 and zoom <= 5 and zoom != 3:  # Zoom fixe avec ROI (zoom 3 désactivé)
-                            # Toujours utiliser résolutions standards pour les vidéos (compatibilité rpicam-vid)
-                            # Le mode natif s'applique uniquement au livestack/luckystack
-                            zoom_resolutions = {
-                                1: (1920, 1080),  # 2x zoom -> Full HD (16:9, standard)
-                                2: (1280, 720),   # 3x zoom -> HD (16:9, standard)
-                                4: (640, 480),    # 5x zoom -> VGA (4:3, confirmé compatible SER)
-                                5: (640, 368),    # 6x zoom -> nHD (16:9, confirmé compatible SER)
-                            }
-                            if zoom in zoom_resolutions:
-                                actual_vwidth, actual_vheight = zoom_resolutions[zoom]
+                            datastr += " --gain " + str(gain)
+
+                            if ev != 0:
+                                datastr += " --ev " + str(ev)
+
+                            if awb == 0:
+                                datastr += " --awbgains " + str(red/10) + "," + str(blue/10)
                             else:
-                                # Fallback: utiliser la résolution du ROI
-                                actual_vwidth = zws
-                                actual_vheight = zhs
+                                datastr += " --awb " + awbs[awb]
 
-                            # Ajouter --width et --height
-                            datastr += " --width " + str(actual_vwidth) + " --height " + str(actual_vheight)
-                        # Supprimé: ancien zoom manuel (zoom == 5)
-                        elif False and zoom == 5:
-                            # Zoom manuel : utiliser preview_width/height
-                            if igw/igh > 1.5:
-                                actual_vwidth = preview_width
-                                actual_vheight = int(preview_height * .75)
+                            datastr += " --metering " + meters[meter]
+                            datastr += " --saturation " + str(saturation/10)
+                            datastr += " --sharpness " + str(sharpness/10)
+                            datastr += " --denoise " + denoises[denoise]
+
+                            if vflip == 1:
+                                datastr += " --vflip"
+                            if hflip == 1:
+                                datastr += " --hflip"
+
+                            if Pi_Cam == 9 and os.path.exists("/home/" + Home_Files[0] + "/imx290a.json") and Pi == 5:
+                                datastr += " --tuning-file /home/" + Home_Files[0] + "/imx290a.json"
+                            if Pi_Cam == 10 and os.path.exists("/home/" + Home_Files[0] + "/imx585_lowlight.json") and Pi == 5:
+                                datastr += " --tuning-file /home/" + Home_Files[0] + "/imx585_lowlight.json"
+
+                            if show_cmds == 1:
+                                print(datastr)
+
+                            # Arrêter temporairement Picamera2 pour libérer la caméra
+                            picam2_was_paused = pause_picamera2()
+
+                            print(f"[DEBUG SER] Starting SER video recording: {vname}")
+                            print(f"[DEBUG SER] Temp file: {temp_video}")
+                            print(f"[DEBUG SER] Command: {datastr}")
+
+                            # Capturer la vidéo
+                            os.system(datastr)
+
+                            print(f"[DEBUG SER] Recording finished")
+                            print(f"[DEBUG SER] Temp file exists: {os.path.exists(temp_video)}")
+                            if os.path.exists(temp_video):
+                                print(f"[DEBUG SER] Temp file size: {os.path.getsize(temp_video)} bytes")
+
+                            # Convertir RAW unpacked (SRGGB16) en SER avec le script qui marche !
+                            text(0,0,6,2,1,"Converting SRGGB16 to RGB24...",int(fv*1.7),1)
+
+                            # Calculer le FPS réel
+                            if mode != 0:
+                                actual_fps = fps
                             else:
-                                actual_vwidth = preview_width
-                                actual_vheight = preview_height
-                            datastr += " --width " + str(actual_vwidth) + " --height " + str(actual_vheight)
-                        else:
-                            # Pas de zoom : utiliser les dimensions demandées
-                            actual_vwidth = vwidth
-                            actual_vheight = vheight
-                            # Spécifier le mode natif pour les résolutions natives de l'IMX585
-                            if Pi_Cam == 10 and vwidth == 1928 and vheight == 1090:
-                                datastr += " --mode 1928:1090:12"
-                            elif Pi_Cam == 10 and vwidth == 3856 and vheight == 2180:
-                                datastr += " --mode 3856:2180:12"
-                            datastr += " --width " + str(vwidth) + " --height " + str(vheight)
+                                speed7 = sspeed
+                                speed7 = max(speed7,int((1/fps)*1000000))
+                                actual_fps = max(1, min(120, int(1000000/speed7)))
 
-                        if mode != 0:
-                            datastr += " --framerate " + str(fps)
-                        else:
-                            speed7 = sspeed
-                            speed7 = max(speed7,int((1/fps)*1000000))
-                            datastr += " --framerate " + str(max(1, min(120, int(1000000/speed7))))
+                            # Vérifier que le fichier vidéo YUV420 existe
+                            if not os.path.exists(temp_video):
+                                text(0,0,6,2,1,"Error: YUV420 video file not created!",int(fv*1.7),1)
+                                time.sleep(2)
+                            else:
+                                # Avec résolutions standards, pas besoin de détection automatique
+                                # La résolution est exactement celle spécifiée dans actual_vwidth/actual_vheight
+                                print(f"[DEBUG SER] Converting with standard resolution: {actual_vwidth}×{actual_vheight}")
 
-                        if vpreview == 0:
-                            datastr += " -n "
-                        datastr += " --brightness " + str(brightness/100) + " --contrast " + str(contrast/100)
-                        
-                        if mode == 0:
-                            datastr += " --shutter " + str(sspeed)
-                        else:
-                            datastr += " --exposure " + modes[mode]
-                        
-                        datastr += " --gain " + str(gain)
-                        
-                        if ev != 0:
-                            datastr += " --ev " + str(ev)
-                        
-                        if awb == 0:
-                            datastr += " --awbgains " + str(red/10) + "," + str(blue/10)
-                        else:
-                            datastr += " --awb " + awbs[awb]
-                        
-                        datastr += " --metering " + meters[meter]
-                        datastr += " --saturation " + str(saturation/10)
-                        datastr += " --sharpness " + str(sharpness/10)
-                        datastr += " --denoise " + denoises[denoise]
-                        
-                        if vflip == 1:
-                            datastr += " --vflip"
-                        if hflip == 1:
-                            datastr += " --hflip"
-                        
-                        if Pi_Cam == 9 and os.path.exists("/home/" + Home_Files[0] + "/imx290a.json") and Pi == 5:
-                            datastr += " --tuning-file /home/" + Home_Files[0] + "/imx290a.json"
-                        if Pi_Cam == 10 and os.path.exists("/home/" + Home_Files[0] + "/imx585_lowlight.json") and Pi == 5:
-                            datastr += " --tuning-file /home/" + Home_Files[0] + "/imx585_lowlight.json"
+                                # Vérification optionnelle: calculer taille attendue du fichier
+                                file_size = os.path.getsize(temp_video)
+                                duration_sec = vlen / 1000.0
+                                num_frames = int(duration_sec * actual_fps)
+                                expected_size = int(actual_vwidth * actual_vheight * 1.5 * num_frames)
 
-                        if show_cmds == 1:
-                            print(datastr)
+                                print(f"[DEBUG SER] File size: {file_size} bytes, Expected: {expected_size} bytes, Frames: {num_frames}")
 
-                        # Arrêter temporairement Picamera2 pour libérer la caméra
-                        picam2_was_paused = pause_picamera2()
+                                if expected_size > 0 and abs(file_size - expected_size) / expected_size > 0.1:  # Plus de 10% de différence
+                                    print(f"[DEBUG SER] Warning: File size mismatch ({100*abs(file_size-expected_size)/expected_size:.1f}% difference)")
+                                    print(f"[DEBUG SER] This may indicate incorrect resolution or frame count")
 
-                        print(f"[DEBUG SER] Starting SER video recording: {vname}")
-                        print(f"[DEBUG SER] Temp file: {temp_video}")
-                        print(f"[DEBUG SER] Command: {datastr}")
+                                # Convertir YUV420 → SER avec la résolution standard
+                                text(0,0,6,2,1,f"Converting YUV420 to SER ({actual_vwidth}×{actual_vheight}) @ {actual_fps} fps...",int(fv*1.7),1)
 
-                        # Capturer la vidéo
-                        os.system(datastr)
+                                success, frame_count, msg = convert_yuv420_to_ser(
+                                    temp_video, vname, actual_vwidth, actual_vheight, fps=actual_fps
+                                )
 
-                        print(f"[DEBUG SER] Recording finished")
-                        print(f"[DEBUG SER] Temp file exists: {os.path.exists(temp_video)}")
-                        if os.path.exists(temp_video):
-                            print(f"[DEBUG SER] Temp file size: {os.path.getsize(temp_video)} bytes")
+                                if success:
+                                    text(0,0,6,2,1,vname + f" - {frame_count} frames @ {actual_fps} fps",int(fv*1.5),1)
+                                else:
+                                    text(0,0,6,2,1,f"Conversion error: {msg}",int(fv*1.7),1)
 
-                        # Convertir RAW unpacked (SRGGB16) en SER avec le script qui marche !
-                        text(0,0,6,2,1,"Converting SRGGB16 to RGB24...",int(fv*1.7),1)
+                                # Supprimer le fichier vidéo temporaire
+                                try:
+                                    os.remove(temp_video)
+                                except:
+                                    pass
 
-                        # Calculer le FPS réel
-                        if mode != 0:
-                            actual_fps = fps
-                        else:
-                            speed7 = sspeed
-                            speed7 = max(speed7,int((1/fps)*1000000))
-                            actual_fps = max(1, min(120, int(1000000/speed7)))
+                                time.sleep(2)
 
-                        # Vérifier que le fichier vidéo YUV420 existe
-                        if not os.path.exists(temp_video):
-                            text(0,0,6,2,1,"Error: YUV420 video file not created!",int(fv*1.7),1)
-                            time.sleep(2)
-                        else:
-                            # Avec résolutions standards, pas besoin de détection automatique
-                            # La résolution est exactement celle spécifiée dans actual_vwidth/actual_vheight
-                            print(f"[DEBUG SER] Converting with standard resolution: {actual_vwidth}×{actual_vheight}")
+                            # Redémarrer Picamera2 si il avait été mis en pause
+                            if picam2_was_paused:
+                                resume_picamera2()
 
-                            # Vérification optionnelle: calculer taille attendue du fichier
-                            file_size = os.path.getsize(temp_video)
-                            duration_sec = vlen / 1000.0
+                        elif ser_format in [1, 2]:
+                            # ==== MÉTHODE RGB888/XRGB8888 (Picamera2) ====
+                            format_name = ser_formats[ser_format]  # "RGB888" ou "XRGB8888"
+                            text(0,0,6,2,1,f"Recording {format_name} for SER...",int(fv*1.7),1)
+
+                            # Déterminer bytes_per_pixel selon le format
+                            bytes_per_pixel = 3 if ser_format == 1 else 4
+
+                            # Déterminer la résolution de capture selon le zoom (modes IMX585)
+                            if Pi_Cam == 10 and zoom > 0:
+                                # Utiliser les modes de crop hardware IMX585
+                                sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+                                if sensor_mode:
+                                    actual_vwidth, actual_vheight = sensor_mode
+                                else:
+                                    actual_vwidth, actual_vheight = vwidth, vheight
+                            else:
+                                # Pas de zoom ou autre caméra: utiliser résolution demandée
+                                actual_vwidth, actual_vheight = vwidth, vheight
+
+                            # Calculer le FPS réel
+                            if mode != 0:
+                                actual_fps = fps
+                            else:
+                                speed7 = sspeed
+                                speed7 = max(speed7,int((1/fps)*1000000))
+                                actual_fps = max(1, min(120, int(1000000/speed7)))
+
+                            # Calculer la durée et le nombre de frames
+                            # IMPORTANT: vlen est en SECONDES (pas en millisecondes)
+                            duration_sec = vlen  # vlen déjà en secondes
                             num_frames = int(duration_sec * actual_fps)
-                            expected_size = int(actual_vwidth * actual_vheight * 1.5 * num_frames)
 
-                            print(f"[DEBUG SER] File size: {file_size} bytes, Expected: {expected_size} bytes, Frames: {num_frames}")
+                            print(f"[DEBUG SER RGB] vlen={vlen}s, fps={actual_fps}, expected frames={num_frames}")
 
-                            if expected_size > 0 and abs(file_size - expected_size) / expected_size > 0.1:  # Plus de 10% de différence
-                                print(f"[DEBUG SER] Warning: File size mismatch ({100*abs(file_size-expected_size)/expected_size:.1f}% difference)")
-                                print(f"[DEBUG SER] This may indicate incorrect resolution or frame count")
+                            # Fichier temporaire pour le flux RGB brut
+                            temp_rgb = "/run/shm/ser_temp_rgb.raw"
 
-                            # Convertir YUV420 → SER avec la résolution standard
-                            text(0,0,6,2,1,f"Converting YUV420 to SER ({actual_vwidth}×{actual_vheight}) @ {actual_fps} fps...",int(fv*1.7),1)
+                            # Pause Picamera2 pour libérer la caméra
+                            picam2_was_paused = pause_picamera2()
 
-                            success, frame_count, msg = convert_yuv420_to_ser(
-                                temp_video, vname, actual_vwidth, actual_vheight, fps=actual_fps
-                            )
+                            # Créer une instance temporaire de Picamera2 pour la capture RGB
+                            temp_picam2 = None
 
-                            if success:
-                                text(0,0,6,2,1,vname + f" - {frame_count} frames @ {actual_fps} fps",int(fv*1.5),1)
-                            else:
-                                text(0,0,6,2,1,f"Conversion error: {msg}",int(fv*1.7),1)
-
-                            # Supprimer le fichier vidéo temporaire
                             try:
-                                os.remove(temp_video)
-                            except:
-                                pass
+                                # Importer Picamera2
+                                from picamera2 import Picamera2
 
-                            time.sleep(2)
+                                # Déterminer le fichier de tuning ISP (même que rpicam-vid)
+                                tuning_file = None
+                                if Pi_Cam == 9 and os.path.exists("/home/" + Home_Files[0] + "/imx290a.json") and Pi == 5:
+                                    tuning_file = "/home/" + Home_Files[0] + "/imx290a.json"
+                                elif Pi_Cam == 10 and os.path.exists("/home/" + Home_Files[0] + "/imx585_lowlight.json") and Pi == 5:
+                                    tuning_file = "/home/" + Home_Files[0] + "/imx585_lowlight.json"
 
-                        # Redémarrer Picamera2 si il avait été mis en pause
-                        if picam2_was_paused:
-                            resume_picamera2()
+                                # Créer une nouvelle instance temporaire avec le fichier de tuning
+                                print(f"[DEBUG SER RGB] Creating temporary Picamera2 instance on camera {camera}")
+                                if tuning_file:
+                                    print(f"[DEBUG SER RGB] Using tuning file: {tuning_file}")
+                                    temp_picam2 = Picamera2(camera, tuning=Picamera2.load_tuning_file(tuning_file))
+                                else:
+                                    temp_picam2 = Picamera2(camera)
+
+                                # Capturer directement en RGB (pas d'intermédiaire YUV pour éviter perte qualité)
+                                if ser_format == 1:
+                                    capture_format = "RGB888"
+                                else:
+                                    capture_format = "XRGB8888"
+
+                                # Configuration pour IMX585 avec mode sensor spécifique
+                                if Pi_Cam == 10:
+                                    sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+                                    config = temp_picam2.create_video_configuration(
+                                        main={"size": (actual_vwidth, actual_vheight), "format": capture_format},
+                                        raw={"size": sensor_mode} if sensor_mode else None
+                                    )
+                                else:
+                                    config = temp_picam2.create_video_configuration(
+                                        main={"size": (actual_vwidth, actual_vheight), "format": capture_format}
+                                    )
+
+                                # Appliquer les paramètres caméra
+                                if mode == 0:
+                                    config["controls"]["ExposureTime"] = sspeed
+                                    config["controls"]["AnalogueGain"] = gain
+
+                                temp_picam2.configure(config)
+
+                                # Appliquer les autres contrôles
+                                cam_controls = {}
+                                cam_controls["Brightness"] = brightness / 100.0
+                                cam_controls["Contrast"] = contrast / 100.0
+                                cam_controls["Saturation"] = saturation / 10.0
+                                cam_controls["Sharpness"] = sharpness / 10.0
+
+                                if awb == 0:
+                                    cam_controls["ColourGains"] = (red/10.0, blue/10.0)
+
+                                # Appliquer tous les contrôles (metering, denoise, etc.)
+                                # Note: AeMeteringMode et NoiseReductionMode sont dans le config, pas dans set_controls
+                                # On les applique via la configuration uniquement
+
+                                temp_picam2.set_controls(cam_controls)
+
+                                print(f"[DEBUG SER RGB] Starting {format_name} capture (ISP): {actual_vwidth}x{actual_vheight} @ {actual_fps} fps")
+                                print(f"[DEBUG SER RGB] Duration: {duration_sec}s ({num_frames} frames)")
+                                print(f"[DEBUG SER RGB] Using ISP tuning for correct colors")
+
+                                # Démarrer la capture
+                                temp_picam2.start()
+
+                                # Calculer l'intervalle entre frames
+                                frame_interval = 1.0 / actual_fps
+
+                                # Ouvrir le fichier temporaire pour écrire les frames RGB
+                                frame_count = 0
+
+                                # Importer numpy pour inverser les canaux
+                                import numpy as np
+
+                                with open(temp_rgb, "wb") as f:
+                                    start_time = time.time()
+                                    next_frame_time = start_time
+
+                                    while frame_count < num_frames:
+                                        current_time = time.time()
+
+                                        # Attendre le bon moment pour la prochaine frame
+                                        if current_time < next_frame_time:
+                                            time.sleep(next_frame_time - current_time)
+
+                                        # Capturer une frame (format dépend de capture_format)
+                                        frame = temp_picam2.capture_array()
+
+                                        # Inverser R et B (RGB → BGR ou BGR → RGB selon ce que SER attend)
+                                        # Picamera2 RGB888 donne RGB, mais SER attend BGR
+                                        if ser_format == 1:  # RGB888
+                                            # Inverser canaux: RGB → BGR
+                                            frame_bgr = frame[:, :, ::-1].copy()
+                                            f.write(frame_bgr.tobytes())
+                                        else:  # XRGB8888
+                                            # Inverser canaux R et B: XRGB → XBGR
+                                            frame_xbgr = frame.copy()
+                                            frame_xbgr[:, :, 1], frame_xbgr[:, :, 3] = frame[:, :, 3], frame[:, :, 1]  # Swap R et B
+                                            f.write(frame_xbgr.tobytes())
+
+                                        frame_count += 1
+                                        next_frame_time = start_time + (frame_count * frame_interval)
+
+                                        # Afficher progression tous les 10 frames
+                                        if frame_count % 10 == 0:
+                                            text(0,0,6,2,1,f"Recording {format_name}: {frame_count}/{num_frames} frames",int(fv*1.7),1)
+
+                                # Arrêter la capture
+                                temp_picam2.stop()
+                                temp_picam2.close()
+
+                                print(f"[DEBUG SER RGB] Capture finished: {frame_count} frames")
+                                print(f"[DEBUG SER RGB] Temp file size: {os.path.getsize(temp_rgb)} bytes")
+
+                                # Convertir RGB → SER
+                                text(0,0,6,2,1,f"Converting {format_name} to SER...",int(fv*1.7),1)
+
+                                success, final_frame_count, msg = convert_rgb888_to_ser(
+                                    temp_rgb, vname, actual_vwidth, actual_vheight,
+                                    fps=actual_fps, bytes_per_pixel=bytes_per_pixel
+                                )
+
+                                if success:
+                                    text(0,0,6,2,1,vname + f" - {final_frame_count} frames @ {actual_fps} fps",int(fv*1.5),1)
+                                else:
+                                    text(0,0,6,2,1,f"Conversion error: {msg}",int(fv*1.7),1)
+
+                                # Supprimer le fichier temporaire
+                                try:
+                                    os.remove(temp_rgb)
+                                except:
+                                    pass
+
+                                time.sleep(2)
+
+                            except Exception as e:
+                                print(f"[ERROR] RGB capture failed: {e}")
+                                import traceback
+                                traceback.print_exc()
+                                text(0,0,6,2,1,f"RGB capture error: {str(e)}",int(fv*1.7),1)
+                                time.sleep(2)
+
+                            finally:
+                                # Nettoyer l'instance temporaire si elle existe
+                                if temp_picam2 is not None:
+                                    try:
+                                        temp_picam2.stop()
+                                    except:
+                                        pass
+                                    try:
+                                        temp_picam2.close()
+                                    except:
+                                        pass
+
+                                # Redémarrer Picamera2 en mode preview
+                                if picam2_was_paused:
+                                    resume_picamera2()
 
 
-                    elif codecs2[codec] != 'raw' and codecs[codec] != 'ser':
+                    elif codecs2[codec] != 'raw' and not codecs[codec].startswith('ser_'):
                         # Code existant pour les autres formats (sauf SER et RAW)
                         if lver != "bookwo" and lver != "trixie":
                             datastr = "libcamera-vid"
 
 
-                    if codecs2[codec] != 'raw' and codecs[codec] != 'ser':
+                    if codecs2[codec] != 'raw' and not codecs[codec].startswith('ser_'):
                         if lver != "bookwo" and lver != "trixie":
                             datastr = "libcamera-vid"
                         else:
@@ -6697,8 +7201,8 @@ while True:
                             datastr = "rpicam-raw"
                         datastr += " --camera " + str(camera) + " -t " + str(vlen * 1000) + " -o " + vname + " --framerate " + str(fps)
 
-                    # Le code ci-dessous ne doit PAS s'exécuter pour le codec 'ser' qui construit sa propre commande
-                    if codecs[codec] != 'ser':
+                    # Le code ci-dessous ne doit PAS s'exécuter pour les codecs 'ser_*' qui construisent leur propre commande
+                    if not codecs[codec].startswith('ser_'):
                         if vpreview == 0:
                             datastr += " -n "
                         datastr += " --brightness " + str(brightness/100) + " --contrast " + str(contrast/100)
@@ -6759,16 +7263,30 @@ while True:
                             datastr += " --mode 2304:1296:10 --width 2304 --height 1296"
                         elif Pi_Cam == 3 and vwidth == 2028 and codec == 0:
                             datastr += " --mode 2028:1520:10 --width 2028 --height 1520"
-                        elif Pi_Cam == 10 and vwidth == 1928:
-                            datastr += " --mode 1928:1090:12 --width 1928 --height 1090"
-                        elif Pi_Cam == 10 and vwidth == 3856:
-                            datastr += " --mode 3856:2180:12 --width 3856 --height 2180"
                         elif Pi_Cam == 10:
-                            # Pour IMX585, forcer le mode natif le plus proche
-                            if vwidth * vheight <= 2100000:  # Résolution <= 1928x1090
-                                datastr += " --mode 1928:1090:12 --width 1928 --height 1090"
+                            # Déterminer le mode sensor basé sur vwidth/vheight ou zoom
+                            if zoom > 0:
+                                sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
                             else:
-                                datastr += " --mode 3856:2180:12 --width 3856 --height 2180"
+                                # Pas de zoom: choisir mode basé sur résolution demandée
+                                # Mapping résolution → mode
+                                if vwidth == 3856 and vheight == 2180:
+                                    sensor_mode = (3856, 2180)  # Mode 1 native
+                                elif vwidth == 2880 and vheight == 2160:
+                                    sensor_mode = (2880, 2160)  # Mode 2 crop
+                                elif vwidth == 1920 and vheight == 1080:
+                                    sensor_mode = (1920, 1080)  # Mode 3 crop
+                                elif vwidth == 1280 and vheight == 720:
+                                    sensor_mode = (1280, 720)   # Mode 4 crop
+                                elif vwidth == 800 and vheight == 600:
+                                    sensor_mode = (800, 600)    # Mode 5 crop
+                                else:
+                                    # Fallback: utiliser mode binning
+                                    sensor_mode = (1928, 1090)  # Mode 0 binning
+
+                            if sensor_mode:
+                                datastr += f" --mode {sensor_mode[0]}:{sensor_mode[1]}:12"
+                            datastr += f" --width {vwidth} --height {vheight}"
                         else:
                             datastr += " --width " + str(vwidth) + " --height " + str(vheight)
 
@@ -6824,7 +7342,7 @@ while True:
                         if (Pi_Cam == 3 and v3_af == 1) and v3_f_range != 0:
                             datastr += " --autofocus-range " + v3_f_ranges[v3_f_range]
                         if Pi_Cam == 3 or Pi == 5:
-                            datastr += " --hdr " + v3_hdrs[v3_hdr]
+                            datastr += " --hdr " + v3_hdrs_cli[v3_hdr]
                         datastr += " -p 0,0," + str(preview_width) + "," + str(preview_height)
                         # Ajouter le fichier de sortie (-o) APRES tous les autres paramètres
                         datastr += " -o " + vname
@@ -7005,16 +7523,30 @@ while True:
                         datastr += " --mode 2304:1296:10 --width 2304 --height 1296"
                     elif Pi_Cam == 3 and vwidth == 2028 and codec == 0:
                         datastr += " --mode 2028:1520:10 --width 2028 --height 1520"
-                    elif Pi_Cam == 10 and vwidth == 1928:
-                        datastr += " --mode 1928:1090:12 --width 1928 --height 1090"
-                    elif Pi_Cam == 10 and vwidth == 3856:
-                        datastr += " --mode 3856:2180:12 --width 3856 --height 2180"
                     elif Pi_Cam == 10:
-                        # Pour IMX585, forcer le mode natif le plus proche
-                        if vwidth * vheight <= 2100000:  # Résolution <= 1928x1090
-                            datastr += " --mode 1928:1090:12 --width 1928 --height 1090"
+                        # Déterminer le mode sensor basé sur vwidth/vheight ou zoom
+                        if zoom > 0:
+                            sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
                         else:
-                            datastr += " --mode 3856:2180:12 --width 3856 --height 2180"
+                            # Pas de zoom: choisir mode basé sur résolution demandée
+                            # Mapping résolution → mode
+                            if vwidth == 3856 and vheight == 2180:
+                                sensor_mode = (3856, 2180)  # Mode 1 native
+                            elif vwidth == 2880 and vheight == 2160:
+                                sensor_mode = (2880, 2160)  # Mode 2 crop
+                            elif vwidth == 1920 and vheight == 1080:
+                                sensor_mode = (1920, 1080)  # Mode 3 crop
+                            elif vwidth == 1280 and vheight == 720:
+                                sensor_mode = (1280, 720)   # Mode 4 crop
+                            elif vwidth == 800 and vheight == 600:
+                                sensor_mode = (800, 600)    # Mode 5 crop
+                            else:
+                                # Fallback: utiliser mode binning
+                                sensor_mode = (1928, 1090)  # Mode 0 binning
+
+                        if sensor_mode:
+                            datastr += f" --mode {sensor_mode[0]}:{sensor_mode[1]}:12"
+                        datastr += f" --width {vwidth} --height {vheight}"
                     else:
                         datastr += " --width " + str(vwidth) + " --height " + str(vheight)
                     if mode == 0:
@@ -7059,7 +7591,7 @@ while True:
                     if (Pi_Cam == 3 and v3_af == 1) and v3_f_range != 0:
                         datastr += " --autofocus-range " + v3_f_ranges[v3_f_range]
                     if Pi_Cam == 3 or Pi == 5:
-                        datastr += " --hdr " + v3_hdrs[v3_hdr]
+                        datastr += " --hdr " + v3_hdrs_cli[v3_hdr]
                     datastr += " -p 0,0," + str(preview_width) + "," + str(preview_height)
                     # ROI déjà ajouté plus haut (après brightness/contrast) pour respecter l'ordre de Test2
                     if stream_type == 2:
@@ -7182,7 +7714,7 @@ while True:
                         if ((Pi_Cam == 3 and v3_af == 1) or (((Pi_Cam == 5 and v5_af == 1) or Pi_Cam == 6)) or Pi_Cam == 8) and zoom == 0:
                             datastr += " --autofocus-window " + str(fxx) + "," + str(fxy) + "," + str(fxz) + "," + str(fxz)
                         if Pi_Cam == 3 or Pi == 5:
-                            datastr += " --hdr " + v3_hdrs[v3_hdr]
+                            datastr += " --hdr " + v3_hdrs_cli[v3_hdr]
                         if (Pi_Cam == 6 or Pi_Cam == 8) and mode == 0 and button_pos == 3:
                             datastr += " --width 4624 --height 3472 " # 16MP superpixel mode for higher light sensitivity
                         elif (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8):
@@ -7440,8 +7972,8 @@ while True:
                                     datastr += " --autofocus-mode " + v3_f_modes[v3_f_mode] + " --autofocus-on-capture"
                                 if ((Pi_Cam == 3 and v3_af == 1) or (((Pi_Cam == 5 and v5_af == 1) or Pi_Cam == 6)) or Pi_Cam == 8)  and zoom == 0:
                                     datastr += " --autofocus-window " + str(fxx) + "," + str(fxy) + "," + str(fxz) + "," + str(fxz)
-                                if Pi_Cam == 3:
-                                    datastr += " --hdr " + v3_hdrs[v3_hdr]
+                                if Pi_Cam == 3 or Pi == 5:
+                                    datastr += " --hdr " + v3_hdrs_cli[v3_hdr]
                                 if (Pi_Cam == 6 or Pi_Cam == 8) and mode == 0 and button_pos == 3:
                                     datastr += " --width 4624 --height 3472 " # 16MP superpixel mode for higher light sensitivity
                                 elif (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8):
@@ -7665,7 +8197,7 @@ while True:
                         if ((Pi_Cam == 3 and v3_af == 1) or (((Pi_Cam == 5 and v5_af == 1) or Pi_Cam == 6) ) or Pi_Cam == 8) and zoom == 0:
                             datastr += " --autofocus-window " + str(fxx) + "," + str(fxy) + "," + str(fxz) + "," + str(fxz)
                         if Pi_Cam == 3 or Pi == 5:
-                            datastr += " --hdr " + v3_hdrs[v3_hdr]
+                            datastr += " --hdr " + v3_hdrs_cli[v3_hdr]
                         # Zoom fixe 1x à 6x
                         if zoom > 0 and zoom <= 5 and zoom != 3:  # Zoom 3 désactivé
                             # Arrondir à un nombre PAIR pour compatibilité formats vidéo
@@ -7745,7 +8277,7 @@ while True:
                                 'gain': gain,
                                 'red': red / 10,  # Divisé par 10 pour ColourGains
                                 'blue': blue / 10,
-                                'raw_format': raw_formats[raw_format]  # YUV420/SRGGB12/SRGGB16
+                                'raw_format': raw_formats[raw_format]  # YUV420/XRGB8888/SRGGB12/SRGGB16
                             }
                             # Utiliser le module avancé
                             livestack = create_advanced_livestack_session(camera_params)
@@ -7808,15 +8340,19 @@ while True:
 
                                 # ISP (Image Signal Processor)
                             )
-                            # Debug ISP avant passage à configure
-                            print(f"[DEBUG AVANT CONFIGURE] isp_enable variable = {isp_enable} (type: {type(isp_enable)})")
-                            print(f"[DEBUG AVANT CONFIGURE] isp_config_path variable = {isp_config_path}")
 
-                            # Passer les paramètres ISP séparément après la première configuration
-                            livestack.configure(
-                                isp_enable=bool(isp_enable),
-                                isp_config_path=isp_config_path if isp_enable else None
-                            )
+                        # Debug ISP avant passage à configure (EN DEHORS du if pour être toujours exécuté)
+                        print(f"[DEBUG AVANT CONFIGURE] isp_enable variable = {isp_enable} (type: {type(isp_enable)})")
+                        print(f"[DEBUG AVANT CONFIGURE] isp_config_path variable = {isp_config_path}")
+
+                        # Passer les paramètres ISP ET video_format séparément (À CHAQUE activation)
+                        # Mapper raw_format → video_format pour que l'ISP soit appliqué correctement
+                        video_format_map = {0: 'yuv420', 1: 'xrgb8888', 2: 'raw12', 3: 'raw16'}
+                        livestack.configure(
+                            isp_enable=bool(isp_enable),
+                            isp_config_path=isp_config_path if isp_enable else None,
+                            video_format=video_format_map.get(raw_format, 'yuv420')  # ✅ Ajouté pour ISP
+                        )
 
                         # Mettre à jour le format RAW actuel avant de démarrer
                         livestack.camera_params['raw_format'] = raw_formats[raw_format]
@@ -7893,7 +8429,7 @@ while True:
                                 'gain': gain,
                                 'red': red / 10,  # Divisé par 10 pour ColourGains
                                 'blue': blue / 10,
-                                'raw_format': raw_formats[raw_format]  # YUV420/SRGGB12/SRGGB16
+                                'raw_format': raw_formats[raw_format]  # YUV420/XRGB8888/SRGGB12/SRGGB16
                             }
                             luckystack = create_advanced_livestack_session(camera_params)
 
@@ -8494,14 +9030,14 @@ while True:
                 time.sleep(.25)
 
               elif button_row == 7:
-                # RAW Format (YUV420/SRGGB12/SRGGB16)
+                # RAW Format (YUV420/XRGB8888/SRGGB12/SRGGB16)
                 if alt_dis == 0 and mousex < preview_width + (bw/2):
                     raw_format -= 1
                     if raw_format < 0:
-                        raw_format = 2
+                        raw_format = 3
                 else:
                     raw_format += 1
-                    if raw_format > 2:
+                    if raw_format > 3:
                         raw_format = 0
                 text(0,7,3,1,1,raw_formats[raw_format],fv,7)
                 draw_Vbar(0,7,greyColor,'raw_format',raw_format)
@@ -9092,10 +9628,11 @@ while True:
                     v3_hdr  = max(v3_hdr ,0)
                 else:
                     v3_hdr  +=1
-                    v3_hdr = min(v3_hdr ,3)
+                    v3_hdr = min(v3_hdr, 4)  # Correction: permettre tous les modes HDR (0-4) incluant "Night" et "Clear HDR"
 
                 text(0,7,5,0,1,"HDR",fv,10)
                 text(0,7,3,1,1,v3_hdrs[v3_hdr],fv,10)
+                draw_bar(0,7,lgrnColor,'v3_hdr',v3_hdr)
                 time.sleep(0.25)
                 restart = 1
 
@@ -9106,10 +9643,11 @@ while True:
                     v3_hdr  = max(v3_hdr ,0)
                 else:
                     v3_hdr  +=1
-                    v3_hdr = min(v3_hdr ,3)  # Correction: permettre tous les modes HDR (0-3) incluant "sensor"
+                    v3_hdr = min(v3_hdr, 4)  # Correction: permettre tous les modes HDR (0-4) incluant "Night" et "Clear HDR"
 
                 text(0,7,5,0,1,"HDR",fv,10)
                 text(0,7,3,1,1,v3_hdrs[v3_hdr],fv,10)
+                draw_bar(0,7,lgrnColor,'v3_hdr',v3_hdr)
                 time.sleep(0.25)
                 restart = 1
 
@@ -9301,6 +9839,8 @@ while True:
                                 vfps = 90
                 elif Pi_Cam == 9:
                     vfps = v9_max_fps[vformat]
+                elif Pi_Cam == 10:
+                    vfps = v10_max_fps[vformat]
                 elif Pi_Cam == 15:
                     vfps = v15_max_fps[vformat]
                 else:
@@ -9371,6 +9911,8 @@ while True:
                                 vfps = 90
                 elif Pi_Cam == 9:
                     vfps = v9_max_fps[vformat]
+                elif Pi_Cam == 10:
+                    vfps = v10_max_fps[vformat]
                 elif Pi_Cam == 15:
                     vfps = v15_max_fps[vformat]
                 else:
@@ -9434,6 +9976,8 @@ while True:
                                 vfps = 90
                 elif Pi_Cam == 9:
                     vfps = v9_max_fps[vformat]
+                elif Pi_Cam == 10:
+                    vfps = v10_max_fps[vformat]
                 elif Pi_Cam == 15:
                     vfps = v15_max_fps[vformat]
                 else:
@@ -9477,6 +10021,8 @@ while True:
                                 vfps = 90
                 elif Pi_Cam == 9:
                     vfps = v9_max_fps[vformat]
+                elif Pi_Cam == 10:
+                    vfps = v10_max_fps[vformat]
                 elif Pi_Cam == 15:
                     vfps = v15_max_fps[vformat]
                 else:
