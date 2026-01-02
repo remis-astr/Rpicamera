@@ -343,7 +343,7 @@ class OutputConfig:
     """Configuration des sorties"""
 
     # Répertoire
-    output_directory: str = "/media/admin/THKAILAR/Stacks/"
+    output_directory: str = "/home/admin/stacks/"
 
     # FITS
     auto_fits: bool = True
@@ -646,7 +646,7 @@ class LegacyStackingConfig:
 
         self.preview_refresh_interval = 5
         self.save_dng_mode = "accepted"
-        self.output_directory = "/media/admin/THKAILAR/Stacks/"
+        self.output_directory = "/home/admin/stacks/"
         self.save_rejected_list = True
         self.max_stars_alignment = 50
         self.num_stacked = 0

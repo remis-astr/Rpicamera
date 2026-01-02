@@ -363,16 +363,23 @@ class QualityScorer:
 class FrameAligner:
     """
     Aligneur d'images rapide pour Lucky Imaging
-    
+
     Utilise la corrélation de phase (FFT) pour un alignement sub-pixel rapide.
     """
-    
+
     def __init__(self, config: LuckyConfig):
         self.config = config
         self.reference: Optional[np.ndarray] = None
+        self.reference_is_explicit: bool = False  # Track si référence définie par update_alignment_reference()
     
-    def set_reference(self, image: np.ndarray):
-        """Définit l'image de référence"""
+    def set_reference(self, image: np.ndarray, explicit: bool = False):
+        """
+        Définit l'image de référence
+
+        Args:
+            image: Image de référence
+            explicit: True si définie par update_alignment_reference() (préserve entre buffers)
+        """
         if len(image.shape) == 3:
             self.reference = cv2.cvtColor(
                 image.astype(np.uint8) if image.dtype != np.uint8 else image,
@@ -380,9 +387,10 @@ class FrameAligner:
             )
         else:
             self.reference = image.astype(np.uint8) if image.dtype != np.uint8 else image
-        
+
         # Extraire ROI pour alignement
         self.reference = self._extract_align_roi(self.reference)
+        self.reference_is_explicit = explicit
     
     def _extract_align_roi(self, image: np.ndarray) -> np.ndarray:
         """Extrait ROI central pour alignement (utilise le même ROI que le scoring)"""
@@ -511,8 +519,10 @@ class FrameAligner:
             return 0.0, 0.0
     
     def reset(self):
-        """Réinitialise la référence"""
-        self.reference = None
+        """Réinitialise la référence (sauf si explicite)"""
+        if not self.reference_is_explicit:
+            self.reference = None
+            self.reference_is_explicit = False
 
 
 class LuckyImagingStacker:
@@ -713,6 +723,7 @@ class LuckyImagingStacker:
 
         # Vider le buffer pour le prochain cycle
         self.buffer.clear()
+        # Reset aligner (mais préserve référence explicite si définie par update_alignment_reference)
         self.aligner.reset()
 
         # OPTIMISATION : Forcer garbage collection immédiat pour libérer RAM
@@ -723,19 +734,31 @@ class LuckyImagingStacker:
         return result
     
     def _align_frames(self, frames: List[np.ndarray]) -> List[np.ndarray]:
-        """Aligne une liste de frames sur la première"""
+        """
+        Aligne une liste de frames
+
+        Si une référence explicite existe (via update_alignment_reference),
+        aligne TOUTES les frames sur cette référence pour maintenir cohérence entre buffers.
+        Sinon, utilise la première frame du buffer comme référence.
+        """
         if not frames:
             return frames
-        
-        # Utiliser la première frame comme référence
-        self.aligner.set_reference(frames[0])
-        
-        aligned = [frames[0]]  # La référence est déjà alignée
-        
-        for frame in frames[1:]:
+
+        # Si pas de référence explicite, utiliser la première frame
+        if not self.aligner.reference_is_explicit:
+            self.aligner.set_reference(frames[0], explicit=False)
+            aligned = [frames[0]]  # La référence est déjà alignée
+            start_idx = 1
+        else:
+            # Référence explicite définie : aligner TOUTES les frames (y compris la première)
+            aligned = []
+            start_idx = 0
+            print(f"[LUCKY ALIGN] Utilisation référence explicite pour aligner {len(frames)} frames")
+
+        for frame in frames[start_idx:]:
             aligned_frame, params = self.aligner.align(frame)
             aligned.append(aligned_frame)
-        
+
         return aligned
     
     def _stack_frames(self, frames: List[np.ndarray]) -> np.ndarray:
@@ -924,8 +947,9 @@ class LuckyImagingStacker:
             reference_image: Nouvelle image de référence (résultat cumulatif)
         """
         if self.config.align_enabled:
-            self.aligner.set_reference(reference_image)
-            print(f"[LUCKY] Référence d'alignement mise à jour (dérive compensée)")
+            # Marquer comme référence explicite pour préserver entre buffers
+            self.aligner.set_reference(reference_image, explicit=True)
+            print(f"[LUCKY] Référence d'alignement mise à jour (dérive compensée entre buffers)")
 
     def reset(self):
         """Réinitialise le stacker (garde la config)"""
@@ -963,7 +987,7 @@ class RPiCameraLuckyImaging:
     - Statistiques pour OSD
     """
     
-    def __init__(self, output_dir: str = "/media/admin/THKAILAR/Lucky"):
+    def __init__(self, output_dir: str = "/home/admin/stacks/lucky"):
         self.output_dir = output_dir
         self.stacker: Optional[LuckyImagingStacker] = None
         self.config = LuckyConfig()

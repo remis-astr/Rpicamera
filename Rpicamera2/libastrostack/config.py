@@ -93,7 +93,7 @@ class StackingConfig:
 
         # Paramètres sauvegarde DNG (mode hybride)
         self.save_dng_mode = "accepted"   # "none", "accepted", "all"
-        self.output_directory = "/media/admin/THKAILAR/Stacks/"
+        self.output_directory = "/home/admin/stacks/"
         self.save_rejected_list = True
 
         # Paramètres alignement avancés
