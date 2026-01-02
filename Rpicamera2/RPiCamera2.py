@@ -1021,7 +1021,7 @@ con_file    = "PiLCConfig104.txt"
 # setup directories
 Home_Files  = []
 Home_Files.append(os.getlogin())
-pic_dir     = "/media/admin/THKAILAR/Pictures/"
+pic_dir     = "/home/" + Home_Files[0] + "/images/"
 vid_dir     = "/home/" + Home_Files[0]+ "/" + vid + "/"
 # Lire le fichier de config dans le même répertoire que le programme
 script_dir  = os.path.dirname(os.path.abspath(__file__))
@@ -1480,7 +1480,7 @@ livestack_limits = [
 ]
 
 # check config_file exists, if not then write default values
-titles = ['mode','speed','gain','brightness','contrast','frame','red','blue','ev','vlen','fps','vformat','codec','ser_format','tinterval','tshots','extn','zx','zy','zoom','saturation',
+titles = ['mode','speed','gain','brightness','contrast','frame','red','blue','ev','vlen','fps','vformat','codec','tinterval','tshots','extn','zx','zy','zoom','saturation',
           'meter','awb','sharpness','denoise','quality','profile','level','histogram','histarea','v3_f_speed','v3_f_range','rotate','IRF','str_cap','v3_hdr','raw_format','vflip','hflip',
           'stretch_p_low','stretch_p_high','stretch_factor','stretch_preset','ghs_D','ghs_b','ghs_SP','ghs_LP','ghs_HP','ghs_preset',
           'ls_preview_refresh','ls_alignment_mode','ls_enable_qc','ls_max_fwhm','ls_min_sharpness','ls_max_drift','ls_min_stars',
@@ -1490,7 +1490,7 @@ titles = ['mode','speed','gain','brightness','contrast','frame','red','blue','ev
           'focus_method','star_metric','snr_display','metrics_interval','ls_lucky_save_progress','isp_enable',
           'allsky_mode','allsky_mean_target','allsky_mean_threshold','allsky_video_fps','allsky_max_gain','allsky_apply_stretch','allsky_cleanup_jpegs',
           'ls_save_progress','ls_save_final','ls_lucky_save_final']
-points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat,codec,ser_format,tinterval,tshots,extn,zx,zy,zoom,saturation,
+points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat,codec,tinterval,tshots,extn,zx,zy,zoom,saturation,
           meter,awb,sharpness,denoise,quality,profile,level,histogram,histarea,v3_f_speed,v3_f_range,rotate,IRF,str_cap,v3_hdr,raw_format,vflip,hflip,
           stretch_p_low,stretch_p_high,stretch_factor,stretch_preset,ghs_D,ghs_b,ghs_SP,ghs_LP,ghs_HP,ghs_preset,
           ls_preview_refresh,ls_alignment_mode,ls_enable_qc,ls_max_fwhm,ls_min_sharpness,ls_max_drift,ls_min_stars,
@@ -7789,7 +7789,10 @@ while True:
                                     count = len(counts)
                                     counts.sort()
                                     for event in pygame.event.get():
-                                        if (event.type == MOUSEBUTTONUP):
+                                        if event.type == QUIT:
+                                            # Ignorer QUIT pendant timelapse (écran en veille, etc.)
+                                            pass
+                                        elif (event.type == MOUSEBUTTONUP):
                                             mousex, mousey = event.pos
                                             # stop timelapse
                                             if mousex > preview_width:
@@ -7832,7 +7835,10 @@ while True:
                                     click_event = pygame.event.Event(type, {"button": 1, "pos": (0,0)})
                                 pygame.event.post(click_event)
                             for event in pygame.event.get():
-                                if (event.type == MOUSEBUTTONUP):
+                                if event.type == QUIT:
+                                    # Ignorer QUIT pendant timelapse (écran en veille, etc.)
+                                    pass
+                                elif (event.type == MOUSEBUTTONUP):
                                     mousex, mousey = event.pos
                                     # stop timelapse or capture STILL
                                     if mousex > preview_width:
@@ -8028,7 +8034,10 @@ while True:
                                         pygame.display.update()
                                         show == 1
                                     for event in pygame.event.get():
-                                        if (event.type == MOUSEBUTTONUP):
+                                        if event.type == QUIT:
+                                            # Ignorer QUIT pendant timelapse (écran en veille, etc.)
+                                            pass
+                                        elif (event.type == MOUSEBUTTONUP):
                                             mousex, mousey = event.pos
                                             # stop timelapse
                                             if mousex > preview_width:
@@ -8039,7 +8048,7 @@ while True:
                                                 text(0,2,3,1,1,str(tshots),fv,0)
                                                 stop = 1
                                                 count = tshots
-                                        
+
                                 old_count = count
 
                                 # ALLSKY: Appliquer stretch si activé
@@ -8063,7 +8072,10 @@ while True:
                                 td = timedelta(seconds=tdur)
                             time.sleep(0.1)
                             for event in pygame.event.get():
-                                if (event.type == MOUSEBUTTONUP):
+                                if event.type == QUIT:
+                                    # Ignorer QUIT pendant timelapse (écran en veille, etc.)
+                                    pass
+                                elif (event.type == MOUSEBUTTONUP):
                                     mousex, mousey = event.pos
                                     # stop timelapse
                                     if mousex > preview_width:
@@ -8588,7 +8600,7 @@ while True:
                     if video_limits[f] == 'zoom':
                         pmin = video_limits[f+1]
                         pmax = video_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     zoom = int(((mousex-preview_width) / bw) * (pmax+1-pmin))###
                     if zoom == 3:
                         zoom = 4  # Sauter le zoom 3
@@ -8690,7 +8702,7 @@ while True:
                             pmin = video_limits[f+1]
                             pmax = video_limits[f+2]
                 # arducam manual focus slider
-                if (mousex > preview_width and mousey < ((button_row)*bh) + (bh/3)) and ((Pi_Cam == 5 and v5_af == 1) or Pi_Cam == 6 or Pi_Cam == 8) and foc_man == 1:
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + (bh/3)) and ((Pi_Cam == 5 and v5_af == 1) or Pi_Cam == 6 or Pi_Cam == 8) and foc_man == 1:
                     focus = int(((mousex-preview_width) / bw) * pmax)
                     if Pi_Cam == 5:
                         draw_Vbar(0,5,dgryColor,'v5_focus',focus)
@@ -8715,7 +8727,7 @@ while True:
                     restart = 1
                     text(0,5,3,0,1,'<<< ' + str(focus) + ' >>>',fv,0)
                 # Pi v3 manual focus slider
-                elif (mousex > preview_width and mousey < ((button_row)*bh) + (bh/3)) and (Pi_Cam == 3 and v3_af == 1) and foc_man == 1:
+                elif (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + (bh/3)) and (Pi_Cam == 3 and v3_af == 1) and foc_man == 1:
                     v3_focus = int(((mousex-preview_width) / bw) * (pmax+1-pmin)) + pmin
                     draw_Vbar(0,5,dgryColor,'v3_focus',v3_focus-pmin)
                     fd = 1/(v3_focus/100)
@@ -8884,7 +8896,7 @@ while True:
                     if still_limits[f] == 'v3_f_speed':
                         pmin = still_limits[f+1]
                         pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     v3_f_speed = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 elif (mousey > preview_height + bh  and mousey < preview_height + bh + int(bh/3)) and alt_dis == 1:
                     v3_f_speed = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
@@ -8908,7 +8920,7 @@ while True:
                     if video_limits[f] == 'v3_f_range':
                         pmin = video_limits[f+1]
                         pmax = video_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     v3_f_range = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 elif (mousey > preview_height + bh  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
                     v3_f_range = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
@@ -8961,7 +8973,7 @@ while True:
                     if still_limits[f] == 'histogram':
                         pmin = still_limits[f+1]
                         pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     histogram = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 elif (mousey > preview_height + bh  and mousey < preview_height + bh + int(bh/3)) and alt_dis == 1:
                     histogram = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
@@ -8984,7 +8996,7 @@ while True:
                     if video_limits[f] == 'histarea':
                         pmin = video_limits[f+1]
                         pmax = video_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     histarea = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                     histarea = max(histarea,pmin)
                 elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
@@ -9173,7 +9185,7 @@ while True:
                     if still_limits[f] == 'mode':
                         pmin = still_limits[f+1]
                         pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     mode = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
                     mode = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
@@ -9238,7 +9250,7 @@ while True:
                         if still_limits[f] == 'speed':
                             pmin = still_limits[f+1]
                             pmax = max_speed
-                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                         speed = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                     elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
                         speed = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
@@ -9277,7 +9289,7 @@ while True:
                         if still_limits[f] == 'ev':
                             pmin = still_limits[f+1]
                             pmax = still_limits[f+2]
-                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                         ev = int(((mousex-preview_width) / bw) * (pmax+1-pmin)) + pmin 
                     elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
                         ev = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin)) + pmin
@@ -9301,26 +9313,28 @@ while True:
                     if still_limits[f] == 'gain':
                         pmin = still_limits[f+1]
                         pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
-                    slider_val = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                if (mousex > preview_width and mousex < preview_width + bw and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
+                    slider_val = min(int(((mousex-preview_width) / bw) * (pmax+1-pmin)), pmax)
                     gain = slider_to_gain_nonlinear(slider_val, pmax)
                 elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
-                    slider_val = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
+                    slider_val = min(int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin)), pmax)
                     gain = slider_to_gain_nonlinear(slider_val, pmax)
                 elif (mousey > preview_height * .75  and mousey < preview_height * .75 + int(bh/3)) and alt_dis == 2:
-                    slider_val = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
+                    slider_val = min(int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin)), pmax)
                     gain = slider_to_gain_nonlinear(slider_val, pmax)
                 else:
                     if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        # Bouton - : ajuster avec courbe non-linéaire
-                        slider_pos = gain_to_slider_nonlinear(gain, pmax)
-                        slider_pos = max(slider_pos - 1, pmin)
-                        gain = slider_to_gain_nonlinear(slider_pos, pmax)
+                        # Bouton - : décrémenter directement le gain
+                        if gain <= 1000:
+                            gain = max(gain - 1, 1)
+                        else:
+                            gain = max(gain - 10, 1000)
                     else:
-                        # Bouton + : ajuster avec courbe non-linéaire
-                        slider_pos = gain_to_slider_nonlinear(gain, pmax)
-                        slider_pos = min(slider_pos + 1, pmax)
-                        gain = slider_to_gain_nonlinear(slider_pos, pmax)
+                        # Bouton + : incrémenter directement le gain
+                        if gain < 1000:
+                            gain = min(gain + 1, pmax)
+                        else:
+                            gain = min(gain + 10, pmax)
                 if gain > 0:
                     text(0,3,5,0,1,"Gain    A/D",ft,10)
                     if gain <= mag:
@@ -9343,7 +9357,7 @@ while True:
                     if still_limits[f] == 'brightness':
                         pmin = still_limits[f+1]
                         pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     brightness = int(((mousex-preview_width) / bw) * (pmax+1-pmin)) + pmin 
                 elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
                     brightness = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin)) + pmin
@@ -9367,7 +9381,7 @@ while True:
                     if still_limits[f] == 'contrast':
                         pmin = still_limits[f+1]
                         pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     contrast = int(((mousex-preview_width) / bw) * (pmax+1-pmin)) 
                 elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
                     contrast = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
@@ -9391,7 +9405,7 @@ while True:
                     if still_limits[f] == 'awb':
                         pmin = still_limits[f+1]
                         pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     awb = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 elif (mousey > preview_height and mousey < preview_height + int(bh/3)) and alt_dis == 1:
                     awb = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
@@ -9416,7 +9430,7 @@ while True:
                     if still_limits[f] == 'blue':
                         pmin = still_limits[f+1]
                         pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     blue = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
                     blue = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
@@ -9441,7 +9455,7 @@ while True:
                     if still_limits[f] == 'red':
                         pmin = still_limits[f+1]
                         pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     red = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 elif (mousey > preview_height + bh  and mousey < preview_height + bh + int(bh/3)) and alt_dis == 1:
                     red = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
@@ -9472,7 +9486,7 @@ while True:
                     if still_limits[f] == 'meter':
                         pmin = still_limits[f+1]
                         pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     meter = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 elif (mousey > preview_height + bh  and mousey < preview_height + bh + int(bh/3)) and alt_dis == 1:
                     meter = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
@@ -9496,7 +9510,7 @@ while True:
                     if still_limits[f] == 'quality':
                         pmin = still_limits[f+1]
                         pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     quality = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 elif (mousey > preview_height + bh  and mousey < preview_height + bh + int(bh/3)) and alt_dis == 1:
                     quality = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
@@ -9520,7 +9534,7 @@ while True:
                     if still_limits[f] == 'saturation':
                         pmin = still_limits[f+1]
                         pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     saturation = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 elif (mousey > preview_height + bh  and mousey < preview_height + bh + int(bh/3)) and alt_dis == 1:
                     saturation = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
@@ -9544,7 +9558,7 @@ while True:
                     if still_limits[f] == 'denoise':
                         pmin = still_limits[f+1]
                         pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     denoise = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
                     denoise = int(((mousex-((button_row -1)*bw)) / bw) * (pmax+1-pmin))
@@ -9568,7 +9582,7 @@ while True:
                     if still_limits[f] == 'sharpness':
                         pmin = still_limits[f+1]
                         pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     sharpness = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 elif (mousey > preview_height + (bh)  and mousey < preview_height + (bh) + int(bh/3)) and alt_dis == 1:
                     sharpness = int(((mousex-((button_row -9)*bw)) / bw) * (pmax+1-pmin))
@@ -9657,7 +9671,7 @@ while True:
                     if still_limits[f] == 'extn':
                         pmin = still_limits[f+1]
                         pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     extn = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 elif (mousey > preview_height + bh  and mousey < preview_height + bh + int(bh/3)) and alt_dis == 1:
                     extn = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
@@ -9724,7 +9738,7 @@ while True:
                       for item in range(0,len(titles)):
                           f.write(titles[item] + " : " + str(config[item]) + "\n")
                    time.sleep(1)
-                   text(0,8,2,0,1,"SAVE CONFIG",fv,10)    
+                   text(0,9,2,0,1,"SAVE CONFIG",fv,10)    
                                         
             # MENU 5
             elif menu == 5:   
@@ -9734,7 +9748,7 @@ while True:
                     if video_limits[f] == 'vlen':
                         pmin = video_limits[f+1]
                         pmax = video_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     vlen = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 elif (mousey > preview_height  + (bh*2) and mousey < preview_height + (bh*2) + int(bh/3)) and alt_dis == 1:
                     vlen = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
@@ -9758,7 +9772,7 @@ while True:
                     if video_limits[f] == 'fps':
                         pmin = video_limits[f+1]
                         pmax = video_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     fps = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                     fps = min(fps,vfps)
                     fps = max(fps,pmin)
@@ -9790,7 +9804,7 @@ while True:
                         pmin = video_limits[f+1]
                         pmax = video_limits[f+2]
                 
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     # set max video format
                     setmaxvformat()
                     pmax = max_vformat
@@ -9870,7 +9884,7 @@ while True:
                     if video_limits[f] == 'codec':
                         pmin = video_limits[f+1]
                         pmax = video_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     codec = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 elif (mousey > preview_height + (bh*2) and mousey < preview_height + (bh*2) + int(bh/3)) and alt_dis == 1:
                     codec = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
@@ -9941,7 +9955,7 @@ while True:
                     if video_limits[f] == 'profile':
                         pmin = video_limits[f+1]
                         pmax = video_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     profile = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 elif (mousey > preview_height + (bh*2) and mousey < preview_height + (bh*2) + int(bh/3)) and alt_dis == 1:
                     profile = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
@@ -10166,7 +10180,7 @@ while True:
                         if video_limits[f] == 'tduration':
                             pmin = video_limits[f+1]
                             pmax = video_limits[f+2]
-                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                         tduration = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                     elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
                         tduration = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
@@ -10196,7 +10210,7 @@ while True:
                         if video_limits[f] == 'tinterval':
                             pmin = video_limits[f+1]
                             pmax = video_limits[f+2]
-                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                         tinterval = round(((mousex-preview_width) / bw) * (pmax-pmin) + pmin, 2)
                     elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
                         tinterval = round(((mousex-((button_row - 9)*bw)) / bw) * (pmax-pmin) + pmin, 2)
@@ -10240,7 +10254,7 @@ while True:
                         if video_limits[f] == 'tshots':
                             pmin = video_limits[f+1]
                             pmax = video_limits[f+2]
-                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                         tshots = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                     elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
                         tshots = int(((mousex-((button_row -9)*bw)) / bw) * (pmax+1-pmin))
@@ -10339,7 +10353,7 @@ while True:
                           if video_limits[f] == 'allsky_mode':
                               pmin = video_limits[f+1]
                               pmax = video_limits[f+2]
-                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                           allsky_mode = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                       else:
                           if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -10357,7 +10371,7 @@ while True:
                           if video_limits[f] == 'allsky_mean_target':
                               pmin = video_limits[f+1]
                               pmax = video_limits[f+2]
-                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                           allsky_mean_target = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                       else:
                           if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -10374,7 +10388,7 @@ while True:
                           if video_limits[f] == 'allsky_mean_threshold':
                               pmin = video_limits[f+1]
                               pmax = video_limits[f+2]
-                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                           allsky_mean_threshold = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                       else:
                           if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -10391,7 +10405,7 @@ while True:
                           if video_limits[f] == 'allsky_video_fps':
                               pmin = video_limits[f+1]
                               pmax = video_limits[f+2]
-                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                           allsky_video_fps = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                       else:
                           if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -10408,7 +10422,7 @@ while True:
                           if video_limits[f] == 'allsky_max_gain':
                               pmin = video_limits[f+1]
                               pmax = video_limits[f+2]
-                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                           allsky_max_gain = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                       else:
                           step = 10
@@ -10460,7 +10474,7 @@ while True:
                     # PAGE 1 - STRETCH LOW PERCENTILE (0% à 0.2%, stocké x10)
                     pmin = 0    # 0%
                     pmax = 2    # 0.2%
-                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                         stretch_p_low = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                     else:
                         if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -10481,7 +10495,7 @@ while True:
                     # PAGE 1 - STRETCH HIGH PERCENTILE (99.95% à 100%, stocké x100)
                     pmin = 9995  # 99.95%
                     pmax = 10000 # 100%
-                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                         stretch_p_high = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                     else:
                         if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -10497,7 +10511,7 @@ while True:
                         if video_limits[f] == 'ghs_D':
                             pmin = video_limits[f+1]
                             pmax = video_limits[f+2]
-                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                         ghs_D = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                     else:
                         if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -10529,7 +10543,7 @@ while True:
                     # PAGE 1: STRETCH FACTOR (0 à 5, stocké x10)
                     pmin = 0    # 0.0
                     pmax = 80   # 8.0 (augmenté pour plus de flexibilité)
-                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                         stretch_factor = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                     else:
                         if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -10546,7 +10560,7 @@ while True:
                     # PAGE 2: GHS b - Local intensity (-5.0 à 15.0, stocké x10)
                     pmin = -50   # -5.0
                     pmax = 150   # 15.0
-                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                         ghs_b = int(((mousex-preview_width) / bw) * (pmax-pmin+1) + pmin)
                     else:
                         if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -10577,7 +10591,7 @@ while True:
                     # PAGE 1: STRETCH PRESET
                     pmin = 0
                     pmax = 2  # OFF/GHS/Arcsinh
-                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                         stretch_preset = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                     else:
                         if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -10642,7 +10656,7 @@ while True:
                     # PAGE 2: GHS SP - Symmetry point (0.0 à 1.0, stocké x100)
                     pmin = 0    # 0.0
                     pmax = 100  # 1.0
-                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                         ghs_SP = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                     else:
                         if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -10680,7 +10694,7 @@ while True:
                     # Contrainte: LP <= SP
                     pmin = 0          # 0.0
                     pmax = ghs_SP     # Limité par SP
-                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                         ghs_LP = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                     else:
                         if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -10715,7 +10729,7 @@ while True:
                     # Note: HP = 0 désactive la protection (sera contraint à SP dans ghs_stretch)
                     pmin = 0          # Permet 0 pour désactiver la protection
                     pmax = 100        # 1.0
-                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                         ghs_HP = int(((mousex-preview_width) / bw) * (pmax-pmin+1) + pmin)
                     else:
                         if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -10748,7 +10762,7 @@ while True:
                     # PAGE 2: GHS Preset - Charger valeurs prédéfinies
                     pmin = 0
                     pmax = 3  # 0=Manual, 1=Galaxies, 2=Nébuleuses, 3=Étirement initial
-                    if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                         ghs_preset = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                     else:
                         if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -10869,7 +10883,7 @@ while True:
                           if livestack_limits[f] == 'ls_stack_method':
                               pmin = livestack_limits[f+1]
                               pmax = livestack_limits[f+2]
-                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                           ls_stack_method = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                       else:
                           if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -10892,7 +10906,7 @@ while True:
                           if livestack_limits[f] == 'ls_stack_kappa':
                               pmin = livestack_limits[f+1]
                               pmax = livestack_limits[f+2]
-                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                           ls_stack_kappa = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                       else:
                           if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -10914,7 +10928,7 @@ while True:
                           if livestack_limits[f] == 'ls_stack_iterations':
                               pmin = livestack_limits[f+1]
                               pmax = livestack_limits[f+2]
-                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                           ls_stack_iterations = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                       else:
                           if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -10949,7 +10963,7 @@ while True:
                           if livestack_limits[f] == 'ls_planetary_mode':
                               pmin = livestack_limits[f+1]
                               pmax = livestack_limits[f+2]
-                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                           ls_planetary_mode = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                       else:
                           if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -10972,7 +10986,7 @@ while True:
                           if livestack_limits[f] == 'ls_planetary_disk_min':
                               pmin = livestack_limits[f+1]
                               pmax = livestack_limits[f+2]
-                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                           ls_planetary_disk_min = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                       else:
                           if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -10994,7 +11008,7 @@ while True:
                           if livestack_limits[f] == 'ls_planetary_disk_max':
                               pmin = livestack_limits[f+1]
                               pmax = livestack_limits[f+2]
-                      if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                           ls_planetary_disk_max = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                       else:
                           if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -11119,7 +11133,7 @@ while True:
                     if livestack_limits[f] == 'ls_preview_refresh':
                         pmin = livestack_limits[f+1]
                         pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     ls_preview_refresh = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                 else:
                     if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -11141,7 +11155,7 @@ while True:
                     if livestack_limits[f] == 'ls_alignment_mode':
                         pmin = livestack_limits[f+1]
                         pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     ls_alignment_mode = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 else:
                     if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -11163,7 +11177,7 @@ while True:
                     if livestack_limits[f] == 'ls_max_fwhm':
                         pmin = livestack_limits[f+1]
                         pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     ls_max_fwhm = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                 else:
                     if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -11188,7 +11202,7 @@ while True:
                     if livestack_limits[f] == 'ls_min_sharpness':
                         pmin = livestack_limits[f+1]
                         pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     ls_min_sharpness = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                 else:
                     if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -11213,7 +11227,7 @@ while True:
                     if livestack_limits[f] == 'ls_max_drift':
                         pmin = livestack_limits[f+1]
                         pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     ls_max_drift = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                 else:
                     if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -11238,7 +11252,7 @@ while True:
                     if livestack_limits[f] == 'ls_min_stars':
                         pmin = livestack_limits[f+1]
                         pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     ls_min_stars = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                 else:
                     if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -11263,7 +11277,7 @@ while True:
                     if livestack_limits[f] == 'ls_enable_qc':
                         pmin = livestack_limits[f+1]
                         pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     ls_enable_qc = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                 else:
                     # Toggle entre 0 et 1
@@ -11400,7 +11414,7 @@ while True:
                 # FOCUS METHOD (0-4: OFF/Laplacian/Gradient/Sobel/Tenengrad)
                 pmin = 0
                 pmax = 4
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     focus_method = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                     focus_method = min(focus_method, pmax)  # Limiter à pmax
                 else:
@@ -11418,7 +11432,7 @@ while True:
                 # STAR METRIC (0-2: OFF/HFR/FWHM)
                 pmin = 0
                 pmax = 2
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     star_metric = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                     star_metric = min(star_metric, pmax)  # Limiter à pmax
                 else:
@@ -11436,7 +11450,7 @@ while True:
                 # SNR DISPLAY (0-1: OFF/ON)
                 pmin = 0
                 pmax = 1
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     snr_display = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 else:
                     # Toggle entre 0 et 1
@@ -11452,7 +11466,7 @@ while True:
                 # CALC INTERVAL (1-10 frames)
                 pmin = 1
                 pmax = 10
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     metrics_interval = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                 else:
                     if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -11581,7 +11595,7 @@ while True:
                     if livestack_limits[f] == 'ls_lucky_buffer':
                         pmin = livestack_limits[f+1]
                         pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     ls_lucky_buffer = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                 else:
                     if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -11613,7 +11627,7 @@ while True:
                     if livestack_limits[f] == 'ls_lucky_keep':
                         pmin = livestack_limits[f+1]
                         pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     ls_lucky_keep = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                 else:
                     if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -11637,7 +11651,7 @@ while True:
                     if livestack_limits[f] == 'ls_lucky_score':
                         pmin = livestack_limits[f+1]
                         pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     ls_lucky_score = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 else:
                     if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -11662,7 +11676,7 @@ while True:
                     if livestack_limits[f] == 'ls_lucky_stack':
                         pmin = livestack_limits[f+1]
                         pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     ls_lucky_stack = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                 else:
                     if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
@@ -11702,7 +11716,7 @@ while True:
                     if livestack_limits[f] == 'ls_lucky_roi':
                         pmin = livestack_limits[f+1]
                         pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey < ((button_row)*bh) + int(bh/3)):
+                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     ls_lucky_roi = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
                 else:
                     if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
