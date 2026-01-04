@@ -239,15 +239,24 @@ class LiveStackSession:
         print(f"  • Stack result shape: {result.shape}, dtype: {result.dtype}")
         print(f"  • Stack result range: [{result.min():.3f}, {result.max():.3f}]")
 
+        # TRACEUR RGB: Avant ISP
+        if len(result.shape) == 3 and result.shape[2] == 3:
+            print(f"  • [AVANT ISP] RGB moyennes: R={result[:,:,0].mean():.1f}, G={result[:,:,1].mean():.1f}, B={result[:,:,2].mean():.1f}")
+
         # NOUVEAU: Appliquer ISP AVANT stretch (si activé ET format RAW uniquement)
         # Pipeline optimal: Stack (linéaire) → ISP → Stretch → PNG
         # L'ISP ne doit s'appliquer QUE sur RAW12/RAW16, JAMAIS sur YUV420 (déjà traité par ISP hardware)
         is_raw_format = self.config.video_format in ['raw12', 'raw16']
         if self.config.isp_enable and self.isp is not None and is_raw_format:
-            print(f"  → Application ISP (format RAW détecté)...")
+            print(f"  → Application ISP (format {self.config.video_format} détecté)...")
             # swap_rb=True pour RAW car le débayeurisation inverse R/B (RPiCamera2.py:4931-4932)
-            result = self.isp.process(result, return_uint8=False, swap_rb=True)  # Reste en float32
+            # Passer format_hint pour adapter les paramètres ISP (RAW12 vs RAW16 Clear HDR)
+            result = self.isp.process(result, return_uint8=False, swap_rb=True,
+                                     format_hint=self.config.video_format)  # Reste en float32
             print(f"  → Après ISP: shape={result.shape}, dtype={result.dtype}, range=[{result.min():.3f}, {result.max():.3f}]")
+            # TRACEUR RGB: Après ISP
+            if len(result.shape) == 3 and result.shape[2] == 3:
+                print(f"  • [APRÈS ISP] RGB moyennes: R={result[:,:,0].mean():.3f}, G={result[:,:,1].mean():.3f}, B={result[:,:,2].mean():.3f}")
         elif self.config.isp_enable and not is_raw_format:
             print(f"  → ISP ignoré (format {self.config.video_format} déjà traité par camera ISP)")
         else:
@@ -258,20 +267,27 @@ class LiveStackSession:
 
         # CORRECTION: Normaliser vers [0-1] AVANT stretch pour éviter clip
         # La fonction stretch_ghs() attend des données en [0-1]
-        # IMPORTANT: Les données viennent de RPiCamera2.py avec deux plages possibles:
-        #   - YUV420: [0-255] (8-bit)
-        #   - RAW12/16: [0-65535] (16-bit haute dynamique)
+        # IMPORTANT: Les données peuvent venir dans 3 plages différentes:
+        #   1. Déjà normalisé [0-1] (après ISP software)
+        #   2. YUV420: [0-255] (8-bit)
+        #   3. RAW12/16: [0-65535] (16-bit haute dynamique, sans ISP)
         # Il faut détecter automatiquement la plage et normaliser en conséquence
 
         # Détecter automatiquement la plage de données
         max_val = result.max()
 
-        if max_val > 256:
-            # Données haute résolution (RAW12/16) : [0-65535]
+        # IMPORTANT: Détecter 3 cas au lieu de 2 pour éviter bug avec ISP
+        if max_val <= 1.1:
+            # Cas 1: Déjà normalisé [0-1] (typiquement après ISP software)
+            # Marge de 1.1 au lieu de 1.0 pour tolérer léger bruit/overshoot
+            normalization_factor = 1.0
+            data_type_str = "Déjà normalisé [0-1]"
+        elif max_val > 256:
+            # Cas 2: Données haute résolution (RAW12/16) : [0-65535]
             normalization_factor = 65535.0
-            data_type_str = "RAW 16-bit"
+            data_type_str = f"RAW 16-bit ({self.config.video_format})"
         else:
-            # Données 8-bit (YUV420) : [0-255]
+            # Cas 3: Données 8-bit (YUV420) : [0-255]
             normalization_factor = 255.0
             data_type_str = "YUV420 8-bit"
 
@@ -320,6 +336,10 @@ class LiveStackSession:
                 ghs_HP=getattr(self.config, 'ghs_HP', 0.0)
             )
 
+        # TRACEUR RGB: Après stretch (avant conversion PNG)
+        if len(stretched.shape) == 3 and stretched.shape[2] == 3:
+            print(f"  • [APRÈS STRETCH] RGB moyennes: R={stretched[:,:,0].mean():.3f}, G={stretched[:,:,1].mean():.3f}, B={stretched[:,:,2].mean():.3f}")
+
         # Convertir en uint8 ou uint16 selon configuration
         # NOUVEAU: Support PNG 16-bit
         print(f"  • Stretched range: [{stretched.min():.3f}, {stretched.max():.3f}]")
@@ -349,6 +369,10 @@ class LiveStackSession:
 
         print(f"  ✓ Preview final: dtype={preview.dtype}, shape={preview.shape}")
         print(f"     range=[{preview.min()}, {preview.max()}]")
+
+        # TRACEUR RGB: Valeurs finales PNG
+        if len(preview.shape) == 3 and preview.shape[2] == 3:
+            print(f"  • [PNG FINAL] RGB moyennes: R={preview[:,:,0].mean():.1f}, G={preview[:,:,1].mean():.1f}, B={preview[:,:,2].mean():.1f}")
 
         return preview
     

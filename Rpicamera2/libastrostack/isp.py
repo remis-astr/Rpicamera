@@ -280,7 +280,8 @@ class ISP:
         self.config = config or ISPConfig()
 
     def process(self, image: np.ndarray, return_uint8: bool = False,
-                return_uint16: bool = False, swap_rb: bool = False) -> np.ndarray:
+                return_uint16: bool = False, swap_rb: bool = False,
+                format_hint: str = None) -> np.ndarray:
         """
         Applique le pipeline ISP complet
 
@@ -289,20 +290,44 @@ class ISP:
             return_uint8: Si True, retourne uint8 (0-255)
             return_uint16: Si True, retourne uint16 (0-65535)
             swap_rb: Si True, inverse les gains rouge et bleu (pour RAW avec inversion dans débayeurisation)
+            format_hint: Format de l'image ('raw12', 'raw16', None=auto-détection)
             Si les deux False, retourne float32 (0.0-1.0) [RECOMMANDÉ]
 
         Returns:
             Image traitée dans le format demandé
         """
+        # Adaptation dynamique des paramètres selon le format
+        # RAW12 vs RAW16 Clear HDR ont des caractéristiques différentes
+        original_black_level = self.config.black_level
+        original_gamma = self.config.gamma
+
+        if format_hint == 'raw16':
+            # RAW16 Clear HDR : plage dynamique étendue, black level plus bas
+            # Le mode Clear HDR du capteur fusionne déjà les expositions
+            self.config.black_level = int(original_black_level * 0.5)  # Black level réduit
+            # Gamma légèrement réduit pour préserver détails HDR
+            if original_gamma > 2.0:
+                self.config.gamma = original_gamma * 0.9
+        elif format_hint == 'raw12':
+            # RAW12 : profondeur de bit standard, paramètres normaux
+            # Utiliser les paramètres par défaut/calibrés
+            pass
+
         # Conversion en float32 (0.0-1.0)
         img = self._to_float(image)
 
-        # Pipeline ISP
+        # Pipeline ISP complet (7 étapes)
         img = self._apply_black_level(img)
         img = self._apply_white_balance(img, swap_rb=swap_rb)
+        img = self._apply_ccm(img)  # Correction colorimétrique
         img = self._apply_gamma(img)
         img = self._apply_contrast(img)
         img = self._apply_saturation(img)
+        img = self._apply_sharpening(img)  # Netteté (dernière étape)
+
+        # Restaurer les paramètres originaux
+        self.config.black_level = original_black_level
+        self.config.gamma = original_gamma
 
         # Conversion format de sortie
         if return_uint8:
@@ -407,6 +432,78 @@ class ISP:
 
         img_rgb = cv2.cvtColor(img_hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
         return img_rgb.astype(np.float32) / 255.0
+
+    def _apply_ccm(self, image: np.ndarray) -> np.ndarray:
+        """
+        Applique la Color Correction Matrix (CCM)
+
+        Transforme les couleurs via multiplication matricielle RGB_out = CCM × RGB_in
+        Standard dans les pipelines ISP pour corriger les aberrations colorimétriques
+        du capteur et adapter l'espace colorimétrique.
+
+        Args:
+            image: Image RGB en float32 [0-1]
+
+        Returns:
+            Image corrigée en float32 [0-1]
+        """
+        # Uniquement pour les images RGB
+        if len(image.shape) != 3 or image.shape[2] != 3:
+            return image
+
+        # Si CCM est identité, skip
+        if self.config.ccm is None or np.allclose(self.config.ccm, np.eye(3)):
+            return image
+
+        # Appliquer la transformation matricielle
+        # Reshape (H, W, 3) → (H*W, 3) pour multiplication matricielle
+        h, w, c = image.shape
+        img_flat = image.reshape(-1, 3)
+
+        # CCM × RGB (broadcasting)
+        # ccm shape: (3, 3), img_flat shape: (H*W, 3)
+        # Result: (H*W, 3)
+        img_corrected = np.dot(img_flat, self.config.ccm.T)
+
+        # Clip et reshape
+        img_corrected = np.clip(img_corrected, 0.0, 1.0)
+        return img_corrected.reshape(h, w, c).astype(np.float32)
+
+    def _apply_sharpening(self, image: np.ndarray) -> np.ndarray:
+        """
+        Applique un filtre de netteté (unsharp mask)
+
+        Formule: output = original + amount × (original - blurred)
+        - amount = 0 : pas de sharpening
+        - amount > 0 : augmente la netteté
+        - amount typique : 0.3 à 1.5
+
+        Args:
+            image: Image en float32 [0-1]
+
+        Returns:
+            Image sharpened en float32 [0-1]
+        """
+        if self.config.sharpening == 0.0:
+            return image
+
+        # Convertir en uint8 pour GaussianBlur (plus rapide)
+        img_uint8 = self._to_uint8(image)
+
+        # Appliquer un flou gaussien
+        # Kernel size adaptatif basé sur la résolution
+        kernel_size = max(3, int(min(image.shape[:2]) / 200) * 2 + 1)  # Impair
+        blurred = cv2.GaussianBlur(img_uint8, (kernel_size, kernel_size), 0)
+
+        # Unsharp mask: original + amount × (original - blurred)
+        sharpened = cv2.addWeighted(
+            img_uint8, 1.0 + self.config.sharpening,
+            blurred, -self.config.sharpening,
+            0
+        )
+
+        # Convertir en float32 [0-1]
+        return sharpened.astype(np.float32) / 255.0
 
     def save_config(self, path: Path):
         """Sauvegarde la configuration ISP"""

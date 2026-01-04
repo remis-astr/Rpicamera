@@ -101,7 +101,12 @@ class LuckyConfig:
     # Performance
     num_threads: int = 4                # Threads pour scoring parallèle
     downscale_scoring: float = 1.0      # Downscale pour scoring (1.0 = pas de downscale)
-    
+
+    # Normalisation RAW (CORRECTION bug image blanche)
+    raw_format: Optional[str] = None    # Format RAW explicite: "raw12", "raw16", None=auto-detect
+    raw_normalize_method: str = "percentile"  # "max" (ancien) ou "percentile" (robuste)
+    raw_percentile_detect: float = 99.0 # Percentile pour détection (ignorer pixels chauds)
+
     # Statistiques
     keep_history: bool = True           # Garder historique des scores
     history_size: int = 1000            # Taille max de l'historique
@@ -109,25 +114,34 @@ class LuckyConfig:
     def validate(self) -> bool:
         """Valide la configuration"""
         errors = []
-        
+
         if self.buffer_size < 10:
             errors.append("buffer_size doit être >= 10")
-        
+
         if not 1.0 <= self.keep_percent <= 100.0:
             errors.append("keep_percent doit être entre 1 et 100")
-        
+
         if self.keep_count is not None and self.keep_count < 1:
             errors.append("keep_count doit être >= 1")
-        
+
         if not 0.0 <= self.score_roi_percent <= 100.0:
             errors.append("score_roi_percent doit être entre 0 et 100")
-        
+
         if self.downscale_scoring <= 0 or self.downscale_scoring > 1.0:
             errors.append("downscale_scoring doit être entre 0 (exclu) et 1.0")
-        
+
+        if self.raw_format is not None and self.raw_format.lower() not in ['raw12', 'raw16']:
+            errors.append("raw_format doit être 'raw12', 'raw16' ou None")
+
+        if self.raw_normalize_method not in ['max', 'percentile']:
+            errors.append("raw_normalize_method doit être 'max' ou 'percentile'")
+
+        if not 90.0 <= self.raw_percentile_detect <= 100.0:
+            errors.append("raw_percentile_detect doit être entre 90 et 100")
+
         if errors:
             raise ValueError("Config Lucky Imaging invalide: " + ", ".join(errors))
-        
+
         return True
     
     def get_keep_count(self) -> int:
@@ -381,12 +395,18 @@ class FrameAligner:
             explicit: True si définie par update_alignment_reference() (préserve entre buffers)
         """
         if len(image.shape) == 3:
-            self.reference = cv2.cvtColor(
-                image.astype(np.uint8) if image.dtype != np.uint8 else image,
-                cv2.COLOR_RGB2GRAY
-            )
+            # Normaliser en [0-255] avant conversion (pour RAW float32 [0-65535])
+            if image.dtype != np.uint8:
+                img_normalized = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            else:
+                img_normalized = image
+            self.reference = cv2.cvtColor(img_normalized, cv2.COLOR_RGB2GRAY)
         else:
-            self.reference = image.astype(np.uint8) if image.dtype != np.uint8 else image
+            # Mono : normaliser directement
+            if image.dtype != np.uint8:
+                self.reference = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            else:
+                self.reference = image
 
         # Extraire ROI pour alignement
         self.reference = self._extract_align_roi(self.reference)
@@ -406,22 +426,28 @@ class FrameAligner:
     def align(self, image: np.ndarray) -> Tuple[np.ndarray, Dict[str, float]]:
         """
         Aligne une image sur la référence
-        
+
         Returns:
             (image_alignée, params)
         """
         if self.reference is None:
             self.set_reference(image)
             return image.copy(), {'dx': 0.0, 'dy': 0.0}
-        
-        # Convertir en grayscale
+
+        # Convertir en grayscale avec normalisation correcte
         if len(image.shape) == 3:
-            gray = cv2.cvtColor(
-                image.astype(np.uint8) if image.dtype != np.uint8 else image,
-                cv2.COLOR_RGB2GRAY
-            )
+            # Normaliser en [0-255] avant conversion (pour RAW float32 [0-65535])
+            if image.dtype != np.uint8:
+                img_normalized = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            else:
+                img_normalized = image
+            gray = cv2.cvtColor(img_normalized, cv2.COLOR_RGB2GRAY)
         else:
-            gray = image.astype(np.uint8) if image.dtype != np.uint8 else image
+            # Mono : normaliser directement
+            if image.dtype != np.uint8:
+                gray = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            else:
+                gray = image
         
         # Extraire ROI
         gray_roi = self._extract_align_roi(gray)
@@ -592,7 +618,95 @@ class LuckyImagingStacker:
         self.executor.shutdown(wait=False)
         print(f"[LUCKY] Arrêté - Frames: {self.total_frames_processed}, "
               f"Stacks: {self.total_stacks_done}")
-    
+
+    def _normalize_frame(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Normalise une frame RAW vers float32 [0-255]
+
+        CORRECTION BUG IMAGE BLANCHE:
+        Utilise raw_format explicite ou détection intelligente par percentile
+        au lieu de frame.max() qui est sensible aux pixels chauds et à la surexposition.
+
+        Args:
+            frame: Image brute (uint8, uint16, ou float32)
+
+        Returns:
+            Image normalisée en float32 [0-255]
+        """
+        # Cas 1: Déjà float32 → copier pour éviter corruption
+        if frame.dtype == np.float32:
+            return frame.astype(np.float32)  # Force nouvelle instance
+
+        # Cas 2: uint8 → conversion directe
+        if frame.dtype == np.uint8:
+            return frame.astype(np.float32)
+
+        # Cas 3: uint16 (RAW 12/16-bit) → normalisation intelligente
+        if frame.dtype == np.uint16:
+            # Déterminer le diviseur de normalisation
+            divisor = None
+
+            # Option A: Format RAW explicite (recommandé, évite les erreurs)
+            if self.config.raw_format is not None:
+                raw_fmt = self.config.raw_format.lower()
+                if raw_fmt == 'raw12':
+                    divisor = 16.0  # 4096 / 256 = 16
+                elif raw_fmt == 'raw16':
+                    divisor = 256.0  # 65536 / 256 = 256
+                else:
+                    divisor = 16.0  # Fallback conservateur
+
+                # Log une seule fois
+                if not hasattr(self, '_raw_format_logged'):
+                    print(f"[LUCKY NORMALIZE] Format RAW explicite: {self.config.raw_format} (diviseur={divisor})")
+                    self._raw_format_logged = True
+
+            # Option B: Auto-détection (fallback si raw_format=None)
+            else:
+                if self.config.raw_normalize_method == 'percentile':
+                    # MÉTHODE ROBUSTE: Utiliser percentile au lieu de max
+                    # pour ignorer les pixels chauds / saturés
+                    ref_val = np.percentile(frame, self.config.raw_percentile_detect)
+
+                    if ref_val <= 4095:
+                        divisor = 16.0
+                        detected = 'RAW 12-bit'
+                    elif ref_val <= 16383:
+                        divisor = 64.0
+                        detected = 'RAW 14-bit'
+                    else:
+                        divisor = 256.0
+                        detected = 'RAW 16-bit'
+
+                    # Log une seule fois
+                    if not hasattr(self, '_auto_detect_logged'):
+                        print(f"[LUCKY NORMALIZE] Auto-détection (percentile {self.config.raw_percentile_detect}%): "
+                              f"{detected} (ref_val={ref_val:.1f}, diviseur={divisor})")
+                        self._auto_detect_logged = True
+
+                else:
+                    # ANCIENNE MÉTHODE (max): Sensible aux pixels chauds et surexposition
+                    max_val = frame.max()
+                    if max_val <= 4095:
+                        divisor = 16.0
+                    elif max_val <= 16383:
+                        divisor = 64.0
+                    else:
+                        divisor = 256.0
+
+                    # Log une seule fois avec AVERTISSEMENT
+                    if not hasattr(self, '_max_method_warned'):
+                        print(f"[LUCKY NORMALIZE] ⚠️  ANCIENNE MÉTHODE (max): max_val={max_val}, diviseur={divisor}")
+                        print(f"[LUCKY NORMALIZE] ⚠️  Recommandation: spécifier raw_format='raw12' ou 'raw16' dans la config")
+                        self._max_method_warned = True
+
+            # Normaliser
+            frame_norm = frame.astype(np.float32) / divisor
+            return frame_norm
+
+        # Cas 4: Autre dtype → conversion directe
+        return frame.astype(np.float32)
+
     def add_frame(self, frame: np.ndarray) -> float:
         """
         Ajoute une frame au buffer et calcule son score
@@ -606,19 +720,8 @@ class LuckyImagingStacker:
         if not self.is_running:
             self.start()
 
-        # Normaliser l'image (TOUJOURS créer une nouvelle instance pour éviter corruption)
-        if frame.dtype != np.float32:
-            if frame.dtype == np.uint8:
-                frame_norm = frame.astype(np.float32)
-            elif frame.dtype == np.uint16:
-                frame_norm = (frame.astype(np.float32) / 256.0)
-            else:
-                frame_norm = frame.astype(np.float32)
-        else:
-            # Même si déjà float32, créer copie pour éviter que la source modifie nos données
-            # (la caméra peut réutiliser son buffer). Grâce à la copie conditionnelle dans
-            # buffer.add(), cette copie sera détectée et ne sera PAS re-copiée.
-            frame_norm = frame.astype(np.float32)  # Force nouvelle instance même si déjà float32
+        # Normaliser l'image avec la nouvelle méthode robuste
+        frame_norm = self._normalize_frame(frame)
         
         # Calculer score (chronométré)
         t0 = time.perf_counter()
@@ -932,10 +1035,21 @@ class LuckyImagingStacker:
         
         if 'score_roi_percent' in kwargs:
             self.config.score_roi_percent = float(kwargs['score_roi_percent'])
-        
+
         if 'sigma_clip_kappa' in kwargs:
             self.config.sigma_clip_kappa = float(kwargs['sigma_clip_kappa'])
-    
+
+        # Nouveaux paramètres de normalisation RAW (correction bug image blanche)
+        if 'raw_format' in kwargs:
+            self.config.raw_format = kwargs['raw_format']
+            print(f"[LUCKY CONFIG] raw_format défini: {self.config.raw_format}")
+
+        if 'raw_normalize_method' in kwargs:
+            self.config.raw_normalize_method = kwargs['raw_normalize_method']
+
+        if 'raw_percentile_detect' in kwargs:
+            self.config.raw_percentile_detect = float(kwargs['raw_percentile_detect'])
+
     def update_alignment_reference(self, reference_image: np.ndarray):
         """
         Met à jour la référence d'alignement sans réinitialiser le stacker

@@ -60,9 +60,9 @@ os.environ['LIBCAMERA_RPI_CONFIG_FILE'] = ''
 from picamera2 import Picamera2
 from libcamera import controls, Transform
 
-# Import Live Stack module (dans le même répertoire)
-from rpicamera_livestack import create_livestack_session
-from rpicamera_livestack_advanced import create_advanced_livestack_session
+# Import Live Stack modules (dans libastrostack/)
+from libastrostack.rpicamera_livestack import create_livestack_session
+from libastrostack.rpicamera_livestack_advanced import create_advanced_livestack_session
 
 # Import Allsky module (dans libastrostack/)
 from libastrostack.allsky import AllskyMeanController
@@ -1208,32 +1208,45 @@ zfs          = [1, 0.5, 0.333333, 0.25, 0.2, 0.166666]  # Zoom: 1x, 2x, 3x, 4x, 
 
 # NOUVEAU: Mapping zoom → modes IMX585 hardware crop
 # Pour IMX585 uniquement (Pi_Cam == 10)
+# ORDRE DÉCROISSANT: résolutions de la plus grande à la plus petite
 imx585_crop_modes = {
     # zoom_level: (width, height, mode_name, max_fps_estimate)
     0: None,  # Full frame - déterminé par use_native_sensor_mode
-    1: (1920, 1080, "Mode 3 Crop", 90),   # Hardware 1080p crop
-    2: (1280, 720, "Mode 4 Crop", 120),   # Hardware 720p crop
-    3: (2880, 2160, "Mode 2 Crop", 40),   # Hardware 2.8K crop (RÉACTIVÉ)
+    1: (2880, 2160, "Mode 2 Crop", 40),   # Hardware 2.8K crop (résolution la plus haute)
+    2: (1920, 1080, "Mode 3 Crop", 90),   # Hardware 1080p crop
+    3: (1280, 720, "Mode 4 Crop", 120),   # Hardware 720p crop
     4: (800, 600, "Mode 5 Crop", 150),    # Hardware 800x600 crop
     5: (800, 600, "Mode 5 Crop", 150)     # Identique à zoom 4
 }
 
-# Labels de résolution pour le slider de zoom
+# Résolutions RAW validées pour IMX585 (testées et fonctionnelles)
+# Format: (width, height): "description"
+imx585_validated_raw_modes = {
+    (3856, 2180): "Full Native 4K (avec unpacked=True)",
+    (1928, 1090): "Binning 2x2",
+    (1920, 1080): "FHD Crop (Mode 3)",
+    # Autres modes à valider par tests:
+    # (2880, 2160): "2.8K Crop (Mode 2)",
+    # (1280, 720): "HD Crop (Mode 4)",
+    # (800, 600): "SVGA Crop (Mode 5)",
+}
+
+# Labels de résolution pour le slider de zoom (ordre décroissant)
 zoom_res_labels = {
     0: "",
-    1: "1920x1080",  # 2x zoom
-    2: "1280x720",   # 3x zoom
-    3: "2880x2160",  # CHANGÉ: RÉACTIVÉ pour IMX585 Mode 2 crop
-    4: "800x600",    # CHANGÉ: upgrade vers 800x600
-    5: "800x600"     # CHANGÉ: upgrade vers 800x600
+    1: "2880x2160",  # 2x zoom - Résolution la plus haute
+    2: "1920x1080",  # 3x zoom
+    3: "1280x720",   # 4x zoom
+    4: "800x600",    # 5x zoom
+    5: "800x600"     # 6x zoom
 }
 
 # FPS optimaux pour chaque niveau de zoom (ROI permet des FPS plus élevés)
 # Format: {zoom_level: (fps_standard, fps_v3, fps_v9, fps_imx585)}
 zoom_optimal_fps = {
-    1: (60, 100, 120, 90),   # 1920x1080 - Mode 3 hardware
-    2: (120, 120, 150, 120), # 1280x720  - Mode 4 hardware
-    3: (30, 50, 60, 40),     # 2880x2160 - Mode 2 hardware (NOUVEAU)
+    1: (30, 50, 60, 40),     # 2880x2160 - Mode 2 hardware (résolution la plus haute)
+    2: (60, 100, 120, 90),   # 1920x1080 - Mode 3 hardware
+    3: (120, 120, 150, 120), # 1280x720  - Mode 4 hardware
     4: (200, 200, 240, 150), # 800x600   - Mode 5 hardware
     5: (200, 200, 240, 150)  # 800x600   - Mode 5 hardware
 }
@@ -1247,21 +1260,22 @@ def sync_video_resolution_with_zoom():
     global zoom, vwidth, vheight, vformat, vwidths, vheights, fps, video_limits, Pi_Cam
 
     # Résolutions correspondant aux niveaux de zoom
-    if Pi_Cam == 10:  # IMX585 - Utiliser modes hardware crop
+    if Pi_Cam == 10:  # IMX585 - Utiliser modes hardware crop (ordre décroissant)
         zoom_resolutions = {
-            1: (1920, 1080),  # Mode 3 crop
-            2: (1280, 720),   # Mode 4 crop
-            3: (2880, 2160),  # Mode 2 crop (RÉACTIVÉ)
+            1: (2880, 2160),  # Mode 2 crop (résolution la plus haute)
+            2: (1920, 1080),  # Mode 3 crop
+            3: (1280, 720),   # Mode 4 crop
             4: (800, 600),    # Mode 5 crop
             5: (800, 600)     # Mode 5 crop
         }
     else:
-        # Autres caméras: conserver résolutions existantes
+        # Autres caméras: résolutions standards supportées (ordre décroissant)
         zoom_resolutions = {
-            1: (1920, 1080),  # 2x zoom
-            2: (1280, 720),   # 3x zoom
-            4: (640, 480),    # 5x zoom
-            5: (640, 368)     # 6x zoom
+            1: (2880, 2160),  # 2x zoom (résolution la plus haute si supportée)
+            2: (1920, 1080),  # 3x zoom
+            3: (1280, 720),   # 4x zoom
+            4: (800, 600),    # 5x zoom
+            5: (800, 600)     # 6x zoom (même résolution que zoom 4)
         }
 
     # Si zoom actif, synchroniser avec la résolution du zoom
@@ -3959,12 +3973,13 @@ def preview():
             raw_stream_size = capture_size
         # Si zoom actif en mode binning, utiliser la résolution correspondante au niveau de zoom
         elif zoom > 0:
-            # Résolutions correspondant aux niveaux de zoom
+            # Résolutions correspondant aux niveaux de zoom (ordre décroissant)
             zoom_capture_sizes = {
-                1: (1920, 1080),  # 2x zoom
-                2: (1280, 720),   # 3x zoom
-                4: (640, 480),    # 5x zoom
-                5: (640, 368)     # 6x zoom
+                1: (2880, 2160),  # 2x zoom (résolution la plus haute)
+                2: (1920, 1080),  # 3x zoom
+                3: (1280, 720),   # 4x zoom
+                4: (800, 600),    # 5x zoom
+                5: (800, 600)     # 6x zoom (même résolution que zoom 4)
             }
             capture_size = zoom_capture_sizes.get(zoom, (vwidth, vheight))
             raw_stream_size = capture_size
@@ -4106,8 +4121,17 @@ def preview():
             picam2 = Picamera2(camera)
 
         # Déterminer la taille de capture selon caméra (pour les deux chemins)
-        # Mode natif avec zoom : calculer la taille ROI native
-        if use_native_sensor_mode == 1 and zoom > 0:
+        # IMX585 : Utiliser TOUJOURS les modes sensor hardware (crop ou full frame)
+        if Pi_Cam == 10:
+            sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+            if sensor_mode:
+                capture_size = sensor_mode  # Modes hardware: crop ou full frame
+                raw_stream_size = sensor_mode  # Important: raw stream = sensor mode
+            else:
+                capture_size = (1928, 1090)  # Fallback binning
+                raw_stream_size = capture_size
+        # Mode natif avec zoom : calculer la taille ROI native (AUTRES caméras)
+        elif use_native_sensor_mode == 1 and zoom > 0:
             # Calculer la taille du ROI en pixels natifs du capteur
             # zfs[zoom] donne la fraction de la résolution native
             roi_width = int(igw * zfs[zoom])
@@ -4125,10 +4149,11 @@ def preview():
         # Si zoom actif en mode binning, utiliser la résolution correspondante au niveau de zoom
         elif zoom > 0:
             zoom_capture_sizes = {
-                1: (1920, 1080),  # 2x zoom
-                2: (1280, 720),   # 3x zoom
-                4: (640, 480),    # 5x zoom
-                5: (640, 368)     # 6x zoom
+                1: (2880, 2160),  # 2x zoom (résolution la plus haute)
+                2: (1920, 1080),  # 3x zoom
+                3: (1280, 720),   # 4x zoom
+                4: (800, 600),    # 5x zoom
+                5: (800, 600)     # 6x zoom (même résolution que zoom 4)
             }
             capture_size = zoom_capture_sizes.get(zoom, (vwidth, vheight))
         elif (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8) and focus_mode == 1:
@@ -4218,20 +4243,24 @@ def preview():
             if Pi_Cam == 10:  # IMX585
                 sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
                 if use_raw_stream:
+                    # IMPORTANT: Ajouter "unpacked": True pour éviter le format compressé PISP_COMP1
+                    # qui cause une résolution réduite lors du debayering
                     config = picam2.create_still_configuration(
                         main={"size": capture_size, "format": main_format},
-                        raw={"size": sensor_mode, "format": raw_stream_format}
+                        raw={"size": sensor_mode, "format": raw_stream_format, "unpacked": True}
                     )
                 else:
                     # Même sans raw stream, spécifier raw size force le mode
+                    # IMPORTANT: Ajouter "unpacked": True pour éviter PISP_COMP1 compressé
                     config = picam2.create_still_configuration(
                         main={"size": capture_size, "format": main_format},
-                        raw={"size": sensor_mode}
+                        raw={"size": sensor_mode, "unpacked": True}
                     )
             elif use_raw_stream:
+                # IMPORTANT: Ajouter "unpacked": True pour éviter le format compressé
                 config = picam2.create_still_configuration(
                     main={"size": capture_size, "format": main_format},
-                    raw={"size": raw_stream_size, "format": raw_stream_format}
+                    raw={"size": raw_stream_size, "format": raw_stream_format, "unpacked": True}
                 )
             else:
                 config = picam2.create_still_configuration(
@@ -4246,20 +4275,23 @@ def preview():
             if Pi_Cam == 10:  # IMX585
                 sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
                 if use_raw_stream:
+                    # IMPORTANT: Ajouter "unpacked": True pour éviter le format compressé PISP_COMP1
                     config = picam2.create_preview_configuration(
                         main={"size": capture_size, "format": main_format},
-                        raw={"size": sensor_mode, "format": raw_stream_format}
+                        raw={"size": sensor_mode, "format": raw_stream_format, "unpacked": True}
                     )
                 else:
                     # Même sans raw stream, spécifier raw size force le mode
+                    # IMPORTANT: Ajouter "unpacked": True pour éviter PISP_COMP1 compressé
                     config = picam2.create_preview_configuration(
                         main={"size": capture_size, "format": main_format},
-                        raw={"size": sensor_mode}
+                        raw={"size": sensor_mode, "unpacked": True}
                     )
             elif use_raw_stream:
+                # IMPORTANT: Ajouter "unpacked": True pour éviter le format compressé
                 config = picam2.create_preview_configuration(
                     main={"size": capture_size, "format": main_format},
-                    raw={"size": raw_stream_size, "format": raw_stream_format}
+                    raw={"size": raw_stream_size, "format": raw_stream_format, "unpacked": True}
                 )
             else:
                 config = picam2.create_preview_configuration(
@@ -4471,7 +4503,7 @@ def preview():
                     sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
                     mode_name = imx585_crop_modes[zoom][2] if zoom in imx585_crop_modes and imx585_crop_modes[zoom] else "Full"
                     print(f"  Zoom hardware IMX585: {mode_name} @ {sensor_mode}")
-            elif zoom > 0 and zoom <= 5 and zoom != 3:  # Autres caméras - Zoom 3 désactivé
+            elif zoom > 0 and zoom <= 5:  # Autres caméras - Zoom 3 désactivé
                 # Autres caméras: conserver ScalerCrop
                 try:
                     # Obtenir la taille native du capteur pour ScalerCrop
@@ -4592,13 +4624,14 @@ def preview():
     datastr += " --camera " + str(camera) + " -n --codec mjpeg -t 0 --segment 1"
 
     # SORTIE DIRECTE VERS FICHIERS JPEG (méthode originale simple et stable)
-    # Si zoom actif, utiliser la résolution correspondante au niveau de zoom
+    # Si zoom actif, utiliser la résolution correspondante au niveau de zoom (ordre décroissant)
     if zoom > 0:
         zoom_cmd_resolutions = {
-            1: " --width 1920 --height 1080 -o /run/shm/test%04d.jpg ",
-            2: " --width 1280 --height 720 -o /run/shm/test%04d.jpg ",
-            4: " --width 640 --height 480 -o /run/shm/test%04d.jpg ",
-            5: " --width 640 --height 368 -o /run/shm/test%04d.jpg "
+            1: " --width 2880 --height 2160 -o /run/shm/test%04d.jpg ",
+            2: " --width 1920 --height 1080 -o /run/shm/test%04d.jpg ",
+            3: " --width 1280 --height 720 -o /run/shm/test%04d.jpg ",
+            4: " --width 800 --height 600 -o /run/shm/test%04d.jpg ",
+            5: " --width 800 --height 600 -o /run/shm/test%04d.jpg "
         }
         datastr += zoom_cmd_resolutions.get(zoom, f" --width {vwidth} --height {vheight} -o /run/shm/test%04d.jpg ")
     elif (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8) and focus_mode == 1:
@@ -4700,7 +4733,7 @@ def preview():
             # Spécifier le mode exact au lieu de --roi
             datastr += f" --mode {sensor_mode[0]}:{sensor_mode[1]}:12"
             # Note: zoom 3 maintenant activé pour IMX585
-    elif zoom > 0 and zoom <= 5 and zoom != 3:  # Autres caméras - ROI logiciel, zoom 3 désactivé
+    elif zoom > 0 and zoom <= 5:  # Autres caméras - ROI logiciel, zoom 3 désactivé
         zws = int(igw * zfs[zoom])
         zhs = int(igh * zfs[zoom])
         zxo = ((igw-zws)/2)/igw
@@ -5561,6 +5594,20 @@ while True:
             if (livestack_active or luckystack_active) and raw_format >= 2:
                 # Capturer flux RAW (SRGGB12 ou SRGGB16) - raw_format 2 ou 3
                 raw_array = picam2.capture_array("raw")
+
+                # Validation: Vérifier que la résolution capturée correspond à celle attendue
+                expected_height = raw_stream_size[1]
+                actual_height = raw_array.shape[0]
+
+                if actual_height != expected_height:
+                    if not hasattr(pygame, '_raw_resolution_mismatch_warning'):
+                        print(f"\n⚠️  [RAW VALIDATION] Incompatibilité de résolution détectée!")
+                        print(f"  Attendu: {raw_stream_size}")
+                        print(f"  Capturé: {raw_array.shape}")
+                        print(f"  → Cette résolution n'est pas compatible avec le mode RAW")
+                        print(f"  → Utilisez XRGB8888 ISP ou changez de résolution")
+                        pygame._raw_resolution_mismatch_warning = True
+
                 # Débayériser en RGB uint16 [0-65535] (préserve dynamique 12/16-bit)
                 # *** NOUVEAU : Passer les gains AWB pour corriger la balance des blancs en RAW ***
                 # INVERSÉS pour compenser le pattern Bayer RGGB qui inverse les canaux
@@ -5683,10 +5730,12 @@ while True:
                     master_stack = livestack.get_current_preview()
 
                     if master_stack is not None:
-                        # CORRECTION: Le master_stack est déjà en float32 [0-65535] ou [0-255]
-                        # Ne pas renormaliser, juste convertir pour pygame
-                        # Détecter la plage de données
+                        # CORRECTION LUMINOSITÉ: Appliquer le même auto-stretch percentile que LuckyStack
+                        # pour une luminosité cohérente entre les deux modes
+
+                        # 1. Détecter la plage de données et normaliser si nécessaire
                         max_val = master_stack.max()
+                        min_val = master_stack.min()
 
                         if max_val > 256:
                             # Données 16-bit: normaliser à [0-255] pour pygame
@@ -5695,7 +5744,31 @@ while True:
                             # Données déjà en [0-255]
                             stacked_array = master_stack.astype(np.float32)
 
-                        # Appliquer le stretch du programme principal si activé
+                        # 2. AUTO-STRETCH PERCENTILE (comme LuckyStack)
+                        # Utiliser les percentiles 0.1% et 99.9% pour ignorer les outliers
+                        p_low = np.percentile(stacked_array, 0.1)
+                        p_high = np.percentile(stacked_array, 99.9)
+
+                        # Afficher les infos de stretch une fois par session
+                        if not hasattr(pygame, '_livestack_stretch_info_shown'):
+                            print(f"\n[LIVESTACK] Auto-stretch percentiles:")
+                            print(f"  Plage totale: [{stacked_array.min():.1f}, {stacked_array.max():.1f}]")
+                            print(f"  Percentiles (0.1%, 99.9%): [{p_low:.1f}, {p_high:.1f}]")
+                            pygame._livestack_stretch_info_shown = True
+
+                        # Étirer entre les percentiles vers [0-255]
+                        if p_high > p_low:
+                            stacked_array = np.clip((stacked_array - p_low) / (p_high - p_low) * 255.0, 0, 255).astype(np.float32)
+                            if not hasattr(pygame, '_livestack_stretch_applied_shown'):
+                                print(f"  → Stretch appliqué: [{p_low:.1f}, {p_high:.1f}] → [0, 255]")
+                                pygame._livestack_stretch_applied_shown = True
+                        else:
+                            # Fallback si pas de dynamique
+                            if not hasattr(pygame, '_livestack_no_stretch_shown'):
+                                print(f"  → Pas de stretch (p_low == p_high)")
+                                pygame._livestack_no_stretch_shown = True
+
+                        # 3. Appliquer le stretch du programme principal si activé (GHS ou Arcsinh)
                         if stretch_mode == 1 and stretch_preset != 0:
                             stacked_array = astro_stretch(stacked_array)
 
@@ -5773,6 +5846,18 @@ while True:
 
             # ===== LUCKY STACK PROCESSING =====
             elif luckystack_active and luckystack is not None:
+                # DEBUG: Vérifier la résolution de l'array reçu
+                if not hasattr(pygame, '_lucky_resolution_check'):
+                    print(f"\n[LUCKYSTACK DEBUG] Résolution de capture:")
+                    print(f"  Array shape: {array.shape}")
+                    print(f"  Array dtype: {array.dtype}")
+                    print(f"  Array range: [{array.min():.1f}, {array.max():.1f}]")
+                    print(f"  Zoom actuel: {zoom}")
+                    print(f"  Résolution configurée (capture_size): {capture_size}")
+                    print(f"  Résolution RAW stream (raw_stream_size): {raw_stream_size}")
+                    print(f"  Format RAW: {raw_formats[raw_format]}")
+                    pygame._lucky_resolution_check = True
+
                 # Traiter la frame avec Lucky Stack (nécessaire pour le fonctionnement interne)
                 luckystack.process_frame(array)
 
@@ -5799,19 +5884,45 @@ while True:
 
                         if master_stack is not None:
 
-                            # CORRECTION: Le master_stack est déjà en float32 [0-65535] ou [0-255]
-                            # Ne pas renormaliser, juste convertir pour pygame
-                            # Détecter la plage de données
+                            # DEBUG: Afficher la résolution du stack une seule fois
+                            if not hasattr(pygame, '_lucky_stack_resolution_debug'):
+                                print(f"\n[LUCKYSTACK DEBUG] Résolution du stack:")
+                                print(f"  Stack shape: {master_stack.shape}")
+                                print(f"  Stack dtype: {master_stack.dtype}")
+                                print(f"  Stack range: [{master_stack.min():.1f}, {master_stack.max():.1f}]")
+                                pygame._lucky_stack_resolution_debug = True
+
+                            # CORRECTION: Le master_stack est déjà en float32 normalisé par lucky_imaging.py
+                            # Appliquer un auto-stretch basé sur les percentiles pour un meilleur affichage
+                            min_val = master_stack.min()
                             max_val = master_stack.max()
 
-                            if max_val > 256:
-                                # Données 16-bit: normaliser à [0-255] pour pygame
-                                stacked_array = (master_stack / 256.0).astype(np.float32)
-                            else:
-                                # Données déjà en [0-255]
-                                stacked_array = master_stack.astype(np.float32)
+                            # Toujours utiliser un auto-stretch pour les données RAW
+                            # Utiliser les percentiles 0.1% et 99.9% pour ignorer les outliers
+                            p_low = np.percentile(master_stack, 0.1)
+                            p_high = np.percentile(master_stack, 99.9)
 
-                            # 4. Appliquer le stretch du programme principal si activé
+                            # Afficher les infos de stretch une fois par session
+                            if not hasattr(pygame, '_lucky_stretch_info_shown'):
+                                print(f"\n[LUCKYSTACK] Auto-stretch percentiles:")
+                                print(f"  Plage totale: [{min_val:.1f}, {max_val:.1f}]")
+                                print(f"  Percentiles (0.1%, 99.9%): [{p_low:.1f}, {p_high:.1f}]")
+                                pygame._lucky_stretch_info_shown = True
+
+                            # Étirer entre les percentiles vers [0-255]
+                            if p_high > p_low:
+                                stacked_array = np.clip((master_stack - p_low) / (p_high - p_low) * 255.0, 0, 255).astype(np.float32)
+                                if not hasattr(pygame, '_lucky_stretch_applied_shown'):
+                                    print(f"  → Stretch appliqué: [{p_low:.1f}, {p_high:.1f}] → [0, 255]")
+                                    pygame._lucky_stretch_applied_shown = True
+                            else:
+                                # Fallback si pas de dynamique
+                                stacked_array = master_stack.astype(np.float32)
+                                if not hasattr(pygame, '_lucky_no_stretch_shown'):
+                                    print(f"  → Pas de stretch (p_low == p_high)")
+                                    pygame._lucky_no_stretch_shown = True
+
+                            # 4. Appliquer le stretch du programme principal si activé (GHS ou Arcsinh)
                             if stretch_mode == 1 and stretch_preset != 0:
                                 stacked_array = astro_stretch(stacked_array)
 
@@ -6613,7 +6724,7 @@ while True:
                         if sensor_mode:
                             datastr += f" --mode {sensor_mode[0]}:{sensor_mode[1]}:12"
                             datastr += f" --width {sensor_mode[0]} --height {sensor_mode[1]}"
-                    elif zoom > 0 and zoom <= 5 and zoom != 3:  # Autres caméras - ROI logiciel (zoom 3 désactivé)
+                    elif zoom > 0 and zoom <= 5:  # Autres caméras - ROI logiciel (zoom 3 désactivé)
                         # Arrondir à un nombre PAIR pour compatibilité formats vidéo
                         zws = int(igw * zfs[zoom])
                         zhs = int(igh * zfs[zoom])
@@ -6770,7 +6881,7 @@ while True:
                             # --codec yuv420 --mode ... --roi ... --width ... --height ...
 
                             # Gestion du ROI (Region Of Interest) - DOIT venir AVANT --width/--height
-                            if zoom > 0 and zoom <= 5 and zoom != 3:  # Zoom fixe 1x à 6x (zoom 3 désactivé)
+                            if zoom > 0 and zoom <= 5:  # Zoom fixe 1x à 6x (zoom 3 désactivé)
                                 # ROI centré sur le mode capteur natif (vrai ROI)
                                 # Déterminer la profondeur de bits selon la caméra
                                 if Pi_Cam == 4 or Pi_Cam == 10:  # Pi HQ ou IMX585
@@ -6810,14 +6921,16 @@ while True:
                                     datastr += "  --roi " + str(zxo) + "," + str(zyo) + "," + str(preview_width/igw) + "," + str(preview_height/igh)
 
                             # Résolution et dimensions
-                            if zoom > 0 and zoom <= 5 and zoom != 3:  # Zoom fixe avec ROI (zoom 3 désactivé)
+                            if zoom > 0 and zoom <= 5:  # Zoom fixe avec ROI
                                 # Toujours utiliser résolutions standards pour les vidéos (compatibilité rpicam-vid)
                                 # Le mode natif s'applique uniquement au livestack/luckystack
+                                # ORDRE DÉCROISSANT: résolutions de la plus grande à la plus petite
                                 zoom_resolutions = {
-                                    1: (1920, 1080),  # 2x zoom -> Full HD (16:9, standard)
-                                    2: (1280, 720),   # 3x zoom -> HD (16:9, standard)
-                                    4: (640, 480),    # 5x zoom -> VGA (4:3, confirmé compatible SER)
-                                    5: (640, 368),    # 6x zoom -> nHD (16:9, confirmé compatible SER)
+                                    1: (2880, 2160),  # 2x zoom (résolution la plus haute)
+                                    2: (1920, 1080),  # 3x zoom -> Full HD (16:9, standard)
+                                    3: (1280, 720),   # 4x zoom -> HD (16:9, standard)
+                                    4: (800, 600),    # 5x zoom -> SVGA (4:3, résolution supportée)
+                                    5: (800, 600),    # 6x zoom -> SVGA (4:3, même résolution que zoom 4)
                                 }
                                 if zoom in zoom_resolutions:
                                     actual_vwidth, actual_vheight = zoom_resolutions[zoom]
@@ -7208,7 +7321,7 @@ while True:
                         datastr += " --brightness " + str(brightness/100) + " --contrast " + str(contrast/100)
 
                         # IMPORTANT: Pour un vrai ROI (méthode Test2), ajouter --mode et --roi AVANT --width/--height
-                        if zoom > 0 and zoom <= 5 and zoom != 3:  # Zoom fixe 1x à 6x (zoom 3 désactivé)
+                        if zoom > 0 and zoom <= 5:  # Zoom fixe 1x à 6x (zoom 3 désactivé)
                             # Déterminer la profondeur de bits selon la caméra
                             if Pi_Cam == 4 or Pi_Cam == 10:  # Pi HQ ou IMX585
                                 sensor_bits = 12
@@ -7254,7 +7367,7 @@ while True:
                                 datastr += " --width " + str(preview_width) + " --height " + str(int(preview_height * .75))
                             else:
                                 datastr += " --width " + str(preview_width) + " --height " + str(preview_height)
-                        elif zoom > 0 and zoom <= 5 and zoom != 3:  # Zoom fixe avec ROI (zoom 3 désactivé)
+                        elif zoom > 0 and zoom <= 5:  # Zoom fixe avec ROI (zoom 3 désactivé)
                             # NE RIEN FAIRE : le ROI a déjà défini la taille de sortie
                             pass
                         elif Pi_Cam == 4 and vwidth == 2028:
@@ -7477,7 +7590,7 @@ while True:
                     datastr += " --brightness " + str(brightness/100) + " --contrast " + str(contrast/100)
 
                     # IMPORTANT: Pour un vrai ROI (méthode Test2), ajouter --mode et --roi AVANT --width/--height
-                    if zoom > 0 and zoom <= 5 and zoom != 3:  # Zoom fixe 1x à 6x (zoom 3 désactivé)
+                    if zoom > 0 and zoom <= 5:  # Zoom fixe 1x à 6x (zoom 3 désactivé)
                         # Déterminer la profondeur de bits selon la caméra
                         if Pi_Cam == 4 or Pi_Cam == 10:  # Pi HQ ou IMX585
                             sensor_bits = 12
@@ -7514,7 +7627,7 @@ while True:
                     # Supprimé: ancien zoom manuel (zoom == 5)
                     if False and zoom == 5:
                         datastr += " --width " + str(preview_width) + " --height " + str(preview_height)
-                    elif zoom > 0 and zoom <= 5 and zoom != 3:  # Zoom fixe avec ROI (zoom 3 désactivé)
+                    elif zoom > 0 and zoom <= 5:  # Zoom fixe avec ROI (zoom 3 désactivé)
                         # NE RIEN FAIRE : le ROI a déjà défini la taille de sortie
                         pass
                     elif Pi_Cam == 4 and vwidth == 2028:
@@ -7725,7 +7838,7 @@ while True:
                             elif Pi_Cam == 8:
                                 datastr += " --width 9248 --height 6944"
                         # Zoom fixe 1x à 6x
-                        if zoom > 0 and zoom <= 5 and zoom != 3:  # Zoom 3 désactivé
+                        if zoom > 0 and zoom <= 5:  # Zoom 3 désactivé
                             # Arrondir à un nombre PAIR pour compatibilité formats vidéo
                             zws = int(igw * zfs[zoom])
                             zhs = int(igh * zfs[zoom])
@@ -8211,7 +8324,7 @@ while True:
                         if Pi_Cam == 3 or Pi == 5:
                             datastr += " --hdr " + v3_hdrs_cli[v3_hdr]
                         # Zoom fixe 1x à 6x
-                        if zoom > 0 and zoom <= 5 and zoom != 3:  # Zoom 3 désactivé
+                        if zoom > 0 and zoom <= 5:  # Zoom 3 désactivé
                             # Arrondir à un nombre PAIR pour compatibilité formats vidéo
                             zws = int(igw * zfs[zoom])
                             zhs = int(igh * zfs[zoom])
@@ -8418,6 +8531,19 @@ while True:
                             livestack.stop()
 
                     if not luckystack_active:
+                        # Vérifier compatibilité RAW pour IMX585
+                        if Pi_Cam == 10 and raw_format >= 2:  # Mode RAW Bayer
+                            sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+                            if sensor_mode not in imx585_validated_raw_modes:
+                                print(f"\n⚠️  AVERTISSEMENT: Résolution {sensor_mode} non validée en mode RAW")
+                                print(f"  Résolutions RAW validées:")
+                                for res, desc in imx585_validated_raw_modes.items():
+                                    print(f"    • {res[0]}x{res[1]} - {desc}")
+                                print(f"  Pour de meilleurs résultats, utilisez:")
+                                print(f"    - Zoom 0 (fullframe) ou Zoom 2 (1920x1080)")
+                                print(f"    - OU passez en mode XRGB8888 ISP (raw_format=1)")
+                                print()
+
                         # Activer Lucky Stack
                         luckystack_active = True
 
@@ -8496,6 +8622,19 @@ while True:
                                 save_dng="none"
                             )
 
+                        # Debug ISP avant passage à configure (même code que LiveStack)
+                        print(f"[DEBUG AVANT CONFIGURE] isp_enable variable = {isp_enable} (type: {type(isp_enable)})")
+                        print(f"[DEBUG AVANT CONFIGURE] isp_config_path variable = {isp_config_path}")
+
+                        # CORRECTION: Passer les paramètres ISP séparément (comme LiveStack)
+                        # Mapper raw_format → video_format pour que l'ISP soit appliqué correctement
+                        video_format_map = {0: 'yuv420', 1: 'xrgb8888', 2: 'raw12', 3: 'raw16'}
+                        luckystack.configure(
+                            isp_enable=bool(isp_enable),
+                            isp_config_path=isp_config_path if isp_enable else None,
+                            video_format=video_format_map.get(raw_format, 'yuv420')
+                        )
+
                         # Mettre à jour le format RAW actuel avant de démarrer
                         luckystack.camera_params['raw_format'] = raw_formats[raw_format]
 
@@ -8506,6 +8645,18 @@ while True:
                         pygame._lucky_last_displayed = 0
                         pygame._lucky_cached_image = None
                         pygame._lucky_last_saved = 0
+
+                        # Réinitialiser les flags de debug pour voir les infos à chaque activation
+                        if hasattr(pygame, '_lucky_resolution_check'):
+                            delattr(pygame, '_lucky_resolution_check')
+                        if hasattr(pygame, '_lucky_stack_resolution_debug'):
+                            delattr(pygame, '_lucky_stack_resolution_debug')
+                        if hasattr(pygame, '_lucky_stretch_info_shown'):
+                            delattr(pygame, '_lucky_stretch_info_shown')
+                        if hasattr(pygame, '_lucky_stretch_applied_shown'):
+                            delattr(pygame, '_lucky_stretch_applied_shown')
+                        if hasattr(pygame, '_lucky_no_stretch_shown'):
+                            delattr(pygame, '_lucky_no_stretch_shown')
 
                         print("[LUCKYSTACK] Mode activé")
                     else:
@@ -8602,32 +8753,22 @@ while True:
                         pmax = video_limits[f+2]
                 if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
                     zoom = int(((mousex-preview_width) / bw) * (pmax+1-pmin))###
-                    if zoom == 3:
-                        zoom = 4  # Sauter le zoom 3
                     # Zoom manuel supprimé: simplifié la condition
                     if igw/igh > 1.5 and alt_dis == 0:
                         pygame.draw.rect(windowSurfaceObj,(0,0,0),Rect(0,int(preview_height * .75),preview_width,preview_height))
                 elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
                     zoom = int(((mousex-((button_row -9)*bw)) / bw) * (pmax+1-pmin))
-                    if zoom == 3:
-                        zoom = 4  # Sauter le zoom 3
                     # Zoom manuel supprimé: simplifié la condition
                     if igw/igh > 1.5:
                         pygame.draw.rect(windowSurfaceObj,(0,0,0),Rect(0,int(preview_height * .75),preview_width,preview_height/4))
                 elif (mousey > preview_height * .75 + (bh*3)  and mousey < preview_height * .75 + (bh*3) + int(bh/3)) and alt_dis == 2:
                     zoom = int(((mousex-((button_row -9)*bw)) / bw) * (pmax+1-pmin))
-                    if zoom == 3:
-                        zoom = 4  # Sauter le zoom 3
                 # Zoom manuel supprimé: simplifié la condition
                 elif (alt_dis == 0 and mousex > preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 1):
                     zoom +=1
                     zoom = min(zoom,pmax)
-                    if zoom == 3:
-                        zoom = 4  # Sauter le zoom 3
                 elif alt_dis == 0 and mousex < preview_width + (bw/2)  and zoom > 0:
                     zoom -=1
-                    if zoom == 3:
-                        zoom = 2  # Sauter le zoom 3
                     # Zoom manuel supprimé: simplifié la condition
                     if igw/igh > 1.5 and alt_dis == 0:
                         pygame.draw.rect(windowSurfaceObj,(0,0,0),Rect(0,int(preview_height * .75),preview_width,preview_height))
