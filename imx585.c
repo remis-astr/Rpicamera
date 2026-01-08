@@ -959,7 +959,16 @@ static void imx585_update_hmax(struct imx585 *imx585)
 
 	for (i = 0; i < ARRAY_SIZE(supported_modes); ++i) {
 		u32 h = factor / supported_modes[i].hmax_div;
-		u32 v = IMX585_VMAX_DEFAULT * hdr_scale;
+		u32 v;
+
+		/* Preserve optimized VMAX for crop modes, scale for full-sensor modes */
+		if (supported_modes[i].is_crop_mode) {
+			/* Crop modes: keep their optimized VMAX values */
+			v = supported_modes[i].min_vmax;
+		} else {
+			/* Full-sensor modes: apply HDR scaling */
+			v = IMX585_VMAX_DEFAULT * hdr_scale;
+		}
 
 		supported_modes[i].min_hmax = h;
 		supported_modes[i].min_vmax = v;
