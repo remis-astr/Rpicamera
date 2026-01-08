@@ -26,6 +26,9 @@ class ISPConfig:
     # Gamma
     gamma: float = 2.2
 
+    # Brightness offset (ajouté pour mapping depuis interface GUI)
+    brightness_offset: float = 0.0  # Offset linéaire [-1.0, 1.0]
+
     # Contraste et saturation
     contrast: float = 1.0
     saturation: float = 1.0
@@ -192,6 +195,182 @@ class ISPCalibrator:
         return tuple(gains)
 
     @staticmethod
+    def _estimate_white_balance_from_histogram_peaks(image: np.ndarray,
+                                                      bins: int = 256,
+                                                      mask_range: Tuple[float, float] = (0.05, 0.95)) -> Tuple[float, float, float]:
+        """
+        Estime les gains de balance des blancs basé sur les pics d'histogrammes
+
+        Cette méthode analyse les pics (modes) de chaque canal RGB et calcule
+        les gains nécessaires pour aligner ces pics. Particulièrement efficace
+        pour l'astrophotographie où le fond du ciel domine l'histogramme.
+
+        Args:
+            image: Image RGB en float32 (0-1)
+            bins: Nombre de bins pour l'histogramme (défaut: 256)
+            mask_range: Tuple (min, max) pour masquer les valeurs extrêmes
+                       avant de calculer le pic (évite pixels noirs/saturés)
+
+        Returns:
+            Tuple (red_gain, green_gain, blue_gain)
+
+        Exemple:
+            >>> config = ISPConfig()
+            >>> calibrator = ISPCalibrator()
+            >>> gains = calibrator._estimate_white_balance_from_histogram_peaks(stacked_image)
+            >>> config.wb_red_gain, config.wb_green_gain, config.wb_blue_gain = gains
+        """
+        if len(image.shape) != 3 or image.shape[2] != 3:
+            raise ValueError("L'image doit être RGB (H, W, 3)")
+
+        peaks = []
+
+        for channel_idx in range(3):
+            channel_data = image[:, :, channel_idx].flatten()
+
+            # Masquer les valeurs extrêmes (pixels noirs et saturés)
+            mask = (channel_data >= mask_range[0]) & (channel_data <= mask_range[1])
+            channel_masked = channel_data[mask]
+
+            if len(channel_masked) == 0:
+                # Fallback: utiliser toutes les données
+                channel_masked = channel_data
+
+            # Calculer l'histogramme
+            hist, bin_edges = np.histogram(channel_masked, bins=bins, range=(0.0, 1.0))
+
+            # Trouver le bin avec le maximum de pixels (pic)
+            peak_bin_idx = np.argmax(hist)
+
+            # Calculer la valeur centrale du bin (position du pic)
+            peak_value = (bin_edges[peak_bin_idx] + bin_edges[peak_bin_idx + 1]) / 2.0
+
+            peaks.append(peak_value)
+
+        peaks = np.array(peaks)
+
+        # Calculer les gains pour aligner tous les pics sur le pic du vert (référence)
+        # Si pic_rouge = 0.3 et pic_vert = 0.5, alors gain_rouge = 0.5 / 0.3 = 1.667
+        green_peak = peaks[1]
+
+        if green_peak < 1e-3:
+            # Image quasi-noire, retourner gains neutres
+            print("⚠️  Image trop sombre pour calibration par pics d'histogramme")
+            return (1.0, 1.0, 1.0)
+
+        gains = green_peak / (peaks + 1e-6)
+
+        # Limiter les gains extrêmes
+        gains = np.clip(gains, 0.5, 2.0)
+
+        # Debug info
+        channel_names = ['Rouge', 'Vert', 'Bleu']
+        print(f"\n=== Calibration par pics d'histogramme ===")
+        for i in range(3):
+            print(f"  {channel_names[i]}: pic={peaks[i]:.4f}, gain={gains[i]:.3f}")
+
+        return tuple(gains)
+
+    @staticmethod
+    def calibrate_from_stacked_image(image: np.ndarray,
+                                     method: str = 'histogram_peaks',
+                                     target_brightness: Optional[float] = None) -> ISPConfig:
+        """
+        Calibre les paramètres ISP à partir d'une image stackée unique
+
+        Cette méthode permet une calibration automatique sans image de référence,
+        idéale pour ajuster dynamiquement l'ISP pendant une session de live stacking.
+
+        Args:
+            image: Image stackée en RGB (uint8, uint16, ou float32)
+            method: Méthode de calibration:
+                    - 'histogram_peaks': Aligne les pics d'histogrammes RGB (recommandé)
+                    - 'gray_world': Suppose que la moyenne des couleurs est grise
+            target_brightness: Luminosité cible après gamma (0-1), None=auto
+
+        Returns:
+            Configuration ISP calibrée
+
+        Exemple:
+            >>> session = LiveStackSession(config)
+            >>> # Après quelques frames stackées...
+            >>> stacked = session.stacker.get_stacked_image()
+            >>> isp_config = ISPCalibrator.calibrate_from_stacked_image(stacked)
+            >>> session.isp = ISP(isp_config)
+        """
+        config = ISPConfig()
+
+        # Convertir en float32
+        img_float = ISPCalibrator._to_float(image)
+
+        print(f"\n=== Calibration ISP depuis image stackée ===")
+        print(f"Image: {img_float.shape}, range [{img_float.min():.3f}, {img_float.max():.3f}]")
+        print(f"Méthode: {method}")
+
+        # 1. Balance des blancs selon la méthode choisie
+        if method == 'histogram_peaks':
+            wb_gains = ISPCalibrator._estimate_white_balance_from_histogram_peaks(img_float)
+        elif method == 'gray_world':
+            # Gray World: suppose que la moyenne des couleurs est neutre
+            means = np.array([img_float[:,:,i].mean() for i in range(3)])
+            gray_mean = means.mean()
+            wb_gains = gray_mean / (means + 1e-6)
+            wb_gains = wb_gains / wb_gains[1]  # Normaliser par vert
+            wb_gains = np.clip(wb_gains, 0.5, 2.0)
+            wb_gains = tuple(wb_gains)
+        else:
+            raise ValueError(f"Méthode inconnue: {method}")
+
+        config.wb_red_gain = wb_gains[0]
+        config.wb_green_gain = wb_gains[1]
+        config.wb_blue_gain = wb_gains[2]
+
+        # 2. Estimer gamma basé sur la luminosité
+        mean_brightness = img_float.mean()
+
+        if target_brightness is not None:
+            # Calculer gamma pour atteindre la cible
+            # target = mean^(1/gamma) => gamma = log(mean) / log(target)
+            if mean_brightness > 0.01 and target_brightness > 0.01:
+                gamma_est = np.log(mean_brightness) / np.log(target_brightness)
+                config.gamma = float(np.clip(gamma_est, 1.5, 3.0))
+            else:
+                config.gamma = 2.2
+        else:
+            # Gamma adaptatif basé sur la luminosité de l'image
+            if mean_brightness < 0.1:
+                # Image sombre: gamma plus élevé pour éclaircir
+                config.gamma = 2.4
+            elif mean_brightness < 0.3:
+                config.gamma = 2.2
+            else:
+                # Image claire: gamma plus bas
+                config.gamma = 1.8
+
+        print(f"✓ Luminosité moyenne: {mean_brightness:.3f}")
+        print(f"✓ Gamma: {config.gamma:.2f}")
+
+        # 3. Paramètres par défaut pour astrophotographie
+        config.contrast = 1.1  # Légèrement augmenté pour les détails
+        config.saturation = 1.0  # Neutre
+        config.black_level = 64  # Standard pour RAW12
+        config.sharpening = 0.0  # Désactivé par défaut
+
+        # Métadonnées
+        config.calibration_info = {
+            'method': method,
+            'source': 'stacked_image',
+            'mean_brightness': float(mean_brightness),
+            'histogram_peaks': [float(p) for p in
+                              ISPCalibrator._estimate_white_balance_from_histogram_peaks(img_float, bins=256)[0:3]
+                              if method == 'histogram_peaks']
+        }
+
+        print(f"✓ Calibration terminée\n")
+
+        return config
+
+    @staticmethod
     def _estimate_gamma(raw: np.ndarray, processed: np.ndarray) -> float:
         """
         Estime la valeur de gamma
@@ -316,11 +495,12 @@ class ISP:
         # Conversion en float32 (0.0-1.0)
         img = self._to_float(image)
 
-        # Pipeline ISP complet (7 étapes)
+        # Pipeline ISP complet (8 étapes)
         img = self._apply_black_level(img)
         img = self._apply_white_balance(img, swap_rb=swap_rb)
         img = self._apply_ccm(img)  # Correction colorimétrique
         img = self._apply_gamma(img)
+        img = self._apply_brightness_offset(img)  # Brightness (après gamma, avant contrast)
         img = self._apply_contrast(img)
         img = self._apply_saturation(img)
         img = self._apply_sharpening(img)  # Netteté (dernière étape)
@@ -406,6 +586,25 @@ class ISP:
         if self.config.gamma == 1.0:
             return image
         return np.power(image, 1.0 / self.config.gamma)
+
+    def _apply_brightness_offset(self, image: np.ndarray) -> np.ndarray:
+        """
+        Applique un offset de luminosité linéaire
+
+        Ajoute/soustrait une valeur constante à tous les pixels.
+        Appliqué APRÈS gamma, AVANT contrast pour un effet naturel.
+
+        Args:
+            image: Image en float32 [0-1]
+
+        Returns:
+            Image avec brightness ajusté, clippé [0-1]
+        """
+        if self.config.brightness_offset == 0.0:
+            return image
+
+        # Ajouter l'offset et clipper pour rester dans [0, 1]
+        return np.clip(image + self.config.brightness_offset, 0.0, 1.0)
 
     def _apply_contrast(self, image: np.ndarray) -> np.ndarray:
         """Applique l'ajustement de contraste"""
@@ -515,6 +714,7 @@ class ISP:
             'wb_blue_gain': self.config.wb_blue_gain,
             'black_level': self.config.black_level,
             'gamma': self.config.gamma,
+            'brightness_offset': self.config.brightness_offset,
             'contrast': self.config.contrast,
             'saturation': self.config.saturation,
             'sharpening': self.config.sharpening,

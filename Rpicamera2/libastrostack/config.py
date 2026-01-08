@@ -70,6 +70,12 @@ class StackingConfig:
         self.isp_calibration_frames = None # Images de référence pour calibration (RAW, YUV)
         self.video_format = None           # Format vidéo source: 'yuv420', 'raw12', 'raw16', None=auto
 
+        # Calibration automatique ISP (nouveau)
+        self.isp_auto_calibrate_method = 'histogram_peaks'  # Méthode: 'none', 'histogram_peaks', 'gray_world'
+        self.isp_auto_calibrate_after = 10       # Calibrer après N frames stackées (0 = désactivé)
+        self.isp_recalibrate_interval = 0        # Recalibrer tous les N frames (0 = jamais - calibration unique)
+        self.isp_auto_update_only_wb = True      # Si True, ne met à jour que les gains RGB (préserve gamma, contrast, etc.)
+
         # Paramètres PNG
         self.auto_png = True
         self.png_bit_depth = None          # None=auto (détecté), 8, ou 16

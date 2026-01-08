@@ -402,6 +402,12 @@ class AdvancedStackingConfig:
     isp_calibration_frames: Optional[tuple] = None
     video_format: Optional[str] = None  # 'yuv420', 'raw12', 'raw16', None=auto
 
+    # ISP Auto-calibration
+    isp_auto_calibrate_method: str = 'histogram_peaks'  # 'none', 'histogram_peaks', 'gray_world'
+    isp_auto_calibrate_after: int = 10       # Calibrer après N frames stackées (0 = désactivé)
+    isp_recalibrate_interval: int = 0        # Recalibrer tous les N frames (0 = jamais)
+    isp_auto_update_only_wb: bool = True     # Si True, ne met à jour que les gains RGB
+
     # Sous-configurations
     stacking: StackingMethodConfig = field(default_factory=StackingMethodConfig)
     drizzle: DrizzleConfig = field(default_factory=DrizzleConfig)
@@ -468,6 +474,12 @@ class AdvancedStackingConfig:
         legacy.isp_calibration_frames = getattr(self, 'isp_calibration_frames', None)
         legacy.video_format = getattr(self, 'video_format', None)
 
+        # ISP Auto-calibration
+        legacy.isp_auto_calibrate_method = getattr(self, 'isp_auto_calibrate_method', 'histogram_peaks')
+        legacy.isp_auto_calibrate_after = getattr(self, 'isp_auto_calibrate_after', 10)
+        legacy.isp_recalibrate_interval = getattr(self, 'isp_recalibrate_interval', 0)
+        legacy.isp_auto_update_only_wb = getattr(self, 'isp_auto_update_only_wb', True)
+
         # PNG
         legacy.auto_png = self.output.auto_png
         legacy.png_bit_depth = getattr(self.output, 'png_bit_depth', None)
@@ -517,11 +529,23 @@ class AdvancedStackingConfig:
         config.quality.max_drift = legacy.quality.max_drift
         config.quality.min_sharpness = legacy.quality.min_sharpness
         
+        # ISP
+        config.isp_enable = getattr(legacy, 'isp_enable', False)
+        config.isp_config_path = getattr(legacy, 'isp_config_path', None)
+        config.isp_calibration_frames = getattr(legacy, 'isp_calibration_frames', None)
+        config.video_format = getattr(legacy, 'video_format', None)
+
+        # ISP Auto-calibration
+        config.isp_auto_calibrate_method = getattr(legacy, 'isp_auto_calibrate_method', 'histogram_peaks')
+        config.isp_auto_calibrate_after = getattr(legacy, 'isp_auto_calibrate_after', 10)
+        config.isp_recalibrate_interval = getattr(legacy, 'isp_recalibrate_interval', 0)
+        config.isp_auto_update_only_wb = getattr(legacy, 'isp_auto_update_only_wb', True)
+
         # PNG
         config.output.auto_png = legacy.auto_png
         config.output.png_stretch_method = StretchMethod(legacy.png_stretch_method)
         config.output.png_stretch_factor = legacy.png_stretch_factor
-        
+
         # Autres
         config.preview_refresh_interval = legacy.preview_refresh_interval
         config.save_dng_mode = legacy.save_dng_mode
@@ -627,6 +651,12 @@ class LegacyStackingConfig:
         self.isp_config_path = None
         self.isp_calibration_frames = None
         self.video_format = None
+
+        # Calibration automatique ISP
+        self.isp_auto_calibrate_method = 'histogram_peaks'  # Méthode: 'none', 'histogram_peaks', 'gray_world'
+        self.isp_auto_calibrate_after = 10       # Calibrer après N frames stackées (0 = désactivé)
+        self.isp_recalibrate_interval = 0        # Recalibrer tous les N frames (0 = jamais - calibration unique)
+        self.isp_auto_update_only_wb = True      # Si True, ne met à jour que les gains RGB (préserve gamma, contrast, etc.)
 
         # Paramètres PNG
         self.auto_png = True

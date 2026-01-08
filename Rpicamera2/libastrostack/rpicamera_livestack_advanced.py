@@ -673,75 +673,41 @@ class RPiCameraLiveStackAdvanced:
 
     def _normalize_raw_frame(self, frame: np.ndarray) -> np.ndarray:
         """
-        Normalise une frame RAW vers float32 [0-255]
+        Convertit une frame RAW en float32 préservant la dynamique complète
 
-        CORRECTION COHÉRENCE ISP LiveStack/LuckyStack:
-        Applique la même normalisation que LuckyStack pour que l'ISP
-        reçoive des données dans la même plage dans les deux modes.
+        CORRECTION BUG LIVESTACK RAW:
+        Les données RAW doivent être préservées en pleine résolution [0-65535]
+        pour que l'ISP puisse les traiter correctement.
+        NE PAS compresser en 8-bit [0-255] sinon perte de dynamique !
 
         Args:
             frame: Image brute (uint8, uint16, ou float32)
 
         Returns:
-            Image normalisée en float32 [0-255]
+            Image en float32 avec dynamique préservée
         """
-        # Cas 1: Déjà float32 → copier pour éviter corruption
+        # Cas 1: Déjà float32 → retourner tel quel
         if frame.dtype == np.float32:
-            # Si déjà dans une plage raisonnable, retourner tel quel
-            if frame.max() <= 300:  # Déjà normalisé ou proche
-                return frame.copy()
-            # Sinon, normaliser
-            max_val = frame.max()
-            if max_val <= 4095:
-                return (frame / 16.0).astype(np.float32)
-            elif max_val <= 16383:
-                return (frame / 64.0).astype(np.float32)
-            else:
-                return (frame / 256.0).astype(np.float32)
+            return frame.copy()
 
         # Cas 2: uint8 → conversion directe
         if frame.dtype == np.uint8:
             return frame.astype(np.float32)
 
-        # Cas 3: uint16 (RAW 12/16-bit) → normalisation selon format
+        # Cas 3: uint16 (RAW 12/16-bit) → conversion SANS compression
+        # CORRECTION: Garder la pleine dynamique pour l'ISP
         if frame.dtype == np.uint16:
-            # Déterminer le diviseur de normalisation
-            divisor = None
             raw_format_str = self.camera_params.get('raw_format', '')
 
-            # Option A: Format RAW explicite depuis camera_params
-            if raw_format_str:
-                if 'RAW12' in raw_format_str.upper() or 'BAYER' in raw_format_str.upper():
-                    divisor = 16.0  # 4096 / 256 = 16
-                elif 'RAW16' in raw_format_str.upper() or 'CLEAR' in raw_format_str.upper() or 'HDR' in raw_format_str.upper():
-                    divisor = 256.0  # 65536 / 256 = 256
-                else:
-                    # YUV420/XRGB8888 : pas de normalisation RAW
-                    divisor = 1.0
+            # Log une seule fois pour debug
+            if not hasattr(self, '_raw_normalize_logged'):
+                max_val = frame.max()
+                print(f"[LIVESTACK RAW] Format: {raw_format_str}, dtype: {frame.dtype}, max: {max_val:.0f}")
+                print(f"[LIVESTACK RAW] → Conversion en float32 SANS compression (dynamique préservée)")
+                self._raw_normalize_logged = True
 
-                # Log une seule fois
-                if not hasattr(self, '_raw_normalize_logged'):
-                    print(f"[LIVESTACK NORMALIZE] Format RAW: {raw_format_str} → diviseur={divisor}")
-                    self._raw_normalize_logged = True
-
-            # Option B: Auto-détection par percentile (fallback)
-            else:
-                ref_val = np.percentile(frame, 99.0)
-                if ref_val <= 4095:
-                    divisor = 16.0
-                elif ref_val <= 16383:
-                    divisor = 64.0
-                else:
-                    divisor = 256.0
-
-                # Log une seule fois
-                if not hasattr(self, '_raw_auto_detect_logged'):
-                    print(f"[LIVESTACK NORMALIZE] Auto-détection (percentile 99%): ref_val={ref_val:.1f}, diviseur={divisor}")
-                    self._raw_auto_detect_logged = True
-
-            # Normaliser
-            frame_norm = frame.astype(np.float32) / divisor
-            return frame_norm
+            # Conversion directe sans compression (garde [0-4095] ou [0-65535])
+            return frame.astype(np.float32)
 
         # Cas 4: Autre dtype → conversion directe
         return frame.astype(np.float32)
@@ -889,7 +855,7 @@ class RPiCameraLiveStackAdvanced:
     
     def get_current_preview(self) -> Optional[np.ndarray]:
         """
-        Retourne l'image courante pour preview
+        Retourne l'image courante pour preview (données brutes sans traitement ISP/stretch)
 
         Si drizzle est actif, retourne une version downscalée.
         """
@@ -921,6 +887,71 @@ class RPiCameraLiveStackAdvanced:
             return self.session.get_current_stack()
 
         return None
+
+    def get_preview_for_display(self) -> Optional[np.ndarray]:
+        """
+        Retourne l'image courante avec le MÊME traitement que le PNG sauvegardé
+        (ISP + stretch complet), mais converti en uint8 pour affichage pygame.
+
+        Ceci garantit que l'affichage à l'écran correspond exactement au PNG sauvegardé,
+        seul le bit depth change (8-bit vs 16-bit).
+
+        Returns:
+            Array uint8 (H, W, 3) RGB pour pygame, ou None
+        """
+        if self.session is None:
+            # Fallback sur preview basique si pas de session
+            return self.get_current_preview()
+
+        try:
+            # MODE LUCKY: Traiter manuellement car session.stacker n'a pas le résultat Lucky
+            # Le résultat Lucky est dans self.last_lucky_result
+            if self.use_lucky and hasattr(self, 'last_lucky_result') and self.last_lucky_result is not None:
+                # Appliquer le même pipeline que get_preview_png() manuellement
+                # sur self.last_lucky_result
+                result = self.last_lucky_result.copy()
+
+                # Remplacer temporairement le stack de la session pour utiliser get_preview_png()
+                original_stack = self.session.stacker.stacked_image
+                self.session.stacker.stacked_image = result
+
+                try:
+                    preview_png = self.session.get_preview_png()
+                finally:
+                    # Restaurer le stack original
+                    self.session.stacker.stacked_image = original_stack
+
+                if preview_png is None:
+                    # Fallback si le traitement échoue
+                    return self.get_current_preview()
+
+            else:
+                # MODE STANDARD (LiveStack): Utiliser get_preview_png() directement
+                preview_png = self.session.get_preview_png()
+
+                if preview_png is None:
+                    return None
+
+            # Convertir en uint8 si nécessaire (pygame requiert uint8)
+            if preview_png.dtype == np.uint16:
+                # Convertir 16-bit → 8-bit en divisant par 257 (65535/255)
+                # Préserve mieux la distribution que /256
+                preview_uint8 = (preview_png / 257).astype(np.uint8)
+            elif preview_png.dtype == np.uint8:
+                # Déjà en uint8, pas de conversion
+                preview_uint8 = preview_png
+            else:
+                # Type inattendu (float32?), normaliser
+                preview_uint8 = np.clip(preview_png * 255, 0, 255).astype(np.uint8)
+
+            return preview_uint8
+
+        except Exception as e:
+            print(f"[WARN] get_preview_for_display() échoué: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback sur preview basique
+            return self.get_current_preview()
     
     def get_final_result(self) -> Optional[np.ndarray]:
         """

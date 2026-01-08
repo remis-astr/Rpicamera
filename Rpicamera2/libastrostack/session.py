@@ -78,6 +78,10 @@ class LiveStackSession:
 
         # Compteur pour rafraîchissement preview
         self._frame_count_since_refresh = 0
+
+        # Tracking calibration automatique ISP
+        self._isp_calibrated = False
+        self._last_isp_calibration_frame = 0
     
     def start(self):
         """Démarre la session"""
@@ -94,6 +98,15 @@ class LiveStackSession:
                 print(f"    • Config chargée: {self.config.isp_config_path}")
             else:
                 print(f"    • Mode: Auto-calibration")
+            if self.config.isp_auto_calibrate_method != 'none':
+                print(f"    • Calibration auto: {self.config.isp_auto_calibrate_method}")
+                print(f"    • Calibration après: {self.config.isp_auto_calibrate_after} frames")
+                if self.config.isp_recalibrate_interval > 0:
+                    print(f"    • Recalibration tous les: {self.config.isp_recalibrate_interval} frames")
+                if self.config.isp_auto_update_only_wb:
+                    print(f"    • Mode: Mise à jour WB uniquement (préserve gamma, contrast, etc.)")
+                else:
+                    print(f"    • Mode: Remplacement complet de la config ISP")
         print(f"  - Format vidéo: {self.config.video_format or 'Auto-détection'}")
         print(f"  - PNG bit depth: {self.config.png_bit_depth or 'Auto'}")
         print(f"  - Étirement PNG: {self.config.png_stretch_method}")
@@ -171,17 +184,20 @@ class LiveStackSession:
             # 3. Empilement
             print("  [STACK] Empilement...")
             result = self.stacker.stack(aligned)
-            
+
             self.files_processed += 1
             self._frame_count_since_refresh += 1
-            
+
+            # 4. Calibration automatique ISP (si activée)
+            self._check_and_calibrate_isp_if_needed()
+
             self._print_stats()
-            
+
             # Retourner résultat si rafraîchissement nécessaire
             if self._frame_count_since_refresh >= self.config.preview_refresh_interval:
                 self._frame_count_since_refresh = 0
                 return result
-            
+
             return None  # Pas de rafraîchissement preview
             
         except Exception as e:
@@ -226,41 +242,42 @@ class LiveStackSession:
         Returns:
             Array uint8 ou uint16 (selon config) pour affichage/sauvegarde
         """
-        print(f"\n[DEBUG get_preview_png] Début")
-        print(f"  • ISP activé: {self.config.isp_enable}")
-        print(f"  • ISP instance: {self.isp is not None}")
-        print(f"  • Format vidéo: {self.config.video_format}")
-        print(f"  • PNG bit depth config: {self.config.png_bit_depth}")
+        # DEBUG prints commentés pour performance (ralentissent LuckyStack)
+        # print(f"\n[DEBUG get_preview_png] Début")
+        # print(f"  • ISP activé: {self.config.isp_enable}")
+        # print(f"  • ISP instance: {self.isp is not None}")
+        # print(f"  • Format vidéo: {self.config.video_format}")
+        # print(f"  • PNG bit depth config: {self.config.png_bit_depth}")
 
         result = self.stacker.get_result()
         if result is None:
             return None
 
-        print(f"  • Stack result shape: {result.shape}, dtype: {result.dtype}")
-        print(f"  • Stack result range: [{result.min():.3f}, {result.max():.3f}]")
+        # print(f"  • Stack result shape: {result.shape}, dtype: {result.dtype}")
+        # print(f"  • Stack result range: [{result.min():.3f}, {result.max():.3f}]")
 
         # TRACEUR RGB: Avant ISP
-        if len(result.shape) == 3 and result.shape[2] == 3:
-            print(f"  • [AVANT ISP] RGB moyennes: R={result[:,:,0].mean():.1f}, G={result[:,:,1].mean():.1f}, B={result[:,:,2].mean():.1f}")
+        # if len(result.shape) == 3 and result.shape[2] == 3:
+        #     print(f"  • [AVANT ISP] RGB moyennes: R={result[:,:,0].mean():.1f}, G={result[:,:,1].mean():.1f}, B={result[:,:,2].mean():.1f}")
 
         # NOUVEAU: Appliquer ISP AVANT stretch (si activé ET format RAW uniquement)
         # Pipeline optimal: Stack (linéaire) → ISP → Stretch → PNG
         # L'ISP ne doit s'appliquer QUE sur RAW12/RAW16, JAMAIS sur YUV420 (déjà traité par ISP hardware)
         is_raw_format = self.config.video_format in ['raw12', 'raw16']
         if self.config.isp_enable and self.isp is not None and is_raw_format:
-            print(f"  → Application ISP (format {self.config.video_format} détecté)...")
+            # print(f"  → Application ISP (format {self.config.video_format} détecté)...")
             # swap_rb=True pour RAW car le débayeurisation inverse R/B (RPiCamera2.py:4931-4932)
             # Passer format_hint pour adapter les paramètres ISP (RAW12 vs RAW16 Clear HDR)
             result = self.isp.process(result, return_uint8=False, swap_rb=True,
                                      format_hint=self.config.video_format)  # Reste en float32
-            print(f"  → Après ISP: shape={result.shape}, dtype={result.dtype}, range=[{result.min():.3f}, {result.max():.3f}]")
+            # print(f"  → Après ISP: shape={result.shape}, dtype={result.dtype}, range=[{result.min():.3f}, {result.max():.3f}]")
             # TRACEUR RGB: Après ISP
-            if len(result.shape) == 3 and result.shape[2] == 3:
-                print(f"  • [APRÈS ISP] RGB moyennes: R={result[:,:,0].mean():.3f}, G={result[:,:,1].mean():.3f}, B={result[:,:,2].mean():.3f}")
-        elif self.config.isp_enable and not is_raw_format:
-            print(f"  → ISP ignoré (format {self.config.video_format} déjà traité par camera ISP)")
-        else:
-            print(f"  → Pas d'ISP (enable={self.config.isp_enable}, isp={self.isp is not None})")
+            # if len(result.shape) == 3 and result.shape[2] == 3:
+            #     print(f"  • [APRÈS ISP] RGB moyennes: R={result[:,:,0].mean():.3f}, G={result[:,:,1].mean():.3f}, B={result[:,:,2].mean():.3f}")
+        # elif self.config.isp_enable and not is_raw_format:
+        #     print(f"  → ISP ignoré (format {self.config.video_format} déjà traité par camera ISP)")
+        # else:
+        #     print(f"  → Pas d'ISP (enable={self.config.isp_enable}, isp={self.isp is not None})")
 
         # Appliquer étirement
         is_color = len(result.shape) == 3
@@ -300,12 +317,12 @@ class LiveStackSession:
             # RAW: normalisation par percentiles (data brute avec possibles pixels chauds)
             clip_low = self.config.png_clip_low
             clip_high = self.config.png_clip_high
-            print(f"  • Normalisation: {data_type_str} → [0-1] (/{normalization_factor:.0f}) + Percentiles - clip_low={clip_low}%, clip_high={clip_high}%")
+            # print(f"  • Normalisation: {data_type_str} → [0-1] (/{normalization_factor:.0f}) + Percentiles - clip_low={clip_low}%, clip_high={clip_high}%")
         else:
             # YUV420: déjà traité par ISP caméra, pas de pixels chauds → pas de clipping par percentiles
             clip_low = 0.0
             clip_high = 100.0
-            print(f"  • Normalisation: {data_type_str} → [0-1] (/{normalization_factor:.0f})")
+            # print(f"  • Normalisation: {data_type_str} → [0-1] (/{normalization_factor:.0f})")
 
         if is_color:
             stretched = np.zeros_like(result, dtype=np.float32)
@@ -337,42 +354,42 @@ class LiveStackSession:
             )
 
         # TRACEUR RGB: Après stretch (avant conversion PNG)
-        if len(stretched.shape) == 3 and stretched.shape[2] == 3:
-            print(f"  • [APRÈS STRETCH] RGB moyennes: R={stretched[:,:,0].mean():.3f}, G={stretched[:,:,1].mean():.3f}, B={stretched[:,:,2].mean():.3f}")
+        # if len(stretched.shape) == 3 and stretched.shape[2] == 3:
+        #     print(f"  • [APRÈS STRETCH] RGB moyennes: R={stretched[:,:,0].mean():.3f}, G={stretched[:,:,1].mean():.3f}, B={stretched[:,:,2].mean():.3f}")
 
         # Convertir en uint8 ou uint16 selon configuration
         # NOUVEAU: Support PNG 16-bit
-        print(f"  • Stretched range: [{stretched.min():.3f}, {stretched.max():.3f}]")
-        print(f"  → Sélection bit depth:")
-        print(f"     config.png_bit_depth = {self.config.png_bit_depth}")
-        print(f"     config.video_format = {self.config.video_format}")
+        # print(f"  • Stretched range: [{stretched.min():.3f}, {stretched.max():.3f}]")
+        # print(f"  → Sélection bit depth:")
+        # print(f"     config.png_bit_depth = {self.config.png_bit_depth}")
+        # print(f"     config.video_format = {self.config.video_format}")
 
         if self.config.png_bit_depth == 16:
             preview = (stretched * 65535).astype(np.uint16)
-            print(f"     → 16-bit (forcé par config)")
+            # print(f"     → 16-bit (forcé par config)")
         elif self.config.png_bit_depth == 8:
             preview = (stretched * 255).astype(np.uint8)
-            print(f"     → 8-bit (forcé par config)")
+            # print(f"     → 8-bit (forcé par config)")
         else:
             # Auto-détection intelligente selon stretch et format
             # CORRECTION: Toujours utiliser 16-bit si stretch activé (même pour YUV420)
             # Car le stretch crée des niveaux intermédiaires → besoin de 16-bit pour histogramme lisse
             if self.config.png_stretch_method != 'off':
                 preview = (stretched * 65535).astype(np.uint16)
-                print(f"     → 16-bit (auto: stretch '{self.config.png_stretch_method}' activé → préserve histogramme)")
+                # print(f"     → 16-bit (auto: stretch '{self.config.png_stretch_method}' activé → préserve histogramme)")
             elif self.config.video_format and 'raw' in self.config.video_format.lower():
                 preview = (stretched * 65535).astype(np.uint16)
-                print(f"     → 16-bit (auto: format RAW)")
+                # print(f"     → 16-bit (auto: format RAW)")
             else:
                 preview = (stretched * 255).astype(np.uint8)
-                print(f"     → 8-bit (auto: pas de stretch, pas de RAW)")
+                # print(f"     → 8-bit (auto: pas de stretch, pas de RAW)")
 
-        print(f"  ✓ Preview final: dtype={preview.dtype}, shape={preview.shape}")
-        print(f"     range=[{preview.min()}, {preview.max()}]")
+        # print(f"  ✓ Preview final: dtype={preview.dtype}, shape={preview.shape}")
+        # print(f"     range=[{preview.min()}, {preview.max()}]")
 
         # TRACEUR RGB: Valeurs finales PNG
-        if len(preview.shape) == 3 and preview.shape[2] == 3:
-            print(f"  • [PNG FINAL] RGB moyennes: R={preview[:,:,0].mean():.1f}, G={preview[:,:,1].mean():.1f}, B={preview[:,:,2].mean():.1f}")
+        # if len(preview.shape) == 3 and preview.shape[2] == 3:
+        #     print(f"  • [PNG FINAL] RGB moyennes: R={preview[:,:,0].mean():.1f}, G={preview[:,:,1].mean():.1f}, B={preview[:,:,2].mean():.1f}")
 
         return preview
     
@@ -495,7 +512,112 @@ class LiveStackSession:
         """Affiche stats courantes"""
         print(f"  [STATS] Empilées: {self.config.num_stacked}, "
               f"Rejetées: {self.files_rejected}, Échecs: {self.files_failed}")
-    
+
+    def _check_and_calibrate_isp_if_needed(self):
+        """
+        Vérifie si la calibration automatique de l'ISP est nécessaire et l'effectue
+
+        Cette méthode est appelée après chaque empilement réussi.
+        Elle gère:
+        - La calibration initiale après N frames (isp_auto_calibrate_after)
+        - La recalibration périodique (isp_recalibrate_interval)
+        """
+        # Vérifier si ISP est activé
+        if not self.config.isp_enable:
+            return
+
+        # Vérifier si calibration auto est activée
+        method = self.config.isp_auto_calibrate_method
+        if method == 'none' or method is None:
+            return
+
+        # Vérifier si on doit calibrer
+        should_calibrate = False
+        calibration_type = ""
+
+        # Calibration initiale
+        if (not self._isp_calibrated and
+            self.config.isp_auto_calibrate_after > 0 and
+            self.config.num_stacked >= self.config.isp_auto_calibrate_after):
+            should_calibrate = True
+            calibration_type = "initiale"
+
+        # Recalibration périodique
+        elif (self._isp_calibrated and
+              self.config.isp_recalibrate_interval > 0 and
+              (self.config.num_stacked - self._last_isp_calibration_frame) >= self.config.isp_recalibrate_interval):
+            should_calibrate = True
+            calibration_type = "périodique"
+
+        if not should_calibrate:
+            return
+
+        # Effectuer la calibration
+        try:
+            print(f"\n  [ISP] Calibration automatique {calibration_type} (méthode: {method})...")
+
+            # Récupérer l'image stackée actuelle
+            stacked_image = self.stacker.get_result()
+
+            if stacked_image is None:
+                print(f"  [ISP] ✗ Impossible de récupérer l'image stackée")
+                return
+
+            # Calibrer l'ISP
+            from .isp import ISPCalibrator, ISP
+            isp_config_auto = ISPCalibrator.calibrate_from_stacked_image(
+                stacked_image,
+                method=method
+            )
+
+            # Fusionner avec la config existante si présente
+            if self.isp and self.isp.config and self.config.isp_auto_update_only_wb:
+                # Mode fusion : mise à jour UNIQUEMENT des gains RGB
+                # Préserve gamma, contrast, saturation, CCM, black_level, etc.
+                existing_config = self.isp.config
+
+                # Mettre à jour UNIQUEMENT les gains RGB (calibration auto)
+                existing_config.wb_red_gain = isp_config_auto.wb_red_gain
+                existing_config.wb_green_gain = isp_config_auto.wb_green_gain
+                existing_config.wb_blue_gain = isp_config_auto.wb_blue_gain
+
+                # Mettre à jour les infos de calibration
+                if 'auto_calibration' not in existing_config.calibration_info:
+                    existing_config.calibration_info['auto_calibration'] = {}
+                existing_config.calibration_info['auto_calibration'].update(isp_config_auto.calibration_info)
+                existing_config.calibration_info['auto_calibrated_at_frame'] = self.config.num_stacked
+                existing_config.calibration_info['mode'] = 'wb_only'
+
+                # Garder l'instance ISP existante (pas besoin de recréer)
+                isp_config = existing_config
+
+                print(f"  [ISP] ✓ Gains RGB mis à jour (gamma={existing_config.gamma:.2f}, "
+                      f"contrast={existing_config.contrast:.2f}, saturation={existing_config.saturation:.2f} préservés)")
+            else:
+                # Mode remplacement complet : utiliser toute la calibration auto
+                self.isp = ISP(isp_config_auto)
+                isp_config = isp_config_auto
+                print(f"  [ISP] ✓ Nouvelle config ISP complète créée")
+
+            # Mettre à jour le tracking
+            self._isp_calibrated = True
+            self._last_isp_calibration_frame = self.config.num_stacked
+
+            print(f"  [ISP] ✓ Calibration réussie! Gains RGB: "
+                  f"R={isp_config.wb_red_gain:.3f}, "
+                  f"G={isp_config.wb_green_gain:.3f}, "
+                  f"B={isp_config.wb_blue_gain:.3f}")
+
+            # Optionnel: sauvegarder la config pour référence
+            if self.output_dir:
+                config_path = self.output_dir / 'session_isp_config_auto.json'
+                self.isp.save_config(config_path)
+
+        except Exception as e:
+            print(f"  [ISP] ✗ Erreur lors de la calibration: {e}")
+            import traceback
+            traceback.print_exc()
+
     def _print_final_stats(self):
         """Affiche stats finales"""
         print(f"\n[STATS] Final:")
