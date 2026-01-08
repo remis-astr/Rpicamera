@@ -549,6 +549,7 @@ def yuv420_to_rgb(yuv_data, width, height):
 def convert_yuv420_to_ser(yuv_file, ser_file, width, height, fps=25):
     """
     Convertit un fichier YUV420 en SER avec timestamps
+    Optimisé pour éviter la saturation RAM - traite les frames par lots
 
     Args:
         yuv_file: Fichier .yuv d'entrée
@@ -572,73 +573,90 @@ def convert_yuv420_to_ser(yuv_file, ser_file, width, height, fps=25):
     uv_width = (width + 1) // 2
     uv_height = (height + 1) // 2
     uv_size = uv_width * uv_height
-    frame_size = y_size + 2 * uv_size
+    yuv_frame_size = y_size + 2 * uv_size
+    rgb_frame_size = width * height * 3
 
     file_size = os.path.getsize(yuv_file)
-    frame_count = file_size // frame_size
+    total_frames = file_size // yuv_frame_size
 
-    if frame_count == 0:
+    if total_frames == 0:
         return False, 0, "Aucune frame YUV420 trouvée"
 
-    print(f"📹 Conversion YUV420 → SER")
+    print(f"📹 Conversion YUV420 → SER (optimisée RAM)")
     print(f"   Fichier: {yuv_file}")
     print(f"   Résolution: {width}x{height}")
-    print(f"   Taille frame: {frame_size} bytes (Y:{y_size}, UV:{uv_size}x2)")
-    print(f"   Frames: {frame_count}")
+    print(f"   Taille frame YUV: {yuv_frame_size} bytes (Y:{y_size}, UV:{uv_size}x2)")
+    print(f"   Frames: {total_frames}")
     print(f"   FPS: {fps}")
     print()
 
-    # Créer un fichier RGB temporaire
-    temp_rgb = "/run/shm/temp_rgb_from_yuv.raw"
-
     try:
-        frames_converted = 0
-        with open(yuv_file, 'rb') as yuvf, open(temp_rgb, 'wb') as rgbf:
-            for i in range(frame_count):
-                # Lire frame YUV420
-                yuv_data = yuvf.read(frame_size)
-                if len(yuv_data) < frame_size:
-                    print(f"   ⚠️  Frame {i+1} incomplète ({len(yuv_data)}/{frame_size} bytes)")
-                    break
+        frame_count = 0
+        frame_timestamps = []
 
-                # Convertir YUV420 → RGB
-                rgb = yuv420_to_rgb(yuv_data, width, height)
+        # Calculer le timestamp de départ
+        start_time = datetime.datetime.utcnow()
+        start_timestamp_us = int(start_time.timestamp() * 1000000)
+        frame_interval_us = int(1000000 / fps)
 
-                if rgb is None:
-                    print(f"   ❌ Erreur conversion frame {i+1}")
-                    continue
+        with open(ser_file, 'wb') as serf:
+            # Écrire l'en-tête SER
+            header = create_ser_header(width, height, 8, 100)  # RGB, 8-bit
+            serf.write(header)
 
-                # Écrire RGB
-                rgbf.write(rgb.tobytes())
-                frames_converted += 1
+            # Ouvrir le fichier YUV et traiter frame par frame
+            with open(yuv_file, 'rb') as yuvf:
+                for i in range(total_frames):
+                    # Lire frame YUV420
+                    yuv_data = yuvf.read(yuv_frame_size)
+                    if len(yuv_data) < yuv_frame_size:
+                        print(f"   ⚠️  Frame {i+1} incomplète ({len(yuv_data)}/{yuv_frame_size} bytes)")
+                        break
 
-                if (i + 1) % 10 == 0:
-                    print(f"   Frame {i+1}/{frame_count}...")
+                    # Convertir YUV420 → RGB
+                    rgb = yuv420_to_rgb(yuv_data, width, height)
 
-        if frames_converted < frame_count:
-            print(f"   ⚠️  {frames_converted}/{frame_count} frames converties")
+                    if rgb is None:
+                        print(f"   ❌ Erreur conversion frame {i+1}")
+                        continue
 
-        print(f"\n🎬 Création du SER avec timestamps @ {fps} fps...")
+                    # Calculer timestamp
+                    frame_timestamp = start_timestamp_us + (i * frame_interval_us)
+                    frame_timestamps.append(frame_timestamp)
 
-        # Utiliser convert_raw_to_ser qui fonctionne !
-        success, frames, msg = convert_raw_to_ser(
-            temp_rgb, ser_file, width, height, fps=fps, bit_depth=8
-        )
+                    # Écrire directement dans le SER
+                    serf.write(rgb.tobytes())
+                    frame_count += 1
 
-        # Nettoyer
-        try:
-            os.remove(temp_rgb)
-        except:
-            pass
+                    # Afficher progression
+                    if (i + 1) % 50 == 0 or i == 0:
+                        print(f"   Conversion: {i+1}/{total_frames} frames ({(i+1)/total_frames*100:.1f}%)")
 
-        return success, frames, msg
+            # Écrire les timestamps (SER v3)
+            for timestamp in frame_timestamps:
+                serf.write(struct.pack('<Q', timestamp))
+
+        # Mettre à jour le nombre de frames dans l'en-tête
+        update_ser_frame_count(ser_file, frame_count)
+
+        output_size = os.path.getsize(ser_file)
+        print()
+        print(f"✓ Conversion terminée!")
+        print(f"   Fichier sortie: {ser_file}")
+        print(f"   Frames converties: {frame_count}")
+        print(f"   Taille: {output_size:,} bytes ({output_size/(1024*1024):.2f} MB)")
+
+        return True, frame_count, "Conversion réussie"
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return False, 0, f"Erreur: {str(e)}"
 
 def convert_rgb888_to_ser(rgb_file, ser_file, width, height, fps=25, bytes_per_pixel=3):
     """
     Convertit un fichier RGB888 ou XRGB8888 brut en SER avec timestamps
+    Optimisé pour éviter la saturation RAM - traite les frames une par une
 
     Args:
         rgb_file: Fichier .rgb/.raw d'entrée
@@ -658,69 +676,246 @@ def convert_rgb888_to_ser(rgb_file, ser_file, width, height, fps=25, bytes_per_p
     # Calculer la taille d'une frame
     frame_size = width * height * bytes_per_pixel
     file_size = os.path.getsize(rgb_file)
-    frame_count = file_size // frame_size
+    total_frames = file_size // frame_size
 
-    if frame_count == 0:
+    if total_frames == 0:
         return False, 0, "Aucune frame RGB trouvée"
 
     format_name = "XRGB8888" if bytes_per_pixel == 4 else "RGB888"
-    print(f"📹 Conversion {format_name} → SER")
+    print(f"📹 Conversion {format_name} → SER (optimisée RAM)")
     print(f"   Fichier: {rgb_file}")
     print(f"   Résolution: {width}x{height}")
     print(f"   Taille frame: {frame_size} bytes ({bytes_per_pixel} bytes/pixel)")
-    print(f"   Frames: {frame_count}")
+    print(f"   Frames: {total_frames}")
     print(f"   FPS: {fps}")
     print()
 
-    # Si XRGB8888, convertir en RGB888
+    # Si XRGB8888, convertir frame par frame directement dans SER
     if bytes_per_pixel == 4:
-        temp_rgb = "/run/shm/temp_rgb888.raw"
         try:
-            frames_converted = 0
-            with open(rgb_file, 'rb') as xrgbf, open(temp_rgb, 'wb') as rgbf:
-                for i in range(frame_count):
-                    # Lire frame XRGB8888
-                    xrgb_data = xrgbf.read(frame_size)
-                    if len(xrgb_data) < frame_size:
-                        print(f"   ⚠️  Frame {i+1} incomplète")
-                        break
+            frame_count = 0
+            frame_timestamps = []
 
-                    # Convertir XRGB8888 → RGB888 (enlever le canal X)
-                    xrgb = np.frombuffer(xrgb_data, dtype=np.uint8).reshape(height, width, 4)
-                    rgb = xrgb[:, :, :3]  # Prendre seulement RGB, ignorer X
+            # Calculer le timestamp de départ
+            start_time = datetime.datetime.utcnow()
+            start_timestamp_us = int(start_time.timestamp() * 1000000)
+            frame_interval_us = int(1000000 / fps)
 
-                    # Écrire RGB
-                    rgbf.write(rgb.tobytes())
-                    frames_converted += 1
+            with open(ser_file, 'wb') as serf:
+                # Écrire l'en-tête SER
+                header = create_ser_header(width, height, 8, 100)  # RGB, 8-bit
+                serf.write(header)
 
-                    if (i + 1) % 10 == 0:
-                        print(f"   Frame {i+1}/{frame_count}...")
+                # Ouvrir le fichier XRGB et traiter frame par frame
+                with open(rgb_file, 'rb') as xrgbf:
+                    for i in range(total_frames):
+                        # Lire frame XRGB8888
+                        xrgb_data = xrgbf.read(frame_size)
+                        if len(xrgb_data) < frame_size:
+                            print(f"   ⚠️  Frame {i+1} incomplète")
+                            break
 
-            print(f"\n🎬 Création du SER avec timestamps @ {fps} fps...")
+                        # Convertir XRGB8888 → RGB888 (enlever le canal X)
+                        xrgb = np.frombuffer(xrgb_data, dtype=np.uint8).reshape(height, width, 4)
+                        rgb = xrgb[:, :, :3]  # Prendre seulement RGB, ignorer X
 
-            # Utiliser convert_raw_to_ser
-            success, frames, msg = convert_raw_to_ser(
-                temp_rgb, ser_file, width, height, fps=fps, bit_depth=8
-            )
+                        # Calculer timestamp
+                        frame_timestamp = start_timestamp_us + (i * frame_interval_us)
+                        frame_timestamps.append(frame_timestamp)
 
-            # Nettoyer
-            try:
-                os.remove(temp_rgb)
-            except:
-                pass
+                        # Écrire directement dans le SER
+                        serf.write(rgb.tobytes())
+                        frame_count += 1
 
-            return success, frames, msg
+                        # Afficher progression
+                        if (i + 1) % 50 == 0 or i == 0:
+                            print(f"   Conversion: {i+1}/{total_frames} frames ({(i+1)/total_frames*100:.1f}%)")
+
+                # Écrire les timestamps (SER v3)
+                for timestamp in frame_timestamps:
+                    serf.write(struct.pack('<Q', timestamp))
+
+            # Mettre à jour le nombre de frames dans l'en-tête
+            update_ser_frame_count(ser_file, frame_count)
+
+            output_size = os.path.getsize(ser_file)
+            print()
+            print(f"✓ Conversion terminée!")
+            print(f"   Fichier sortie: {ser_file}")
+            print(f"   Frames converties: {frame_count}")
+            print(f"   Taille: {output_size:,} bytes ({output_size/(1024*1024):.2f} MB)")
+
+            return True, frame_count, "Conversion réussie"
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             return False, 0, f"Erreur conversion XRGB8888: {str(e)}"
     else:
-        # RGB888 déjà au bon format, utiliser directement
-        print(f"🎬 Création du SER avec timestamps @ {fps} fps...")
-        return convert_raw_to_ser(
-            rgb_file, ser_file, width, height, fps=fps, bit_depth=8
-        )
+        # RGB888 - inverser RGB→BGR pendant la conversion
+        try:
+            frame_count = 0
+            frame_timestamps = []
 
-def debayer_raw_array(raw_array, raw_format_str, red_gain=1.0, blue_gain=1.0, apply_denoise=True, swap_rb=False):
+            # Calculer le timestamp de départ
+            start_time = datetime.datetime.utcnow()
+            start_timestamp_us = int(start_time.timestamp() * 1000000)
+            frame_interval_us = int(1000000 / fps)
+
+            with open(ser_file, 'wb') as serf:
+                # Écrire l'en-tête SER
+                header = create_ser_header(width, height, 8, 100)  # RGB, 8-bit
+                serf.write(header)
+
+                # Ouvrir le fichier RGB et traiter frame par frame
+                with open(rgb_file, 'rb') as rgbf:
+                    for i in range(total_frames):
+                        # Lire frame RGB888
+                        rgb_data = rgbf.read(frame_size)
+                        if len(rgb_data) < frame_size:
+                            print(f"   ⚠️  Frame {i+1} incomplète")
+                            break
+
+                        # Inverser RGB → BGR (SER attend BGR)
+                        rgb = np.frombuffer(rgb_data, dtype=np.uint8).reshape(height, width, 3)
+                        bgr = rgb[:, :, ::-1]  # Inverser les canaux
+
+                        # Calculer timestamp
+                        frame_timestamp = start_timestamp_us + (i * frame_interval_us)
+                        frame_timestamps.append(frame_timestamp)
+
+                        # Écrire dans le SER
+                        serf.write(bgr.tobytes())
+                        frame_count += 1
+
+                        # Afficher progression
+                        if (i + 1) % 50 == 0 or i == 0:
+                            print(f"   Conversion: {i+1}/{total_frames} frames ({(i+1)/total_frames*100:.1f}%)")
+
+                # Écrire les timestamps (SER v3)
+                for timestamp in frame_timestamps:
+                    serf.write(struct.pack('<Q', timestamp))
+
+            # Mettre à jour le nombre de frames dans l'en-tête
+            update_ser_frame_count(ser_file, frame_count)
+
+            output_size = os.path.getsize(ser_file)
+            print()
+            print(f"✓ Conversion terminée!")
+            print(f"   Fichier sortie: {ser_file}")
+            print(f"   Frames converties: {frame_count}")
+            print(f"   Taille: {output_size:,} bytes ({output_size/(1024*1024):.2f} MB)")
+
+            return True, frame_count, "Conversion réussie"
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return False, 0, f"Erreur conversion RGB888: {str(e)}"
+
+def auto_fix_bad_pixels_bayer(raw_bayer, sigma=5.0, min_threshold_adu=20.0, blend_factor=0.7):
+    """
+    Détection et correction automatique des pixels morts/chauds en respectant le pattern Bayer.
+    VERSION AMÉLIORÉE POUR FAIBLE LUMINOSITÉ : Détection asymétrique + correction partielle.
+
+    Améliorations par rapport à la version précédente :
+    1. Détection ASYMÉTRIQUE : corrige uniquement les pixels CHAUDS (plus brillants que voisins)
+       → Préserve les détails sombres et les étoiles faibles
+    2. Seuil ADAPTATIF LOCAL par blocs (pas global)
+       → Plus robuste aux variations de luminosité dans l'image
+    3. Correction PARTIELLE (70% médiane + 30% original)
+       → Moins destructif, préserve mieux les gradients fins
+    4. Seuil MINIMUM ABSOLU pour ignorer le bruit faible
+       → Évite de corriger le bruit naturel en faible luminosité
+
+    Args:
+        raw_bayer: Array RAW Bayer uint16 (height, width)
+        sigma: Seuil de détection en nombre d'écarts-types (défaut=5.0)
+               Plus élevé = moins agressif, moins de risque de lisser les détails
+        min_threshold_adu: Seuil minimum absolu en ADU (défaut=20.0)
+                           Ignore déviations < cette valeur pour préserver bruit faible
+                           Mettre à 0 pour désactiver (plus agressif)
+        blend_factor: Facteur de mélange pour correction (défaut=0.7)
+                      0.7 = 70% médiane + 30% original (doux)
+                      0.95 = 95% médiane + 5% original (agressif)
+
+    Returns:
+        Array RAW Bayer corrigé uint16
+    """
+    import cv2
+
+    # IMPORTANT: Toujours traiter par canal Bayer pour éviter biais colorimétrique
+    fixed = raw_bayer.astype(np.float32)
+
+    # Traiter les 4 canaux Bayer séparément avec médiane Bayer-aware
+    for start_y in range(2):
+        for start_x in range(2):
+            channel = fixed[start_y::2, start_x::2].copy()
+
+            # Médiane locale 3x3 (8 voisins + pixel central)
+            median_filtered = cv2.medianBlur(channel.astype(np.uint16), 3).astype(np.float32)
+
+            # AMÉLIORATION 1 : Détection ASYMÉTRIQUE (seulement pixels CHAUDS)
+            # Pixels chauds = plus brillants que médiane locale
+            deviation_hot = channel - median_filtered  # Positif si pixel > médiane
+            deviation_hot = np.maximum(deviation_hot, 0)  # Ignorer pixels plus sombres
+
+            # AMÉLIORATION 2 : Seuil ADAPTATIF LOCAL par blocs 64×64
+            # (Au lieu d'un seuil global qui échoue en faible luminosité)
+            block_size = 64
+            h, w = channel.shape
+            threshold_map = np.zeros_like(channel)
+
+            for by in range(0, h, block_size):
+                for bx in range(0, w, block_size):
+                    # Extraire bloc
+                    y_end = min(by + block_size, h)
+                    x_end = min(bx + block_size, w)
+                    block_dev = deviation_hot[by:y_end, bx:x_end]
+
+                    # MAD local du bloc
+                    mad_local = np.median(block_dev[block_dev > 0]) if np.any(block_dev > 0) else 0
+
+                    # Seuil local (1.4826 = conversion MAD → std)
+                    threshold_local = sigma * mad_local * 1.4826
+
+                    # Fallback sur percentile 95 si MAD trop faible
+                    if mad_local < 1e-6:
+                        threshold_local = sigma * np.percentile(block_dev, 95)
+
+                    # AMÉLIORATION 4 : Seuil MINIMUM ABSOLU (ignorer bruit faible)
+                    # Cela évite de corriger le bruit thermique naturel en faible luminosité
+                    # Note: min_threshold_adu est passé en paramètre, peut être 0 pour désactiver
+                    if min_threshold_adu > 0:
+                        threshold_local = max(threshold_local, min_threshold_adu)
+
+                    # Remplir la carte de seuils
+                    threshold_map[by:y_end, bx:x_end] = threshold_local
+
+            # Détecter pixels chauds (dépassent seuil local)
+            is_hot_pixel = deviation_hot > threshold_map
+
+            # Ignorer les bords (1 pixel de marge)
+            is_hot_pixel[0, :] = False
+            is_hot_pixel[-1, :] = False
+            is_hot_pixel[:, 0] = False
+            is_hot_pixel[:, -1] = False
+
+            # AMÉLIORATION 3 : Correction PARTIELLE (blending configurable)
+            # Au lieu de remplacer 100% par médiane, mélanger selon blend_factor
+            # → Préserve les gradients fins et les détails faibles
+            # blend_factor passé en paramètre (défaut 0.7 = 70% médiane, 30% original)
+            channel[is_hot_pixel] = (
+                blend_factor * median_filtered[is_hot_pixel] +
+                (1 - blend_factor) * channel[is_hot_pixel]
+            )
+
+            fixed[start_y::2, start_x::2] = channel
+
+    return np.clip(fixed, 0, 65535).astype(np.uint16)
+
+
+def debayer_raw_array(raw_array, raw_format_str, red_gain=1.0, blue_gain=1.0, apply_denoise=True, swap_rb=False, fix_bad_pixels=False, sigma_threshold=5.0, min_adu_threshold=20.0):
     """
     Débayérise un array RAW Bayer (SRGGB12 ou SRGGB16) en RGB uint16 avec balance des blancs.
 
@@ -733,6 +928,9 @@ def debayer_raw_array(raw_array, raw_format_str, red_gain=1.0, blue_gain=1.0, ap
         blue_gain: Gain du canal bleu (AWB, défaut=1.0)
         apply_denoise: Appliquer débruitage logiciel pour compenser l'absence d'ISP (défaut=True)
         swap_rb: Inverser les gains rouge et bleu (défaut=False)
+        fix_bad_pixels: Activer la correction automatique des pixels morts (défaut=False)
+        sigma_threshold: Seuil de détection des pixels morts en sigma (défaut=5.0)
+        min_adu_threshold: Seuil minimum absolu en ADU (défaut=20.0, 0=désactivé)
 
     Returns:
         Array numpy uint16 (height, width, 3) RGB [0-65535]
@@ -744,6 +942,10 @@ def debayer_raw_array(raw_array, raw_format_str, red_gain=1.0, blue_gain=1.0, ap
         raw_uint16 = raw_array.view(np.uint16)
         width = stride_bytes // 2
         raw_image = raw_uint16.reshape(height, -1)[:, :width]
+
+        # *** CORRECTION PIXELS MORTS (automatique par sigma-clipping) ***
+        if fix_bad_pixels:
+            raw_image = auto_fix_bad_pixels_bayer(raw_image, sigma=sigma_threshold, min_threshold_adu=min_adu_threshold)
 
         # *** DÉBRUITAGE PRÉ-DEBAYER (optionnel) ***
         # DÉSACTIVÉ car cause écran noir pendant le stack (trop lent)
@@ -985,7 +1187,7 @@ blue        = 12   # blue balance
 red         = 15   # red balance 
 extn        = 0    # still file type  (0 = jpg), see extns below
 vlen        = 10   # video length in seconds
-fps         = 15   # video fps - Réduit pour IMX585
+fps         = 100  # video fps - Optimisé pour IMX585 (max 178 fps en 800x600)
 vformat     = 10   # set video format (10 = 1920x1080), see vwidths & vheights below
 codec       = 0    # set video codec  (0 = h264), see codecs below
 ser_format  = 1    # set SER capture format (0 = YUV420, 1 = RGB888, 2 = XRGB8888), see ser_formats below
@@ -997,6 +1199,9 @@ meter       = 2    # metering mode (2 = average), see meters below
 awb         = 1    # auto white balance mode, off, auto etc (1 = auto), see awbs below
 sharpness   = 15   # set sharpness level
 denoise     = 1    # set denoise level, see denoises below
+fix_bad_pixels = 1  # auto-fix bad/hot pixels in RAW mode (0=off, 1=on)
+fix_bad_pixels_sigma = 40  # threshold for bad pixel detection (×10, 50=5.0 sigma)
+fix_bad_pixels_min_adu = 100  # seuil minimum absolu en ADU (×10, 200=20 ADU, 0=désactivé)
 quality     = 93   # set quality level
 profile     = 0    # set h264 profile, see h264profiles below
 level       = 0    # set h264 level
@@ -1028,8 +1233,8 @@ script_dir  = os.path.dirname(os.path.abspath(__file__))
 config_file = os.path.join(script_dir, con_file)
 
 # inital parameters
-prev_fps    = 5   # Réduit pour IMX585 
-focus_fps   = 5  # Réduit pour IMX585
+prev_fps    = 60  # Optimisé pour IMX585 (haute performance)
+focus_fps   = 60  # Optimisé pour IMX585 (haute performance)
 focus       = 700
 foc_man     = 0
 focus_mode  = 0
@@ -1200,7 +1405,7 @@ vheights     = [480,540,600, 720, 960, 972, 990,1088, 864,1232,1080,1090,1080,15
 v_max_fps    = [200,120, 40,  40,  40,  30,  60,  30,  30,  30,  30,  30,  50,  40,  25,  40,  20,  20,  20,  20,  20,  10,  20,  20,  20,  20,  20,  20]
 v3_max_fps   = [200,120,125, 120, 120, 120, 120, 120, 120, 100, 100,  50, 100,  56,  56,  40,  20,  20,  20,  20,  20,  15,  20,  20,  20  ,20,  20,  20]
 v9_max_fps   = [240, 200, 150, 120, 100, 100, 80, 60, 60, 60, 60]
-v10_max_fps  = [150,120,150, 120, 100, 100, 100, 100, 100, 100, 90,  87,  90,  60,  56,  40,  30,  30,  30,  30,  30,  20,  20,  20,  20,  20,  20,  20]  # IMX585 crop modes
+v10_max_fps  = [178,150,178, 150, 150, 150, 150, 150, 150, 150, 100, 50, 100,  60,  56,  51,  43,  43,  43,  43,  43,  43,  43,  43,  43,  43,  43,  43]  # IMX585 modes réels (178fps@800x600, 150fps@720p, 100fps@1080p, 51fps@2.8K, 43fps@4K)
 v15_max_fps  = [240,200,200, 130]
 zwidths      = [640,800,1280,2592,3280,4056,4656,9152]
 zheights     = [480,600, 960,1944,2464,3040,3496,6944]
@@ -1244,11 +1449,11 @@ zoom_res_labels = {
 # FPS optimaux pour chaque niveau de zoom (ROI permet des FPS plus élevés)
 # Format: {zoom_level: (fps_standard, fps_v3, fps_v9, fps_imx585)}
 zoom_optimal_fps = {
-    1: (30, 50, 60, 40),     # 2880x2160 - Mode 2 hardware (résolution la plus haute)
-    2: (60, 100, 120, 90),   # 1920x1080 - Mode 3 hardware
-    3: (120, 120, 150, 120), # 1280x720  - Mode 4 hardware
-    4: (200, 200, 240, 150), # 800x600   - Mode 5 hardware
-    5: (200, 200, 240, 150)  # 800x600   - Mode 5 hardware
+    1: (30, 50, 60, 51),     # 2880x2160 - Mode 2 hardware (IMX585: 51.14 fps)
+    2: (60, 100, 120, 100),  # 1920x1080 - Mode 3 hardware (IMX585: 100 fps)
+    3: (120, 120, 150, 150), # 1280x720  - Mode 4 hardware (IMX585: 150.02 fps)
+    4: (200, 200, 240, 178), # 800x600   - Mode 5 hardware (IMX585: 178.57 fps)
+    5: (200, 200, 240, 178)  # 800x600   - Mode 5 hardware (IMX585: 178.57 fps)
 }
 
 def sync_video_resolution_with_zoom():
@@ -1449,7 +1654,7 @@ ls_lucky_save_final = 1      # 0=OFF, 1=ON (sauvegarder PNG/FITS final LuckyStac
 still_limits = ['mode',0,len(modes)-1,'speed',0,len(shutters)-1,'gain',0,30,'brightness',-100,100,'contrast',0,200,'ev',-10,10,'blue',1,80,'sharpness',0,30,
                 'denoise',0,len(denoises)-1,'quality',0,100,'red',1,80,'extn',0,len(extns)-1,'saturation',0,20,'meter',0,len(meters)-1,'awb',0,len(awbs)-1,
                 'histogram',0,len(histograms)-1,'v3_f_speed',0,len(v3_f_speeds)-1,'v3_hdr',0,len(v3_hdrs)-1,'focus_method',0,4,'star_metric',0,2,'snr_display',0,1,'metrics_interval',1,10]
-video_limits = ['vlen',0,3600,'fps',1,40,'v5_focus',10,2500,'vformat',0,7,'0',0,0,'zoom',0,5,'Focus',0,1,'tduration',1,86400,'tinterval',0.01,10,'tshots',1,999,
+video_limits = ['vlen',0,3600,'fps',1,180,'v5_focus',10,2500,'vformat',0,7,'0',0,0,'zoom',0,5,'Focus',0,1,'tduration',1,86400,'tinterval',0.01,10,'tshots',1,999,
                 'flicker',0,3,'codec',0,len(codecs)-1,'ser_format',0,len(ser_formats)-1,'profile',0,len(h264profiles)-1,'v3_focus',10,2000,'histarea',10,300,'v3_f_range',0,len(v3_f_ranges)-1,
                 'str_cap',0,len(strs)-1,'v6_focus',10,1020,'stretch_p_low',0,2,'stretch_p_high',9995,10000,'stretch_factor',0,80,'stretch_preset',0,2,
                 'ghs_D',-10,100,'ghs_b',-300,100,'ghs_SP',0,100,'ghs_LP',0,100,'ghs_HP',0,100,'ghs_preset',0,3,'use_native_sensor_mode',0,1,
@@ -5613,7 +5818,10 @@ while True:
                 # INVERSÉS pour compenser le pattern Bayer RGGB qui inverse les canaux
                 array_uint16 = debayer_raw_array(raw_array, raw_formats[raw_format],
                                                   red_gain=(blue/10),   # Le curseur BLEU contrôle le rouge
-                                                  blue_gain=(red/10))   # Le curseur ROUGE contrôle le bleu
+                                                  blue_gain=(red/10),   # Le curseur ROUGE contrôle le bleu
+                                                  fix_bad_pixels=bool(fix_bad_pixels) and livestack_active,  # SEULEMENT LiveStack, PAS LuckyStack
+                                                  sigma_threshold=fix_bad_pixels_sigma/10.0,
+                                                  min_adu_threshold=fix_bad_pixels_min_adu/10.0)
                 # CORRECTION: Garder la pleine dynamique 16-bit [0-65535] pour RAW12/16
                 # Ne plus compresser à [0-255] car libastrostack gère correctement les données haute résolution
                 # Convertir juste en float32 pour compatibilité avec libastrostack
@@ -5727,54 +5935,20 @@ while True:
 
                 # Récupérer le master stack pour affichage
                 try:
-                    master_stack = livestack.get_current_preview()
+                    # NOUVEAU: Utiliser get_preview_for_display() qui applique le MÊME pipeline
+                    # que le PNG sauvegardé (ISP + stretch complet), mais converti en uint8 pour pygame
+                    # Ceci garantit que l'affichage à l'écran correspond exactement au PNG
+                    stacked_array = livestack.get_preview_for_display()
 
-                    if master_stack is not None:
-                        # CORRECTION LUMINOSITÉ: Appliquer le même auto-stretch percentile que LuckyStack
-                        # pour une luminosité cohérente entre les deux modes
-
-                        # 1. Détecter la plage de données et normaliser si nécessaire
-                        max_val = master_stack.max()
-                        min_val = master_stack.min()
-
-                        if max_val > 256:
-                            # Données 16-bit: normaliser à [0-255] pour pygame
-                            stacked_array = (master_stack / 256.0).astype(np.float32)
-                        else:
-                            # Données déjà en [0-255]
-                            stacked_array = master_stack.astype(np.float32)
-
-                        # 2. AUTO-STRETCH PERCENTILE (comme LuckyStack)
-                        # Utiliser les percentiles 0.1% et 99.9% pour ignorer les outliers
-                        p_low = np.percentile(stacked_array, 0.1)
-                        p_high = np.percentile(stacked_array, 99.9)
-
-                        # Afficher les infos de stretch une fois par session
-                        if not hasattr(pygame, '_livestack_stretch_info_shown'):
-                            print(f"\n[LIVESTACK] Auto-stretch percentiles:")
-                            print(f"  Plage totale: [{stacked_array.min():.1f}, {stacked_array.max():.1f}]")
-                            print(f"  Percentiles (0.1%, 99.9%): [{p_low:.1f}, {p_high:.1f}]")
-                            pygame._livestack_stretch_info_shown = True
-
-                        # Étirer entre les percentiles vers [0-255]
-                        if p_high > p_low:
-                            stacked_array = np.clip((stacked_array - p_low) / (p_high - p_low) * 255.0, 0, 255).astype(np.float32)
-                            if not hasattr(pygame, '_livestack_stretch_applied_shown'):
-                                print(f"  → Stretch appliqué: [{p_low:.1f}, {p_high:.1f}] → [0, 255]")
-                                pygame._livestack_stretch_applied_shown = True
-                        else:
-                            # Fallback si pas de dynamique
-                            if not hasattr(pygame, '_livestack_no_stretch_shown'):
-                                print(f"  → Pas de stretch (p_low == p_high)")
-                                pygame._livestack_no_stretch_shown = True
-
-                        # 3. Appliquer le stretch du programme principal si activé (GHS ou Arcsinh)
-                        if stretch_mode == 1 and stretch_preset != 0:
-                            stacked_array = astro_stretch(stacked_array)
-
-                        # Convertir float32 → uint8 pour pygame (APRÈS le stretch)
-                        if stacked_array.dtype == np.float32:
-                            stacked_array = np.clip(stacked_array, 0, 255).astype(np.uint8)
+                    if stacked_array is not None:
+                        # Afficher les infos de traitement une fois par session
+                        if not hasattr(pygame, '_livestack_display_info_shown'):
+                            print(f"\n[LIVESTACK DISPLAY] Affichage avec pipeline PNG complet:")
+                            print(f"  ✓ ISP software (si activé et format RAW)")
+                            print(f"  ✓ Stretch configuré (méthode: {livestack.session.config.png_stretch_method if livestack.session else 'N/A'})")
+                            print(f"  ✓ Conversion uint8 pour pygame")
+                            print(f"  → L'affichage correspond maintenant au PNG sauvegardé")
+                            pygame._livestack_display_info_shown = True
 
                         # Convertir en surface pygame
                         if len(stacked_array.shape) == 3:
@@ -5875,118 +6049,79 @@ while True:
                 if not hasattr(pygame, '_lucky_last_displayed'):
                     pygame._lucky_last_displayed = 0
 
-                # Détecter un nouveau stack (stacks_done a augmenté)
-                if stacks_done > pygame._lucky_last_displayed:
-                    # Nouveau stack Lucky disponible - récupérer le master stack brut
-                    try:
-                        # 1. Récupérer le master stack cumulatif (float array)
-                        master_stack = luckystack.get_current_preview()
+                # CORRECTION: Toujours essayer de récupérer et afficher le preview Lucky
+                # (que ce soit un nouveau stack ou le dernier stack existant)
+                try:
+                    # NOUVEAU: Utiliser get_preview_for_display() qui applique le MÊME pipeline
+                    # que le PNG sauvegardé (ISP + stretch complet), mais converti en uint8 pour pygame
+                    # Ceci garantit que l'affichage à l'écran correspond exactement au PNG
+                    stacked_array = luckystack.get_preview_for_display()
 
-                        if master_stack is not None:
+                    if stacked_array is not None:
+                        # Détecter un nouveau stack seulement pour les sauvegardes PNG
+                        is_new_stack = (stacks_done > pygame._lucky_last_displayed)
 
-                            # DEBUG: Afficher la résolution du stack une seule fois
-                            if not hasattr(pygame, '_lucky_stack_resolution_debug'):
-                                print(f"\n[LUCKYSTACK DEBUG] Résolution du stack:")
-                                print(f"  Stack shape: {master_stack.shape}")
-                                print(f"  Stack dtype: {master_stack.dtype}")
-                                print(f"  Stack range: [{master_stack.min():.1f}, {master_stack.max():.1f}]")
-                                pygame._lucky_stack_resolution_debug = True
+                        if is_new_stack:
+                            # Afficher les infos de traitement une fois au premier stack
+                            if not hasattr(pygame, '_luckystack_display_info_shown'):
+                                print(f"\n[LUCKYSTACK DISPLAY] Affichage avec pipeline PNG complet:")
+                                print(f"  ✓ ISP software (si activé et format RAW)")
+                                print(f"  ✓ Stretch configuré (méthode: {luckystack.session.config.png_stretch_method if luckystack.session else 'N/A'})")
+                                print(f"  ✓ Conversion uint8 pour pygame")
+                                print(f"  → L'affichage correspond maintenant au PNG sauvegardé")
+                                pygame._luckystack_display_info_shown = True
 
-                            # CORRECTION: Le master_stack est déjà en float32 normalisé par lucky_imaging.py
-                            # Appliquer un auto-stretch basé sur les percentiles pour un meilleur affichage
-                            min_val = master_stack.min()
-                            max_val = master_stack.max()
-
-                            # Toujours utiliser un auto-stretch pour les données RAW
-                            # Utiliser les percentiles 0.1% et 99.9% pour ignorer les outliers
-                            p_low = np.percentile(master_stack, 0.1)
-                            p_high = np.percentile(master_stack, 99.9)
-
-                            # Afficher les infos de stretch une fois par session
-                            if not hasattr(pygame, '_lucky_stretch_info_shown'):
-                                print(f"\n[LUCKYSTACK] Auto-stretch percentiles:")
-                                print(f"  Plage totale: [{min_val:.1f}, {max_val:.1f}]")
-                                print(f"  Percentiles (0.1%, 99.9%): [{p_low:.1f}, {p_high:.1f}]")
-                                pygame._lucky_stretch_info_shown = True
-
-                            # Étirer entre les percentiles vers [0-255]
-                            if p_high > p_low:
-                                stacked_array = np.clip((master_stack - p_low) / (p_high - p_low) * 255.0, 0, 255).astype(np.float32)
-                                if not hasattr(pygame, '_lucky_stretch_applied_shown'):
-                                    print(f"  → Stretch appliqué: [{p_low:.1f}, {p_high:.1f}] → [0, 255]")
-                                    pygame._lucky_stretch_applied_shown = True
-                            else:
-                                # Fallback si pas de dynamique
-                                stacked_array = master_stack.astype(np.float32)
-                                if not hasattr(pygame, '_lucky_no_stretch_shown'):
-                                    print(f"  → Pas de stretch (p_low == p_high)")
-                                    pygame._lucky_no_stretch_shown = True
-
-                            # 4. Appliquer le stretch du programme principal si activé (GHS ou Arcsinh)
-                            if stretch_mode == 1 and stretch_preset != 0:
-                                stacked_array = astro_stretch(stacked_array)
-
-                            # Convertir float32 → uint8 pour pygame (APRÈS le stretch)
-                            if stacked_array.dtype == np.float32:
-                                stacked_array = np.clip(stacked_array, 0, 255).astype(np.uint8)
-
-                            # 5. Convertir en surface pygame
-                            if len(stacked_array.shape) == 3:
-                                # RGB: transposer et échanger R/B pour pygame
-                                image = pygame.surfarray.make_surface(
-                                    np.swapaxes(stacked_array, 0, 1)[:,:,[2,1,0]]
-                                )
-                            else:
-                                # MONO
-                                image = pygame.surfarray.make_surface(stacked_array.T)
-
-                            # 6. Redimensionner pour l'affichage
-                            if stretch_mode == 1:
-                                display_modes = pygame.display.list_modes()
-                                if display_modes and display_modes != -1:
-                                    max_width, max_height = display_modes[0]
-                                else:
-                                    screen_info = pygame.display.Info()
-                                    max_width, max_height = screen_info.current_w, screen_info.current_h
-                                image = pygame.transform.scale(image, (max_width, max_height))
-                            elif image.get_width() != preview_width or image.get_height() != preview_height:
-                                image = pygame.transform.scale(image, (preview_width, preview_height))
-
-                            # 7. Afficher
-                            windowSurfaceObj.blit(image, (0, 0))
-                            pygame.display.update()
-
-                            # 8. Cacher pour les frames suivantes
-                            pygame._lucky_cached_image = image
+                            # Mettre à jour le compteur
                             pygame._lucky_last_displayed = stacks_done
 
-                            # 9. Sauvegarder PNG intermédiaire tous les 2 stacks (si activé)
-                            if ls_lucky_save_progress == 1 and stacks_done > 0 and stacks_done % 2 == 0:
-                                if not hasattr(pygame, '_lucky_last_saved'):
-                                    pygame._lucky_last_saved = 0
-                                if stacks_done > pygame._lucky_last_saved:
-                                    try:
-                                        luckystack.save(filename=f"lucky_progress_{stacks_done:04d}")
-                                        pygame._lucky_last_saved = stacks_done
-                                        if show_cmds == 1:
-                                            print(f"[LUCKYSTACK] PNG intermédiaire sauvegardé: stack #{stacks_done}")
-                                    except Exception as e:
-                                        if show_cmds == 1:
-                                            print(f"[LUCKYSTACK] Erreur save PNG: {e}")
+                        # Convertir en surface pygame
+                        if len(stacked_array.shape) == 3:
+                            # RGB: transposer et échanger R/B pour pygame
+                            image = pygame.surfarray.make_surface(
+                                np.swapaxes(stacked_array, 0, 1)[:,:,[2,1,0]]
+                            )
+                        else:
+                            # MONO
+                            image = pygame.surfarray.make_surface(stacked_array.T)
 
-                    except Exception as e:
-                        if show_cmds == 1:
-                            print(f"[DEBUG] Erreur affichage Lucky: {e}")
-                            import traceback
-                            traceback.print_exc()
-                        pass
+                        # Redimensionner pour l'affichage
+                        if stretch_mode == 1:
+                            display_modes = pygame.display.list_modes()
+                            if display_modes and display_modes != -1:
+                                max_width, max_height = display_modes[0]
+                            else:
+                                screen_info = pygame.display.Info()
+                                max_width, max_height = screen_info.current_w, screen_info.current_h
+                            image = pygame.transform.scale(image, (max_width, max_height))
+                        elif image.get_width() != preview_width or image.get_height() != preview_height:
+                            image = pygame.transform.scale(image, (preview_width, preview_height))
 
-                # Afficher l'image cachée si disponible (entre les cycles Lucky)
-                elif hasattr(pygame, '_lucky_cached_image') and pygame._lucky_cached_image is not None:
-                    windowSurfaceObj.blit(pygame._lucky_cached_image, (0, 0))
-                    pygame.display.update()
-                    # Marquer que l'affichage Lucky est fait
-                    livestack_display_done = True
+                        # Afficher
+                        windowSurfaceObj.blit(image, (0, 0))
+                        pygame.display.update()
+
+                        # Marquer que l'affichage Lucky est fait
+                        livestack_display_done = True
+
+                        # Sauvegarder PNG intermédiaire tous les 2 stacks (si activé ET nouveau stack)
+                        if is_new_stack and ls_lucky_save_progress == 1 and stacks_done > 0 and stacks_done % 2 == 0:
+                            if not hasattr(pygame, '_lucky_last_saved'):
+                                pygame._lucky_last_saved = 0
+                            if stacks_done > pygame._lucky_last_saved:
+                                try:
+                                    luckystack.save(filename=f"lucky_progress_{stacks_done:04d}")
+                                    pygame._lucky_last_saved = stacks_done
+                                    if show_cmds == 1:
+                                        print(f"[LUCKYSTACK] PNG intermédiaire sauvegardé: stack #{stacks_done}")
+                                except Exception as e:
+                                    if show_cmds == 1:
+                                        print(f"[LUCKYSTACK] Erreur save PNG: {e}")
+
+                except Exception as e:
+                    if show_cmds == 1:
+                        print(f"[DEBUG] Erreur affichage Lucky: {e}")
+                        import traceback
+                        traceback.print_exc()
 
                 # Si aucun stack n'est disponible, le flux vidéo sera affiché par le code normal
                 # (livestack_display_done reste False)
@@ -6336,20 +6471,12 @@ while True:
                     # Largeur de chaque graphique = moitié du bandeau moins marges
                     graph_width = int((preview_width - 40) / 2)  # -40 pour marges (10+10+10+10)
 
-                    # DEBUG: Afficher les valeurs des métriques
-                    if show_cmds == 1:
-                        print(f"[DEBUG GRAPHS] focus_method={focus_method}, star_metric={star_metric}, foc={foc}, hfr_val={hfr_val}, fwhm_val={fwhm_val}")
-
                     # Graphique 1 (gauche) : Métrique stellaire (HFR ou FWHM selon star_metric)
                     star_surface = None
                     if star_metric == 1 and hfr_val is not None:  # HFR
                         star_surface = update_star_metric_graph(hfr_val, 'HFR')
-                        if show_cmds == 1 and star_surface is None:
-                            print(f"[DEBUG GRAPHS] update_star_metric_graph('HFR') returned None")
                     elif star_metric == 2 and fwhm_val is not None:  # FWHM
                         star_surface = update_star_metric_graph(fwhm_val, 'FWHM')
-                        if show_cmds == 1 and star_surface is None:
-                            print(f"[DEBUG GRAPHS] update_star_metric_graph('FWHM') returned None")
 
                     if star_surface is not None and alt_dis < 2:
                         graph1_x = 10
@@ -6362,14 +6489,10 @@ while True:
                                             graph1_resized.get_height() + 4), 2)
 
                         windowSurfaceObj.blit(graph1_resized, (graph1_x, graph_y))
-                        if show_cmds == 1:
-                            print(f"[DEBUG GRAPHS] Star metric graph displayed")
 
                     # Graphique 2 (droite) : Focus selon focus_method
                     if focus_method > 0 and foc is not None:
                         focus_surface = update_focus_graph(foc, focus_methods[focus_method])
-                        if show_cmds == 1 and focus_surface is None:
-                            print(f"[DEBUG GRAPHS] update_focus_graph() returned None")
                         if focus_surface is not None and alt_dis < 2:
                             graph2_x = 10 + graph_width + 20  # Après le premier graphique + marge
                             graph2_resized = pygame.transform.scale(focus_surface, (graph_width, graph_height))
@@ -6381,20 +6504,25 @@ while True:
                                                 graph2_resized.get_height() + 4), 2)
 
                             windowSurfaceObj.blit(graph2_resized, (graph2_x, graph_y))
-                            if show_cmds == 1:
-                                print(f"[DEBUG GRAPHS] Focus graph displayed")
 
                 except Exception as e:
-                    if show_cmds == 1:
-                        print(f"[DEBUG GRAPHS] Exception: {e}")
-                        import traceback
-                        traceback.print_exc()
+                    pass  # Ignorer les erreurs d'affichage des graphiques silencieusement
 
         # Rectangle rouge et croix d'analyse - SEULEMENT en mode focus
         if focus_mode == 1:
-            pygame.draw.rect(windowSurfaceObj,redColor,Rect(xx-histarea,xy-histarea,histarea*2,histarea*2),1)
-            pygame.draw.line(windowSurfaceObj,(255,255,255),(xx-int(histarea/2),xy),(xx+int(histarea/2),xy),1)
-            pygame.draw.line(windowSurfaceObj,(255,255,255),(xx,xy-int(histarea/2)),(xx,xy+int(histarea/2)),1)
+            # Adapter la taille d'affichage du réticule au zoom
+            # Le réticule doit être PLUS GRAND à l'écran quand on zoome
+            # pour représenter la même zone physique du capteur (car l'image est agrandie)
+            zoom_factors = {0: 1.0, 1: 1.6, 2: 2.4, 3: 3.0, 4: 3.9, 5: 5.8}
+            zoom_factor = zoom_factors.get(zoom, 1.0)
+            histarea_display = int(histarea * zoom_factor)
+
+            # Limiter la taille max pour éviter un réticule trop grand
+            histarea_display = min(histarea_display, int(preview_width / 3))
+
+            pygame.draw.rect(windowSurfaceObj,redColor,Rect(xx-histarea_display,xy-histarea_display,histarea_display*2,histarea_display*2),1)
+            pygame.draw.line(windowSurfaceObj,(255,255,255),(xx-int(histarea_display/2),xy),(xx+int(histarea_display/2),xy),1)
+            pygame.draw.line(windowSurfaceObj,(255,255,255),(xx,xy-int(histarea_display/2)),(xx,xy+int(histarea_display/2)),1)
 
     # Mode preview (zoom == 0 ET focus_mode == 0) - Ne pas afficher en mode stretch
     if zoom == 0 and focus_mode == 0 and stretch_mode == 0:
@@ -6575,16 +6703,23 @@ while True:
             pygame.display.update()
             continue
 
-        if mousex < preview_width and mousey < preview_height and mousex != 0 and mousey != 0 and event.button != 3 and menu == 0:
+        # Permettre le déplacement du réticule même avec menu ouvert si on est en mode focus
+        if mousex < preview_width and mousey < preview_height and mousex != 0 and mousey != 0 and event.button != 3 and (menu == 0 or focus_mode == 1):
+            # Calculer histarea_display pour les limites (même logique que l'affichage du réticule)
+            zoom_factors = {0: 1.0, 1: 1.6, 2: 2.4, 3: 3.0, 4: 3.9, 5: 5.8}
+            zoom_factor = zoom_factors.get(zoom, 1.0)
+            histarea_display = int(histarea * zoom_factor)
+            histarea_display = min(histarea_display, int(preview_width / 3))
+
             xx = mousex
-            xx = min(xx,preview_width - histarea)
-            xx = max(xx,histarea)
+            xx = min(xx,preview_width - histarea_display)
+            xx = max(xx,histarea_display)
             xy = mousey
             if igw/igh > 1.5 and zoom < 5:
-                xy = min(xy,int(preview_height * .75) - histarea)
+                xy = min(xy,int(preview_height * .75) - histarea_display)
             else:
-                xy = min(xy,preview_height - histarea)
-            xy = max(xy,histarea)
+                xy = min(xy,preview_height - histarea_display)
+            xy = max(xy,histarea_display)
             if ((Pi_Cam == 3 and v3_af == 1) or ((Pi_Cam == 5 or Pi_Cam == 6)) or Pi_Cam == 8) and mousex < preview_width and mousey < preview_height *.75 and zoom == 0 and (v3_f_mode == 0 or v3_f_mode == 2):
                 fxx = (xx - 25)/preview_width
                 xy  = min(xy,int((preview_height - 25) * .75))
@@ -6870,8 +7005,8 @@ while True:
                             else:
                                 datastr = "rpicam-vid"
 
-                            # Capturer en fichier YUV420 dans /run/shm
-                            temp_video = "/run/shm/ser_temp_video.yuv"
+                            # Capturer en fichier YUV420 sur le NVMe (même répertoire que les vidéos finales)
+                            temp_video = vid_dir + "ser_temp_video.yuv"
 
                             datastr += " --camera " + str(camera) + " -t " + str(vlen * 1000)
                             datastr += " -o " + temp_video
@@ -6967,7 +7102,7 @@ while True:
                             else:
                                 speed7 = sspeed
                                 speed7 = max(speed7,int((1/fps)*1000000))
-                                datastr += " --framerate " + str(max(1, min(120, int(1000000/speed7))))
+                                datastr += " --framerate " + str(max(1, min(180, int(1000000/speed7))))
 
                             if vpreview == 0:
                                 datastr += " -n "
@@ -7006,76 +7141,151 @@ while True:
                             if show_cmds == 1:
                                 print(datastr)
 
-                            # Arrêter temporairement Picamera2 pour libérer la caméra
-                            picam2_was_paused = pause_picamera2()
-
-                            print(f"[DEBUG SER] Starting SER video recording: {vname}")
-                            print(f"[DEBUG SER] Temp file: {temp_video}")
-                            print(f"[DEBUG SER] Command: {datastr}")
-
-                            # Capturer la vidéo
-                            os.system(datastr)
-
-                            print(f"[DEBUG SER] Recording finished")
-                            print(f"[DEBUG SER] Temp file exists: {os.path.exists(temp_video)}")
-                            if os.path.exists(temp_video):
-                                print(f"[DEBUG SER] Temp file size: {os.path.getsize(temp_video)} bytes")
-
-                            # Convertir RAW unpacked (SRGGB16) en SER avec le script qui marche !
-                            text(0,0,6,2,1,"Converting SRGGB16 to RGB24...",int(fv*1.7),1)
-
-                            # Calculer le FPS réel
+                            # Vérifier l'espace disque disponible avant d'enregistrer
+                            # Calculer la taille estimée du fichier YUV420
+                            duration_sec = vlen / 1000.0
                             if mode != 0:
                                 actual_fps = fps
                             else:
                                 speed7 = sspeed
                                 speed7 = max(speed7,int((1/fps)*1000000))
-                                actual_fps = max(1, min(120, int(1000000/speed7)))
+                                actual_fps = max(1, min(180, int(1000000/speed7)))
 
-                            # Vérifier que le fichier vidéo YUV420 existe
-                            if not os.path.exists(temp_video):
-                                text(0,0,6,2,1,"Error: YUV420 video file not created!",int(fv*1.7),1)
-                                time.sleep(2)
-                            else:
-                                # Avec résolutions standards, pas besoin de détection automatique
-                                # La résolution est exactement celle spécifiée dans actual_vwidth/actual_vheight
-                                print(f"[DEBUG SER] Converting with standard resolution: {actual_vwidth}×{actual_vheight}")
+                            num_frames = int(duration_sec * actual_fps)
+                            # YUV420 = 1.5 bytes per pixel (Y + U/4 + V/4)
+                            estimated_size = int(actual_vwidth * actual_vheight * 1.5 * num_frames)
 
-                                # Vérification optionnelle: calculer taille attendue du fichier
-                                file_size = os.path.getsize(temp_video)
-                                duration_sec = vlen / 1000.0
-                                num_frames = int(duration_sec * actual_fps)
-                                expected_size = int(actual_vwidth * actual_vheight * 1.5 * num_frames)
+                            try:
+                                import shutil
+                                stat = shutil.disk_usage(vid_dir)
+                                free_space = stat.free
+                                print(f"[DEBUG YUV] Estimated size: {estimated_size/(1024*1024):.1f} MB, Free space (NVMe): {free_space/(1024*1024):.1f} MB")
 
-                                print(f"[DEBUG SER] File size: {file_size} bytes, Expected: {expected_size} bytes, Frames: {num_frames}")
+                                if free_space < estimated_size * 1.1:  # 10% de marge
+                                    error_msg = f"Espace disque insuffisant ! Nécessaire: {estimated_size/(1024*1024):.1f} MB, Disponible: {free_space/(1024*1024):.1f} MB"
+                                    print(f"[ERROR] {error_msg}")
+                                    text(0,0,6,2,1,error_msg,int(fv*1.7),1)
+                                    time.sleep(3)
+                                    # Ne pas continuer l'enregistrement
+                                    continue  # Retourner au menu principal
+                            except Exception as disk_check_error:
+                                print(f"[WARNING] Could not check disk space: {disk_check_error}")
 
-                                if expected_size > 0 and abs(file_size - expected_size) / expected_size > 0.1:  # Plus de 10% de différence
-                                    print(f"[DEBUG SER] Warning: File size mismatch ({100*abs(file_size-expected_size)/expected_size:.1f}% difference)")
-                                    print(f"[DEBUG SER] This may indicate incorrect resolution or frame count")
+                            # Arrêter temporairement Picamera2 pour libérer la caméra
+                            picam2_was_paused = pause_picamera2()
 
-                                # Convertir YUV420 → SER avec la résolution standard
-                                text(0,0,6,2,1,f"Converting YUV420 to SER ({actual_vwidth}×{actual_vheight}) @ {actual_fps} fps...",int(fv*1.7),1)
+                            try:
+                                print(f"[DEBUG SER] Starting SER video recording: {vname}")
+                                print(f"[DEBUG SER] Temp file: {temp_video}")
+                                print(f"[DEBUG SER] Command: {datastr}")
 
-                                success, frame_count, msg = convert_yuv420_to_ser(
-                                    temp_video, vname, actual_vwidth, actual_vheight, fps=actual_fps
-                                )
+                                # Capturer la vidéo
+                                os.system(datastr)
 
-                                if success:
-                                    text(0,0,6,2,1,vname + f" - {frame_count} frames @ {actual_fps} fps",int(fv*1.5),1)
+                                print(f"[DEBUG SER] Recording finished")
+                                print(f"[DEBUG SER] Temp file exists: {os.path.exists(temp_video)}")
+                                if os.path.exists(temp_video):
+                                    print(f"[DEBUG SER] Temp file size: {os.path.getsize(temp_video)} bytes")
+
+                                # Convertir RAW unpacked (SRGGB16) en SER avec le script qui marche !
+                                text(0,0,6,2,1,"Converting SRGGB16 to RGB24...",int(fv*1.7),1)
+
+                                # Calculer le FPS réel
+                                if mode != 0:
+                                    actual_fps = fps
                                 else:
-                                    text(0,0,6,2,1,f"Conversion error: {msg}",int(fv*1.7),1)
+                                    speed7 = sspeed
+                                    speed7 = max(speed7,int((1/fps)*1000000))
+                                    actual_fps = max(1, min(180, int(1000000/speed7)))
 
-                                # Supprimer le fichier vidéo temporaire
-                                try:
-                                    os.remove(temp_video)
-                                except:
-                                    pass
+                                # Vérifier que le fichier vidéo YUV420 existe
+                                if not os.path.exists(temp_video):
+                                    error_msg = "ERREUR: Fichier YUV420 non créé ! (Possible manque d'espace disque)"
+                                    print(f"[ERROR] {error_msg}")
+                                    text(0,0,6,2,1,error_msg,int(fv*1.7),1)
+                                    time.sleep(3)
+                                else:
+                                    # Avec résolutions standards, pas besoin de détection automatique
+                                    # La résolution est exactement celle spécifiée dans actual_vwidth/actual_vheight
+                                    print(f"[DEBUG SER] Converting with standard resolution: {actual_vwidth}×{actual_vheight}")
 
-                                time.sleep(2)
+                                    # Vérification critique: calculer taille attendue du fichier
+                                    file_size = os.path.getsize(temp_video)
+                                    duration_sec = vlen / 1000.0
+                                    num_frames = int(duration_sec * actual_fps)
+                                    expected_size = int(actual_vwidth * actual_vheight * 1.5 * num_frames)
 
-                            # Redémarrer Picamera2 si il avait été mis en pause
-                            if picam2_was_paused:
-                                resume_picamera2()
+                                    print(f"[DEBUG SER] File size: {file_size} bytes, Expected: {expected_size} bytes, Frames: {num_frames}")
+
+                                    # Vérifier si le fichier est trop petit (signe d'erreur d'enregistrement)
+                                    if expected_size > 0 and file_size < expected_size * 0.5:  # Moins de 50% de la taille attendue
+                                        error_msg = f"ERREUR: Fichier YUV420 corrompu ou incomplet ({file_size/(1024*1024):.1f}/{expected_size/(1024*1024):.1f} MB)"
+                                        print(f"[ERROR] {error_msg}")
+                                        text(0,0,6,2,1,error_msg,int(fv*1.7),1)
+
+                                        # Nettoyer le fichier corrompu
+                                        try:
+                                            os.remove(temp_video)
+                                            print("[DEBUG] Fichier corrompu supprimé")
+                                        except:
+                                            pass
+
+                                        time.sleep(3)
+                                    elif expected_size > 0 and abs(file_size - expected_size) / expected_size > 0.1:  # Plus de 10% de différence
+                                        print(f"[DEBUG SER] Warning: File size mismatch ({100*abs(file_size-expected_size)/expected_size:.1f}% difference)")
+                                        print(f"[DEBUG SER] This may indicate incorrect resolution or frame count")
+
+                                        # Convertir quand même mais avec un avertissement
+                                        text(0,0,6,2,1,f"Converting YUV420 to SER ({actual_vwidth}×{actual_vheight}) @ {actual_fps} fps...",int(fv*1.7),1)
+
+                                        success, frame_count, msg = convert_yuv420_to_ser(
+                                            temp_video, vname, actual_vwidth, actual_vheight, fps=actual_fps
+                                        )
+
+                                        if success:
+                                            text(0,0,6,2,1,vname + f" - {frame_count} frames @ {actual_fps} fps",int(fv*1.5),1)
+                                        else:
+                                            text(0,0,6,2,1,f"Conversion error: {msg}",int(fv*1.7),1)
+
+                                        # Supprimer le fichier vidéo temporaire
+                                        try:
+                                            os.remove(temp_video)
+                                        except:
+                                            pass
+
+                                        time.sleep(2)
+                                    else:
+                                        # Taille correcte, convertir normalement
+                                        text(0,0,6,2,1,f"Converting YUV420 to SER ({actual_vwidth}×{actual_vheight}) @ {actual_fps} fps...",int(fv*1.7),1)
+
+                                        success, frame_count, msg = convert_yuv420_to_ser(
+                                            temp_video, vname, actual_vwidth, actual_vheight, fps=actual_fps
+                                        )
+
+                                        if success:
+                                            text(0,0,6,2,1,vname + f" - {frame_count} frames @ {actual_fps} fps",int(fv*1.5),1)
+                                        else:
+                                            text(0,0,6,2,1,f"Conversion error: {msg}",int(fv*1.7),1)
+
+                                        # Supprimer le fichier vidéo temporaire
+                                        try:
+                                            os.remove(temp_video)
+                                        except:
+                                            pass
+
+                                        time.sleep(2)
+
+                            except Exception as e:
+                                print(f"[ERROR] YUV420 SER recording failed: {e}")
+                                import traceback
+                                traceback.print_exc()
+                                text(0,0,6,2,1,f"YUV420 SER error: {str(e)}",int(fv*1.7),1)
+                                time.sleep(3)
+
+                            finally:
+                                # Redémarrer Picamera2 si il avait été mis en pause
+                                if picam2_was_paused:
+                                    resume_picamera2()
 
                         elif ser_format in [1, 2]:
                             # ==== MÉTHODE RGB888/XRGB8888 (Picamera2) ====
@@ -7103,7 +7313,7 @@ while True:
                             else:
                                 speed7 = sspeed
                                 speed7 = max(speed7,int((1/fps)*1000000))
-                                actual_fps = max(1, min(120, int(1000000/speed7)))
+                                actual_fps = max(1, min(180, int(1000000/speed7)))
 
                             # Calculer la durée et le nombre de frames
                             # IMPORTANT: vlen est en SECONDES (pas en millisecondes)
@@ -7112,8 +7322,29 @@ while True:
 
                             print(f"[DEBUG SER RGB] vlen={vlen}s, fps={actual_fps}, expected frames={num_frames}")
 
-                            # Fichier temporaire pour le flux RGB brut
-                            temp_rgb = "/run/shm/ser_temp_rgb.raw"
+                            # Fichier temporaire pour le flux RGB brut sur le NVMe (même répertoire que les vidéos finales)
+                            temp_rgb = vid_dir + "ser_temp_rgb.raw"
+
+                            # Vérifier l'espace disque disponible avant d'enregistrer
+                            estimated_size = num_frames * actual_vwidth * actual_vheight * bytes_per_pixel
+                            try:
+                                import shutil
+                                stat = shutil.disk_usage(vid_dir)
+                                free_space = stat.free
+                                print(f"[DEBUG RGB] Estimated size: {estimated_size/(1024*1024):.1f} MB, Free space (NVMe): {free_space/(1024*1024):.1f} MB")
+
+                                if free_space < estimated_size * 1.1:  # 10% de marge
+                                    error_msg = f"Espace disque insuffisant ! Nécessaire: {estimated_size/(1024*1024):.1f} MB, Disponible: {free_space/(1024*1024):.1f} MB"
+                                    print(f"[ERROR] {error_msg}")
+                                    text(0,0,6,2,1,error_msg,int(fv*1.7),1)
+                                    time.sleep(3)
+                                    # Ne pas continuer l'enregistrement
+                                    picam2_was_paused = pause_picamera2()
+                                    if picam2_was_paused:
+                                        resume_picamera2()
+                                    continue  # Sortir de cette section et retourner au menu
+                            except Exception as disk_check_error:
+                                print(f"[WARNING] Could not check disk space: {disk_check_error}")
 
                             # Pause Picamera2 pour libérer la caméra
                             picam2_was_paused = pause_picamera2()
@@ -7165,98 +7396,178 @@ while True:
 
                                 temp_picam2.configure(config)
 
-                                # Appliquer les autres contrôles
+                                # ==========================================
+                                # PROFIL "SPEED" POUR HAUTE VITESSE SER
+                                # ==========================================
+                                # Sauvegarder les paramètres ISP actuels
+                                saved_isp_params = {
+                                    'brightness': brightness,
+                                    'contrast': contrast,
+                                    'saturation': saturation,
+                                    'sharpness': sharpness
+                                }
+
+                                # Appliquer profil "Speed" : désactiver les traitements ISP lourds
                                 cam_controls = {}
-                                cam_controls["Brightness"] = brightness / 100.0
-                                cam_controls["Contrast"] = contrast / 100.0
-                                cam_controls["Saturation"] = saturation / 10.0
-                                cam_controls["Sharpness"] = sharpness / 10.0
+                                cam_controls["Brightness"] = 0.0       # Neutre (pas de boost)
+                                cam_controls["Contrast"] = 1.0         # Neutre (×1)
+                                cam_controls["Saturation"] = 1.0       # Neutre (×1)
+                                cam_controls["Sharpness"] = 0.0        # DÉSACTIVÉ (sharpening = lent)
 
                                 if awb == 0:
                                     cam_controls["ColourGains"] = (red/10.0, blue/10.0)
 
-                                # Appliquer tous les contrôles (metering, denoise, etc.)
-                                # Note: AeMeteringMode et NoiseReductionMode sont dans le config, pas dans set_controls
-                                # On les applique via la configuration uniquement
+                                # Désactiver denoise via NoiseReductionMode
+                                try:
+                                    from picamera2.controls import NoiseReductionModeEnum
+                                    cam_controls["NoiseReductionMode"] = NoiseReductionModeEnum.Off
+                                except:
+                                    pass  # Si NoiseReductionMode non disponible, ignorer
 
                                 temp_picam2.set_controls(cam_controls)
 
                                 print(f"[DEBUG SER RGB] Starting {format_name} capture (ISP): {actual_vwidth}x{actual_vheight} @ {actual_fps} fps")
                                 print(f"[DEBUG SER RGB] Duration: {duration_sec}s ({num_frames} frames)")
-                                print(f"[DEBUG SER RGB] Using ISP tuning for correct colors")
-
-                                # Démarrer la capture
-                                temp_picam2.start()
-
-                                # Calculer l'intervalle entre frames
-                                frame_interval = 1.0 / actual_fps
-
-                                # Ouvrir le fichier temporaire pour écrire les frames RGB
-                                frame_count = 0
+                                print(f"[DEBUG SER RGB] Using ISP 'SPEED' profile (sharpness=0, denoise=off, neutral colors)")
+                                print(f"[DEBUG SER RGB] Using optimized callback mode for high-speed capture")
 
                                 # Importer numpy pour inverser les canaux
                                 import numpy as np
+                                import threading
 
-                                with open(temp_rgb, "wb") as f:
-                                    start_time = time.time()
-                                    next_frame_time = start_time
+                                # État partagé pour le callback (utiliser un dict pour éviter problème nonlocal)
+                                capture_state = {
+                                    'frame_count': 0,
+                                    'write_error': None,
+                                    'output_file': None,
+                                    'lock': threading.Lock()
+                                }
 
-                                    while frame_count < num_frames:
-                                        current_time = time.time()
+                                # Fonction de callback pour capturer et écrire les frames rapidement
+                                # OPTIMISÉ : écriture directe sans copie ni conversion (conversion faite après)
+                                def frame_callback(request):
+                                    if capture_state['write_error'] is not None:
+                                        return  # Arrêter si erreur détectée
 
-                                        # Attendre le bon moment pour la prochaine frame
-                                        if current_time < next_frame_time:
-                                            time.sleep(next_frame_time - current_time)
+                                    if capture_state['frame_count'] >= num_frames:
+                                        return  # Arrêter si nombre de frames atteint
 
-                                        # Capturer une frame (format dépend de capture_format)
-                                        frame = temp_picam2.capture_array()
+                                    try:
+                                        # Utiliser make_buffer pour obtenir directement les bytes sans copie numpy
+                                        # C'est BEAUCOUP plus rapide que make_array + tobytes
+                                        frame_buffer = request.make_buffer("main")
 
-                                        # Inverser R et B (RGB → BGR ou BGR → RGB selon ce que SER attend)
-                                        # Picamera2 RGB888 donne RGB, mais SER attend BGR
-                                        if ser_format == 1:  # RGB888
-                                            # Inverser canaux: RGB → BGR
-                                            frame_bgr = frame[:, :, ::-1].copy()
-                                            f.write(frame_bgr.tobytes())
-                                        else:  # XRGB8888
-                                            # Inverser canaux R et B: XRGB → XBGR
-                                            frame_xbgr = frame.copy()
-                                            frame_xbgr[:, :, 1], frame_xbgr[:, :, 3] = frame[:, :, 3], frame[:, :, 1]  # Swap R et B
-                                            f.write(frame_xbgr.tobytes())
+                                        # Écrire directement sur disque sans conversion
+                                        # La conversion RGB→BGR sera faite après pendant convert_rgb888_to_ser
+                                        with capture_state['lock']:
+                                            if capture_state['output_file'] is not None:
+                                                capture_state['output_file'].write(frame_buffer)
+                                                capture_state['frame_count'] += 1
 
-                                        frame_count += 1
-                                        next_frame_time = start_time + (frame_count * frame_interval)
+                                                # Afficher progression tous les 50 frames
+                                                if capture_state['frame_count'] % 50 == 0:
+                                                    text(0,0,6,2,1,f"Recording {format_name}: {capture_state['frame_count']}/{num_frames} frames",int(fv*1.7),1)
 
-                                        # Afficher progression tous les 10 frames
-                                        if frame_count % 10 == 0:
-                                            text(0,0,6,2,1,f"Recording {format_name}: {frame_count}/{num_frames} frames",int(fv*1.7),1)
+                                    except (OSError, IOError) as write_err:
+                                        capture_state['write_error'] = write_err
+                                        print(f"\n[ERROR] Erreur d'écriture à la frame {capture_state['frame_count']}: {write_err}")
+                                    except Exception as e:
+                                        capture_state['write_error'] = e
+                                        print(f"\n[ERROR] Erreur dans callback: {e}")
 
-                                # Arrêter la capture
-                                temp_picam2.stop()
-                                temp_picam2.close()
-
-                                print(f"[DEBUG SER RGB] Capture finished: {frame_count} frames")
-                                print(f"[DEBUG SER RGB] Temp file size: {os.path.getsize(temp_rgb)} bytes")
-
-                                # Convertir RGB → SER
-                                text(0,0,6,2,1,f"Converting {format_name} to SER...",int(fv*1.7),1)
-
-                                success, final_frame_count, msg = convert_rgb888_to_ser(
-                                    temp_rgb, vname, actual_vwidth, actual_vheight,
-                                    fps=actual_fps, bytes_per_pixel=bytes_per_pixel
-                                )
-
-                                if success:
-                                    text(0,0,6,2,1,vname + f" - {final_frame_count} frames @ {actual_fps} fps",int(fv*1.5),1)
-                                else:
-                                    text(0,0,6,2,1,f"Conversion error: {msg}",int(fv*1.7),1)
-
-                                # Supprimer le fichier temporaire
                                 try:
-                                    os.remove(temp_rgb)
-                                except:
-                                    pass
+                                    # Ouvrir le fichier temporaire
+                                    capture_state['output_file'] = open(temp_rgb, "wb")
 
-                                time.sleep(2)
+                                    # Configurer le framerate dans les contrôles
+                                    # FrameDurationLimits = (min_duration_us, max_duration_us)
+                                    # Pour forcer le fps: min=max = 1000000/fps microseconds
+                                    frame_duration_us = int(1000000 / actual_fps)
+                                    controls_fps = {"FrameDurationLimits": (frame_duration_us, frame_duration_us)}
+                                    temp_picam2.set_controls(controls_fps)
+
+                                    # Démarrer la capture avec callback
+                                    temp_picam2.start()
+
+                                    # Enregistrer le callback pour chaque frame
+                                    temp_picam2.post_callback = frame_callback
+
+                                    start_time = time.time()
+
+                                    # Attendre la durée de capture ou le nombre de frames
+                                    while capture_state['frame_count'] < num_frames and capture_state['write_error'] is None:
+                                        elapsed = time.time() - start_time
+                                        if elapsed > duration_sec + 2:  # +2 sec de marge
+                                            break
+                                        time.sleep(0.1)  # Petit sleep pour ne pas surcharger le CPU
+
+                                    elapsed_time = time.time() - start_time
+                                    actual_capture_fps = capture_state['frame_count'] / elapsed_time if elapsed_time > 0 else 0
+                                    print(f"[DEBUG SER RGB] Capture terminée: {capture_state['frame_count']} frames en {elapsed_time:.2f}s ({actual_capture_fps:.1f} fps réels)")
+
+                                except (OSError, IOError) as file_error:
+                                    # Erreur lors de l'ouverture du fichier
+                                    capture_state['write_error'] = file_error
+                                    print(f"[ERROR] Impossible d'ouvrir le fichier temporaire: {file_error}")
+
+                                finally:
+                                    # Arrêter la capture
+                                    temp_picam2.post_callback = None
+                                    temp_picam2.stop()
+                                    temp_picam2.close()
+
+                                    # Fermer le fichier
+                                    if capture_state['output_file'] is not None:
+                                        capture_state['output_file'].close()
+
+                                # Vérifier s'il y a eu une erreur d'écriture
+                                if capture_state['write_error'] is not None:
+                                    # Une erreur s'est produite pendant l'enregistrement
+                                    error_msg = f"ERREUR d'enregistrement: {str(capture_state['write_error'])}"
+
+                                    # Identifier le type d'erreur
+                                    if "No space left" in str(capture_state['write_error']) or "Errno 28" in str(capture_state['write_error']):
+                                        error_msg = f"ERREUR: Espace disque insuffisant ! ({capture_state['frame_count']}/{num_frames} frames enregistrées)"
+                                    elif isinstance(capture_state['write_error'], (OSError, IOError)):
+                                        error_msg = f"ERREUR I/O: {str(capture_state['write_error'])} ({capture_state['frame_count']}/{num_frames} frames enregistrées)"
+
+                                    print(f"\n[ERROR] {error_msg}")
+                                    text(0,0,6,2,1,error_msg,int(fv*1.7),1)
+
+                                    # Nettoyer le fichier temporaire corrompu
+                                    try:
+                                        if os.path.exists(temp_rgb):
+                                            os.remove(temp_rgb)
+                                            print("[DEBUG] Fichier temporaire corrompu supprimé")
+                                    except Exception as cleanup_err:
+                                        print(f"[WARNING] Impossible de supprimer le fichier temporaire: {cleanup_err}")
+
+                                    time.sleep(3)
+                                else:
+                                    # Pas d'erreur, capture réussie
+                                    print(f"[DEBUG SER RGB] Capture finished: {capture_state['frame_count']} frames")
+                                    print(f"[DEBUG SER RGB] Temp file size: {os.path.getsize(temp_rgb)} bytes")
+
+                                    # Convertir RGB → SER
+                                    text(0,0,6,2,1,f"Converting {format_name} to SER...",int(fv*1.7),1)
+
+                                    success, final_frame_count, msg = convert_rgb888_to_ser(
+                                        temp_rgb, vname, actual_vwidth, actual_vheight,
+                                        fps=actual_fps, bytes_per_pixel=bytes_per_pixel
+                                    )
+
+                                    if success:
+                                        text(0,0,6,2,1,vname + f" - {final_frame_count} frames @ {actual_fps} fps",int(fv*1.5),1)
+                                    else:
+                                        text(0,0,6,2,1,f"Conversion error: {msg}",int(fv*1.7),1)
+
+                                    # Supprimer le fichier temporaire
+                                    try:
+                                        os.remove(temp_rgb)
+                                    except:
+                                        pass
+
+                                    time.sleep(2)
 
                             except Exception as e:
                                 print(f"[ERROR] RGB capture failed: {e}")
@@ -7300,7 +7611,7 @@ while True:
                         else:
                             speed7 = sspeed
                             speed7 = max(speed7,int((1/fps)*1000000))
-                            datastr += " --framerate " + str(max(1, min(120, int(1000000/speed7))))
+                            datastr += " --framerate " + str(max(1, min(180, int(1000000/speed7))))
                         if codecs[codec] != 'h264' and codecs[codec] != 'mp4':
                             datastr += " --codec " + codecs[codec]
                         elif codecs[codec] != 'mp4':
@@ -7527,7 +7838,7 @@ while True:
                         else:
                             speed7 = sspeed
                             speed7 = max(speed7, int((1/fps)*1000000))
-                            fps_used = max(1, min(120, int(1000000/speed7)))
+                            fps_used = max(1, min(180, int(1000000/speed7)))
 
                         # Appeler la fonction de correction des timestamps
                         success = fix_video_timestamps(vname, fps_used, quality_preset="ultrafast")
@@ -7576,7 +7887,7 @@ while True:
                     else:
                         speed7 = sspeed
                         speed7 = max(speed7,int((1/fps)*1000000))
-                        datastr += " --framerate " + str(max(1, min(120, int(1000000/speed7))))
+                        datastr += " --framerate " + str(max(1, min(180, int(1000000/speed7))))
                     # Ajouter les options de sortie APRES framerate
                     if stream_type == 0:
                         datastr += " --inline --listen -o tcp://0.0.0.0:" + str(stream_port)
@@ -8252,7 +8563,7 @@ while True:
                             if mode == 0:
                                 # Permettre FPS < 1 pour longues expositions (0.01 fps min)
                                 if sspeed > 0:
-                                    calc_fps = max(min(1000000/sspeed, 120), 0.01)
+                                    calc_fps = max(min(1000000/sspeed, 180), 0.01)
                                 else:
                                     calc_fps = 30
                                 datastr += " --framerate " + str(calc_fps)
@@ -8269,7 +8580,7 @@ while True:
                             if mode == 0:
                                 # Permettre FPS < 1 pour longues expositions (0.01 fps min)
                                 if sspeed > 0:
-                                    calc_fps = max(min(1000000/sspeed, 120), 0.01)
+                                    calc_fps = max(min(1000000/sspeed, 180), 0.01)
                                 else:
                                     calc_fps = 30
                                 datastr += " --framerate " + str(calc_fps)
@@ -8382,6 +8693,16 @@ while True:
                         # Activer Live Stack
                         livestack_active = True
 
+                        # Réinitialiser les compteurs de session Live Stack
+                        if hasattr(pygame, '_livestack_last_saved'):
+                            delattr(pygame, '_livestack_last_saved')
+                        if hasattr(pygame, '_livestack_stretch_info_shown'):
+                            delattr(pygame, '_livestack_stretch_info_shown')
+                        if hasattr(pygame, '_livestack_stretch_applied_shown'):
+                            delattr(pygame, '_livestack_stretch_applied_shown')
+                        if hasattr(pygame, '_livestack_no_stretch_shown'):
+                            delattr(pygame, '_livestack_no_stretch_shown')
+
                         # Activer le mode stretch pour affichage fullscreen
                         stretch_mode = 1
 
@@ -8469,18 +8790,73 @@ while True:
                         # Debug ISP avant passage à configure (EN DEHORS du if pour être toujours exécuté)
                         print(f"[DEBUG AVANT CONFIGURE] isp_enable variable = {isp_enable} (type: {type(isp_enable)})")
                         print(f"[DEBUG AVANT CONFIGURE] isp_config_path variable = {isp_config_path}")
+                        print(f"[DEBUG AVANT CONFIGURE] raw_format variable = {raw_format} ({raw_formats[raw_format]})")
+
+                        # Logique conditionnelle ISP : N'appliquer l'ISP QUE sur formats RAW (raw12/raw16)
+                        # YUV420/XRGB8888 sont déjà traités par l'ISP matériel → pas besoin d'ISP logiciel
+                        isp_should_be_enabled = (isp_enable == 1) and (raw_format >= 2)
+                        if isp_enable == 1 and raw_format < 2:
+                            print(f"[INFO] ISP logiciel ignoré pour {raw_formats[raw_format]} (déjà traité par ISP matériel)")
+
+                        # === MAPPING DYNAMIQUE GUI → ISP (mode RAW uniquement) ===
+                        # Si ISP activé en mode RAW, mapper les paramètres de l'interface vers l'ISP
+                        isp_config_to_use = isp_config_path
+                        if isp_should_be_enabled and isp_config_path:
+                            try:
+                                import json
+                                from libastrostack.isp import ISP
+
+                                # Charger la config ISP de base
+                                with open(isp_config_path, 'r') as f:
+                                    isp_data = json.load(f)
+
+                                # MAPPER les paramètres de l'interface GUI vers ISP
+                                # brightness (-100 à +100) → brightness_offset (-1.0 à +1.0)
+                                # Centré sur 0 : -100→-1.0, 0→0.0 (neutre), +100→+1.0
+                                isp_data['brightness_offset'] = brightness / 100.0
+
+                                # contrast (0 à 200) → contrast (0.0 à 2.0)
+                                # Centré sur 100 : 0→0.0, 100→1.0 (neutre), 200→2.0
+                                isp_data['contrast'] = contrast / 100.0
+
+                                # saturation (0 à 20) → saturation (0.0 à 2.0)
+                                # Centré sur 10 : 0→0.0 (N&B), 10→1.0 (neutre), 20→2.0
+                                isp_data['saturation'] = saturation / 10.0
+
+                                # sharpness (0 à 30) → sharpening (0.0 à 3.0, plafonné à 2.0)
+                                # 0→0.0, 10→1.0, 20→2.0 (max ISP), 30→2.0 (plafonné)
+                                isp_data['sharpening'] = min(sharpness / 10.0, 2.0)
+
+                                # Sauvegarder la config ISP temporaire (en mémoire)
+                                session_isp_path = "session_isp_config.json"
+                                with open(session_isp_path, 'w') as f:
+                                    json.dump(isp_data, f, indent=2)
+
+                                isp_config_to_use = session_isp_path
+                                print(f"[ISP MAPPING] Paramètres GUI mappés vers ISP:")
+                                print(f"  Brightness {brightness} → brightness_offset {isp_data['brightness_offset']:.3f}")
+                                print(f"  Contrast {contrast} → contrast {isp_data['contrast']:.3f}")
+                                print(f"  Saturation {saturation} → saturation {isp_data['saturation']:.3f}")
+                                print(f"  Sharpness {sharpness} → sharpening {isp_data['sharpening']:.3f}")
+                            except Exception as e:
+                                print(f"[ISP MAPPING] Erreur lors du mapping GUI→ISP: {e}")
+                                print(f"[ISP MAPPING] Utilisation de la config ISP originale")
+                                isp_config_to_use = isp_config_path
 
                         # Passer les paramètres ISP ET video_format séparément (À CHAQUE activation)
                         # Mapper raw_format → video_format pour que l'ISP soit appliqué correctement
                         video_format_map = {0: 'yuv420', 1: 'xrgb8888', 2: 'raw12', 3: 'raw16'}
                         livestack.configure(
-                            isp_enable=bool(isp_enable),
-                            isp_config_path=isp_config_path if isp_enable else None,
-                            video_format=video_format_map.get(raw_format, 'yuv420')  # ✅ Ajouté pour ISP
+                            isp_enable=isp_should_be_enabled,
+                            isp_config_path=isp_config_to_use if isp_should_be_enabled else None,
+                            video_format=video_format_map.get(raw_format, 'yuv420')
                         )
 
                         # Mettre à jour le format RAW actuel avant de démarrer
                         livestack.camera_params['raw_format'] = raw_formats[raw_format]
+
+                        # Réinitialiser les compteurs avant de redémarrer
+                        livestack.reset()
 
                         # Démarrer la session
                         livestack.start()
@@ -8546,6 +8922,18 @@ while True:
 
                         # Activer Lucky Stack
                         luckystack_active = True
+
+                        # Réinitialiser les compteurs de session Lucky Stack
+                        if hasattr(pygame, '_lucky_last_displayed'):
+                            delattr(pygame, '_lucky_last_displayed')
+                        if hasattr(pygame, '_lucky_cached_image'):
+                            delattr(pygame, '_lucky_cached_image')
+                        if hasattr(pygame, '_lucky_last_saved'):
+                            delattr(pygame, '_lucky_last_saved')
+                        if hasattr(pygame, '_lucky_resolution_check'):
+                            delattr(pygame, '_lucky_resolution_check')
+                        if hasattr(pygame, '_lucky_stack_resolution_debug'):
+                            delattr(pygame, '_lucky_stack_resolution_debug')
 
                         # Activer le mode stretch pour affichage fullscreen
                         stretch_mode = 1
@@ -8625,18 +9013,73 @@ while True:
                         # Debug ISP avant passage à configure (même code que LiveStack)
                         print(f"[DEBUG AVANT CONFIGURE] isp_enable variable = {isp_enable} (type: {type(isp_enable)})")
                         print(f"[DEBUG AVANT CONFIGURE] isp_config_path variable = {isp_config_path}")
+                        print(f"[DEBUG AVANT CONFIGURE] raw_format variable = {raw_format} ({raw_formats[raw_format]})")
+
+                        # Logique conditionnelle ISP : N'appliquer l'ISP QUE sur formats RAW (raw12/raw16)
+                        # YUV420/XRGB8888 sont déjà traités par l'ISP matériel → pas besoin d'ISP logiciel
+                        isp_should_be_enabled = (isp_enable == 1) and (raw_format >= 2)
+                        if isp_enable == 1 and raw_format < 2:
+                            print(f"[INFO] ISP logiciel ignoré pour {raw_formats[raw_format]} (déjà traité par ISP matériel)")
+
+                        # === MAPPING DYNAMIQUE GUI → ISP (mode RAW uniquement) ===
+                        # Si ISP activé en mode RAW, mapper les paramètres de l'interface vers l'ISP
+                        isp_config_to_use = isp_config_path
+                        if isp_should_be_enabled and isp_config_path:
+                            try:
+                                import json
+                                from libastrostack.isp import ISP
+
+                                # Charger la config ISP de base
+                                with open(isp_config_path, 'r') as f:
+                                    isp_data = json.load(f)
+
+                                # MAPPER les paramètres de l'interface GUI vers ISP
+                                # brightness (-100 à +100) → brightness_offset (-1.0 à +1.0)
+                                # Centré sur 0 : -100→-1.0, 0→0.0 (neutre), +100→+1.0
+                                isp_data['brightness_offset'] = brightness / 100.0
+
+                                # contrast (0 à 200) → contrast (0.0 à 2.0)
+                                # Centré sur 100 : 0→0.0, 100→1.0 (neutre), 200→2.0
+                                isp_data['contrast'] = contrast / 100.0
+
+                                # saturation (0 à 20) → saturation (0.0 à 2.0)
+                                # Centré sur 10 : 0→0.0 (N&B), 10→1.0 (neutre), 20→2.0
+                                isp_data['saturation'] = saturation / 10.0
+
+                                # sharpness (0 à 30) → sharpening (0.0 à 3.0, plafonné à 2.0)
+                                # 0→0.0, 10→1.0, 20→2.0 (max ISP), 30→2.0 (plafonné)
+                                isp_data['sharpening'] = min(sharpness / 10.0, 2.0)
+
+                                # Sauvegarder la config ISP temporaire (en mémoire)
+                                session_isp_path = "session_isp_config.json"
+                                with open(session_isp_path, 'w') as f:
+                                    json.dump(isp_data, f, indent=2)
+
+                                isp_config_to_use = session_isp_path
+                                print(f"[ISP MAPPING] Paramètres GUI mappés vers ISP:")
+                                print(f"  Brightness {brightness} → brightness_offset {isp_data['brightness_offset']:.3f}")
+                                print(f"  Contrast {contrast} → contrast {isp_data['contrast']:.3f}")
+                                print(f"  Saturation {saturation} → saturation {isp_data['saturation']:.3f}")
+                                print(f"  Sharpness {sharpness} → sharpening {isp_data['sharpening']:.3f}")
+                            except Exception as e:
+                                print(f"[ISP MAPPING] Erreur lors du mapping GUI→ISP: {e}")
+                                print(f"[ISP MAPPING] Utilisation de la config ISP originale")
+                                isp_config_to_use = isp_config_path
 
                         # CORRECTION: Passer les paramètres ISP séparément (comme LiveStack)
                         # Mapper raw_format → video_format pour que l'ISP soit appliqué correctement
                         video_format_map = {0: 'yuv420', 1: 'xrgb8888', 2: 'raw12', 3: 'raw16'}
                         luckystack.configure(
-                            isp_enable=bool(isp_enable),
-                            isp_config_path=isp_config_path if isp_enable else None,
+                            isp_enable=isp_should_be_enabled,
+                            isp_config_path=isp_config_to_use if isp_should_be_enabled else None,
                             video_format=video_format_map.get(raw_format, 'yuv420')
                         )
 
                         # Mettre à jour le format RAW actuel avant de démarrer
                         luckystack.camera_params['raw_format'] = raw_formats[raw_format]
+
+                        # Réinitialiser les compteurs avant de redémarrer
+                        luckystack.reset()
 
                         # Démarrer la session
                         luckystack.start()
@@ -8807,9 +9250,9 @@ while True:
 
                 # Maintenir le bouton Focus actif si on est en mode focus
                 if focus_mode == 1:
-                    # Recentrer le réticule lors du changement de zoom en mode focus
-                    xx = int(preview_width/2)
-                    xy = int(preview_height/2)
+                    # NE PAS recentrer le réticule - l'utilisateur peut l'avoir déplacé
+                    # xx = int(preview_width/2)
+                    # xy = int(preview_height/2)
                     button(0,5,1,9)
                     text(0,5,3,0,1,"FOCUS",ft,0)
 
@@ -8901,7 +9344,7 @@ while True:
                         zoom = 4
                         sync_video_resolution_with_zoom()
                         focus_mode = 1
-                        # Recentrer le réticule
+                        # Recentrer le réticule (activation initiale du mode focus)
                         xx = int(preview_width/2)
                         xy = int(preview_height/2)
                         button(0,5,1,9)
@@ -8933,7 +9376,7 @@ while True:
                         focus_mode = 1
                         v3_f_mode = 1
                         foc_man = 1
-                        # Recentrer le réticule
+                        # Recentrer le réticule (activation initiale du mode focus)
                         xx = int(preview_width/2)
                         xy = int(preview_height/2)
                         restart = 1
@@ -8949,7 +9392,7 @@ while True:
                         focus_mode = 1
                         v3_f_mode = 1
                         foc_man = 1
-                        # Recentrer le réticule
+                        # Recentrer le réticule (activation initiale du mode focus)
                         xx = int(preview_width/2)
                         xy = int(preview_height/2)
                         text(0,5,3,0,1,'<<< ' + str(focus) + ' >>>',fv,0)
@@ -9875,6 +10318,58 @@ while True:
                    config[39] = stretch_p_high
                    config[40] = stretch_factor
                    config[41] = stretch_preset
+                   config[42] = ghs_D
+                   config[43] = ghs_b
+                   config[44] = ghs_SP
+                   config[45] = ghs_LP
+                   config[46] = ghs_HP
+                   config[47] = ghs_preset
+                   config[48] = ls_preview_refresh
+                   config[49] = ls_alignment_mode
+                   config[50] = ls_enable_qc
+                   config[51] = ls_max_fwhm
+                   config[52] = ls_min_sharpness
+                   config[53] = ls_max_drift
+                   config[54] = ls_min_stars
+                   config[55] = ls_stack_method
+                   config[56] = ls_stack_kappa
+                   config[57] = ls_stack_iterations
+                   config[58] = ls_planetary_enable
+                   config[59] = ls_planetary_mode
+                   config[60] = ls_planetary_disk_min
+                   config[61] = ls_planetary_disk_max
+                   config[62] = ls_planetary_threshold
+                   config[63] = ls_planetary_margin
+                   config[64] = ls_planetary_ellipse
+                   config[65] = ls_planetary_window
+                   config[66] = ls_planetary_upsample
+                   config[67] = ls_planetary_highpass
+                   config[68] = ls_planetary_roi_center
+                   config[69] = ls_planetary_corr
+                   config[70] = ls_planetary_max_shift
+                   config[71] = ls_lucky_buffer
+                   config[72] = ls_lucky_keep
+                   config[73] = ls_lucky_score
+                   config[74] = ls_lucky_stack
+                   config[75] = ls_lucky_align
+                   config[76] = ls_lucky_roi
+                   config[77] = use_native_sensor_mode
+                   config[78] = focus_method
+                   config[79] = star_metric
+                   config[80] = snr_display
+                   config[81] = metrics_interval
+                   config[82] = ls_lucky_save_progress
+                   config[83] = isp_enable
+                   config[84] = allsky_mode
+                   config[85] = allsky_mean_target
+                   config[86] = allsky_mean_threshold
+                   config[87] = allsky_video_fps
+                   config[88] = allsky_max_gain
+                   config[89] = allsky_apply_stretch
+                   config[90] = allsky_cleanup_jpegs
+                   config[91] = ls_save_progress
+                   config[92] = ls_save_final
+                   config[93] = ls_lucky_save_final
                    with open(config_file, 'w') as f:
                       for item in range(0,len(titles)):
                           f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -10233,6 +10728,58 @@ while True:
                    config[39] = stretch_p_high
                    config[40] = stretch_factor
                    config[41] = stretch_preset
+                   config[42] = ghs_D
+                   config[43] = ghs_b
+                   config[44] = ghs_SP
+                   config[45] = ghs_LP
+                   config[46] = ghs_HP
+                   config[47] = ghs_preset
+                   config[48] = ls_preview_refresh
+                   config[49] = ls_alignment_mode
+                   config[50] = ls_enable_qc
+                   config[51] = ls_max_fwhm
+                   config[52] = ls_min_sharpness
+                   config[53] = ls_max_drift
+                   config[54] = ls_min_stars
+                   config[55] = ls_stack_method
+                   config[56] = ls_stack_kappa
+                   config[57] = ls_stack_iterations
+                   config[58] = ls_planetary_enable
+                   config[59] = ls_planetary_mode
+                   config[60] = ls_planetary_disk_min
+                   config[61] = ls_planetary_disk_max
+                   config[62] = ls_planetary_threshold
+                   config[63] = ls_planetary_margin
+                   config[64] = ls_planetary_ellipse
+                   config[65] = ls_planetary_window
+                   config[66] = ls_planetary_upsample
+                   config[67] = ls_planetary_highpass
+                   config[68] = ls_planetary_roi_center
+                   config[69] = ls_planetary_corr
+                   config[70] = ls_planetary_max_shift
+                   config[71] = ls_lucky_buffer
+                   config[72] = ls_lucky_keep
+                   config[73] = ls_lucky_score
+                   config[74] = ls_lucky_stack
+                   config[75] = ls_lucky_align
+                   config[76] = ls_lucky_roi
+                   config[77] = use_native_sensor_mode
+                   config[78] = focus_method
+                   config[79] = star_metric
+                   config[80] = snr_display
+                   config[81] = metrics_interval
+                   config[82] = ls_lucky_save_progress
+                   config[83] = isp_enable
+                   config[84] = allsky_mode
+                   config[85] = allsky_mean_target
+                   config[86] = allsky_mean_threshold
+                   config[87] = allsky_video_fps
+                   config[88] = allsky_max_gain
+                   config[89] = allsky_apply_stretch
+                   config[90] = allsky_cleanup_jpegs
+                   config[91] = ls_save_progress
+                   config[92] = ls_save_final
+                   config[93] = ls_lucky_save_final
                    with open(config_file, 'w') as f:
                       for item in range(0,len(titles)):
                           f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -11006,6 +11553,58 @@ while True:
                    config[39] = stretch_p_high
                    config[40] = stretch_factor
                    config[41] = stretch_preset
+                   config[42] = ghs_D
+                   config[43] = ghs_b
+                   config[44] = ghs_SP
+                   config[45] = ghs_LP
+                   config[46] = ghs_HP
+                   config[47] = ghs_preset
+                   config[48] = ls_preview_refresh
+                   config[49] = ls_alignment_mode
+                   config[50] = ls_enable_qc
+                   config[51] = ls_max_fwhm
+                   config[52] = ls_min_sharpness
+                   config[53] = ls_max_drift
+                   config[54] = ls_min_stars
+                   config[55] = ls_stack_method
+                   config[56] = ls_stack_kappa
+                   config[57] = ls_stack_iterations
+                   config[58] = ls_planetary_enable
+                   config[59] = ls_planetary_mode
+                   config[60] = ls_planetary_disk_min
+                   config[61] = ls_planetary_disk_max
+                   config[62] = ls_planetary_threshold
+                   config[63] = ls_planetary_margin
+                   config[64] = ls_planetary_ellipse
+                   config[65] = ls_planetary_window
+                   config[66] = ls_planetary_upsample
+                   config[67] = ls_planetary_highpass
+                   config[68] = ls_planetary_roi_center
+                   config[69] = ls_planetary_corr
+                   config[70] = ls_planetary_max_shift
+                   config[71] = ls_lucky_buffer
+                   config[72] = ls_lucky_keep
+                   config[73] = ls_lucky_score
+                   config[74] = ls_lucky_stack
+                   config[75] = ls_lucky_align
+                   config[76] = ls_lucky_roi
+                   config[77] = use_native_sensor_mode
+                   config[78] = focus_method
+                   config[79] = star_metric
+                   config[80] = snr_display
+                   config[81] = metrics_interval
+                   config[82] = ls_lucky_save_progress
+                   config[83] = isp_enable
+                   config[84] = allsky_mode
+                   config[85] = allsky_mean_target
+                   config[86] = allsky_mean_threshold
+                   config[87] = allsky_video_fps
+                   config[88] = allsky_max_gain
+                   config[89] = allsky_apply_stretch
+                   config[90] = allsky_cleanup_jpegs
+                   config[91] = ls_save_progress
+                   config[92] = ls_save_final
+                   config[93] = ls_lucky_save_final
                    with open(config_file, 'w') as f:
                       for item in range(0,len(titles)):
                           f.write(titles[item] + " : " + str(config[item]) + "\n")
