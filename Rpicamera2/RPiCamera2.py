@@ -1940,8 +1940,13 @@ if len(config) <= 89:
     config.append(1)     # allsky_apply_stretch par défaut (ON)
 if len(config) <= 90:
     config.append(0)     # allsky_cleanup_jpegs par défaut (keep JPEGs)
+# Ajouter les paramètres de sauvegarde LiveStack/LuckyStack si le fichier de config est ancien
 if len(config) <= 91:
-    config.append(0)     # ser_format par défaut (YUV420)
+    config.append(1)     # ls_save_progress par défaut (ON)
+if len(config) <= 92:
+    config.append(1)     # ls_save_final par défaut (ON)
+if len(config) <= 93:
+    config.append(1)     # ls_lucky_save_final par défaut (ON)
 
 # Charger les paramètres ALLSKY
 allsky_mode           = config[84] if len(config) > 84 else 0
@@ -1951,7 +1956,6 @@ allsky_video_fps      = config[87] if len(config) > 87 else 25
 allsky_max_gain       = config[88] if len(config) > 88 else 200
 allsky_apply_stretch  = config[89] if len(config) > 89 else 1
 allsky_cleanup_jpegs  = config[90] if len(config) > 90 else 0
-ser_format            = config[91] if len(config) > 91 else 0
 
 # Options de sauvegarde LiveStack/LuckyStack
 ls_save_progress      = config[91] if len(config) > 91 else 1
@@ -2033,21 +2037,104 @@ while len(config) <= 93:
 if codec > len(codecs)-1:
     codec = 0
 
-def setmaxvformat():
-    # set max video format
-    global codec,Pi_Cam,configtxt,max_vformat,max_vfs
-    if codec > 0 and (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8) and ("dtoverlay=vc4-kms-v3d,cma-512" in configtxt): # Arducam IMX519 16MP or 64MP
-        max_vformat = max_vfs[6]
-    elif codec > 0 and (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8): # Arducam IMX519 16MP or 64MP
-        max_vformat = max_vfs[5]
-    elif codec > 0:
-        max_vformat = max_vfs[Pi_Cam]
-    elif Pi_Cam == 7 or Pi_Cam == 15:  # Pi GS or ov9281
-        max_vformat = max_vfs[Pi_Cam]
+def get_native_vformats():
+    """
+    Retourne la liste des index vformat correspondant aux résolutions natives du capteur.
+    Utilise les MÊMES résolutions que le système de zoom pour cohérence.
+    """
+    global vwidths, vheights, Pi_Cam
+
+    # Résolutions correspondant aux niveaux de zoom (IDENTIQUES à sync_video_resolution_with_zoom)
+    if Pi_Cam == 10:  # IMX585 - Utiliser modes hardware crop (ordre décroissant)
+        zoom_resolutions = [
+            (2880, 2160),  # Mode 2 crop (zoom 1)
+            (1920, 1080),  # Mode 3 crop (zoom 2)
+            (1280, 720),   # Mode 4 crop (zoom 3)
+            (800, 600),    # Mode 5 crop (zoom 4/5)
+        ]
     else:
-        max_vformat = max_vfs[0]
-    if Pi_Cam == 4 and codec == 0:
-        max_vformat = 12
+        # Autres caméras: résolutions standards supportées (ordre décroissant)
+        zoom_resolutions = [
+            (2880, 2160),  # zoom 1
+            (1920, 1080),  # zoom 2
+            (1280, 720),   # zoom 3
+            (800, 600),    # zoom 4/5
+        ]
+
+    # Trouver les index vformat correspondant à ces résolutions
+    native_vformats = []
+    for res_width, res_height in zoom_resolutions:
+        for i in range(len(vwidths)):
+            if vwidths[i] == res_width and vheights[i] == res_height:
+                if i not in native_vformats:  # Éviter les doublons
+                    native_vformats.append(i)
+                break
+
+    return native_vformats
+
+def get_next_native_vformat(current_vformat, direction=1):
+    """
+    Retourne le prochain vformat natif dans la direction spécifiée.
+    direction = 1 pour suivant, -1 pour précédent.
+    """
+    native_vformats = get_native_vformats()
+
+    if len(native_vformats) == 0:
+        return current_vformat
+
+    # Trouver l'index actuel dans la liste native
+    if current_vformat in native_vformats:
+        current_idx = native_vformats.index(current_vformat)
+    else:
+        # Si pas natif, trouver le plus proche
+        if direction > 0:
+            # Trouver le premier natif supérieur
+            for nv in native_vformats:
+                if nv > current_vformat:
+                    return nv
+            return native_vformats[-1]  # Retourner le dernier si aucun supérieur
+        else:
+            # Trouver le premier natif inférieur
+            for nv in reversed(native_vformats):
+                if nv < current_vformat:
+                    return nv
+            return native_vformats[0]  # Retourner le premier si aucun inférieur
+
+    # Incrémenter/décrémenter dans la liste native
+    new_idx = current_idx + direction
+
+    # Contraindre aux limites
+    if new_idx < 0:
+        new_idx = 0
+    elif new_idx >= len(native_vformats):
+        new_idx = len(native_vformats) - 1
+
+    return native_vformats[new_idx]
+
+def setmaxvformat():
+    # set max video format - UNIQUEMENT résolutions natives du capteur (comme le zoom)
+    global codec,Pi_Cam,configtxt,max_vformat,max_vfs,vwidths,vheights,vwidths2,vheights2
+
+    # Utiliser la liste de résolutions natives
+    native_vformats = get_native_vformats()
+
+    # Définir max_vformat comme le dernier index natif trouvé
+    if len(native_vformats) > 0:
+        max_vformat = native_vformats[-1]
+    else:
+        # Fallback vers l'ancienne méthode si aucune résolution native trouvée
+        if codec > 0 and (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8) and ("dtoverlay=vc4-kms-v3d,cma-512" in configtxt):
+            max_vformat = max_vfs[6]
+        elif codec > 0 and (Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8):
+            max_vformat = max_vfs[5]
+        elif codec > 0:
+            max_vformat = max_vfs[Pi_Cam]
+        elif Pi_Cam == 7 or Pi_Cam == 15:
+            max_vformat = max_vfs[Pi_Cam]
+        else:
+            max_vformat = max_vfs[0]
+        if Pi_Cam == 4 and codec == 0:
+            max_vformat = 12
     
 def slider_to_gain_nonlinear(slider_value, max_gain):
     """
@@ -3216,8 +3303,26 @@ def draw_Vbar(col,row,color,msg,value):
                 pmin = livestack_limits[f+1]
                 pmax = livestack_limits[f+2]
                 break
+
+    # Pour vformat, utiliser les résolutions natives uniquement
     if msg == "vformat":
-        pmax = max_vformat
+        native_vformats = get_native_vformats()
+        if len(native_vformats) > 0:
+            # Convertir vformat (index global) en position dans la liste native
+            if value in native_vformats:
+                native_idx = native_vformats.index(value)
+                pmin = 0
+                pmax = len(native_vformats) - 1
+                value = native_idx
+            else:
+                # Si vformat n'est pas natif, trouver le plus proche
+                pmin = 0
+                pmax = len(native_vformats) - 1
+                value = 0  # Par défaut première résolution
+        else:
+            # Fallback ancien système si aucune résolution native
+            pmax = max_vformat
+
     if alt_dis == 0:
         pygame.draw.rect(windowSurfaceObj,color,Rect(preview_width + col*bw,(row * bh) +1,bw-2,int(bh/3)))
     else:
@@ -3231,7 +3336,7 @@ def draw_Vbar(col,row,color,msg,value):
                 pygame.draw.rect(windowSurfaceObj,color,Rect((row-8)*bw,preview_height + (bh*3),bw-1,int(bh/3)))
             else:
                 pygame.draw.rect(windowSurfaceObj,color,Rect((row-8)*bw,int((preview_height *.75) + (bh*3)),bw-1,int(bh/3)))
-    if pmin > -1: 
+    if pmin > -1:
         j = value / (pmax - pmin)  * bw
     else:
         j = int(bw/2) + (value / (pmax - pmin)  * bw)
@@ -7016,10 +7121,15 @@ while True:
                             # --codec yuv420 --mode ... --roi ... --width ... --height ...
 
                             # Gestion du ROI (Region Of Interest) - DOIT venir AVANT --width/--height
-                            if zoom > 0 and zoom <= 5:  # Zoom fixe 1x à 6x (zoom 3 désactivé)
+                            if Pi_Cam == 10 and zoom > 0:  # IMX585 - Hardware crop natif (pas de ROI)
+                                sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+                                if sensor_mode:
+                                    # Utiliser directement le mode sensor natif sans ROI
+                                    datastr += f" --mode {sensor_mode[0]}:{sensor_mode[1]}:12"
+                            elif zoom > 0 and zoom <= 5:  # Autres caméras - ROI logiciel (zoom 3 désactivé)
                                 # ROI centré sur le mode capteur natif (vrai ROI)
                                 # Déterminer la profondeur de bits selon la caméra
-                                if Pi_Cam == 4 or Pi_Cam == 10:  # Pi HQ ou IMX585
+                                if Pi_Cam == 4:  # Pi HQ
                                     sensor_bits = 12
                                 else:
                                     sensor_bits = 10
@@ -7056,23 +7166,23 @@ while True:
                                     datastr += "  --roi " + str(zxo) + "," + str(zyo) + "," + str(preview_width/igw) + "," + str(preview_height/igh)
 
                             # Résolution et dimensions
-                            if zoom > 0 and zoom <= 5:  # Zoom fixe avec ROI
-                                # Toujours utiliser résolutions standards pour les vidéos (compatibilité rpicam-vid)
-                                # Le mode natif s'applique uniquement au livestack/luckystack
-                                # ORDRE DÉCROISSANT: résolutions de la plus grande à la plus petite
-                                zoom_resolutions = {
-                                    1: (2880, 2160),  # 2x zoom (résolution la plus haute)
-                                    2: (1920, 1080),  # 3x zoom -> Full HD (16:9, standard)
-                                    3: (1280, 720),   # 4x zoom -> HD (16:9, standard)
-                                    4: (800, 600),    # 5x zoom -> SVGA (4:3, résolution supportée)
-                                    5: (800, 600),    # 6x zoom -> SVGA (4:3, même résolution que zoom 4)
-                                }
-                                if zoom in zoom_resolutions:
-                                    actual_vwidth, actual_vheight = zoom_resolutions[zoom]
+                            if Pi_Cam == 10 and zoom > 0:  # IMX585: utiliser résolution du mode sensor
+                                sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+                                if sensor_mode:
+                                    actual_vwidth = sensor_mode[0]
+                                    actual_vheight = sensor_mode[1]
+                                    datastr += f" --width {sensor_mode[0]} --height {sensor_mode[1]}"
                                 else:
-                                    # Fallback: utiliser la résolution du ROI
-                                    actual_vwidth = zws
-                                    actual_vheight = zhs
+                                    # Fallback si sensor_mode non disponible
+                                    actual_vwidth = vwidth
+                                    actual_vheight = vheight
+                                    datastr += f" --width {vwidth} --height {vheight}"
+                            elif zoom > 0 and zoom <= 5:  # Autres caméras - Zoom fixe avec ROI
+                                # Utiliser la résolution choisie par l'utilisateur (vwidth/vheight)
+                                # Si c'est une résolution native (affichée en vert), pas de crop
+                                # Sinon, utiliser zws/zhs (résolution ROI calculée)
+                                actual_vwidth = vwidth
+                                actual_vheight = vheight
 
                                 # Ajouter --width et --height
                                 datastr += " --width " + str(actual_vwidth) + " --height " + str(actual_vheight)
@@ -7296,16 +7406,9 @@ while True:
                             bytes_per_pixel = 3 if ser_format == 1 else 4
 
                             # Déterminer la résolution de capture selon le zoom (modes IMX585)
-                            if Pi_Cam == 10 and zoom > 0:
-                                # Utiliser les modes de crop hardware IMX585
-                                sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
-                                if sensor_mode:
-                                    actual_vwidth, actual_vheight = sensor_mode
-                                else:
-                                    actual_vwidth, actual_vheight = vwidth, vheight
-                            else:
-                                # Pas de zoom ou autre caméra: utiliser résolution demandée
-                                actual_vwidth, actual_vheight = vwidth, vheight
+                            # IMPORTANT: Toujours utiliser vwidth/vheight (résolution choisie par l'utilisateur)
+                            # pour éviter le crop non désiré sur les résolutions natives
+                            actual_vwidth, actual_vheight = vwidth, vheight
 
                             # Calculer le FPS réel
                             if mode != 0:
@@ -7453,9 +7556,11 @@ while True:
                                         return  # Arrêter si nombre de frames atteint
 
                                     try:
-                                        # Utiliser make_buffer pour obtenir directement les bytes sans copie numpy
-                                        # C'est BEAUCOUP plus rapide que make_array + tobytes
-                                        frame_buffer = request.make_buffer("main")
+                                        # IMPORTANT: Utiliser make_array().tobytes() au lieu de make_buffer()
+                                        # car make_buffer() inclut le stride (padding des lignes), ce qui
+                                        # provoque des lignes décalées dans convert_rgb888_to_ser()
+                                        frame_array = request.make_array("main")
+                                        frame_buffer = frame_array.tobytes()
 
                                         # Écrire directement sur disque sans conversion
                                         # La conversion RGB→BGR sera faite après pendant convert_rgb888_to_ser
@@ -7632,9 +7737,14 @@ while True:
                         datastr += " --brightness " + str(brightness/100) + " --contrast " + str(contrast/100)
 
                         # IMPORTANT: Pour un vrai ROI (méthode Test2), ajouter --mode et --roi AVANT --width/--height
-                        if zoom > 0 and zoom <= 5:  # Zoom fixe 1x à 6x (zoom 3 désactivé)
+                        if Pi_Cam == 10 and zoom > 0:  # IMX585 - Hardware crop natif (pas de ROI)
+                            sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+                            if sensor_mode:
+                                # Utiliser directement le mode sensor natif sans ROI
+                                datastr += f" --mode {sensor_mode[0]}:{sensor_mode[1]}:12"
+                        elif zoom > 0 and zoom <= 5:  # Autres caméras - ROI logiciel (zoom 3 désactivé)
                             # Déterminer la profondeur de bits selon la caméra
-                            if Pi_Cam == 4 or Pi_Cam == 10:  # Pi HQ ou IMX585
+                            if Pi_Cam == 4:  # Pi HQ
                                 sensor_bits = 12
                             else:
                                 sensor_bits = 10
@@ -7678,7 +7788,11 @@ while True:
                                 datastr += " --width " + str(preview_width) + " --height " + str(int(preview_height * .75))
                             else:
                                 datastr += " --width " + str(preview_width) + " --height " + str(preview_height)
-                        elif zoom > 0 and zoom <= 5:  # Zoom fixe avec ROI (zoom 3 désactivé)
+                        elif Pi_Cam == 10 and zoom > 0:  # IMX585: ajouter --width et --height du mode sensor
+                            sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+                            if sensor_mode:
+                                datastr += f" --width {sensor_mode[0]} --height {sensor_mode[1]}"
+                        elif zoom > 0 and zoom <= 5:  # Autres caméras - Zoom fixe avec ROI (zoom 3 désactivé)
                             # NE RIEN FAIRE : le ROI a déjà défini la taille de sortie
                             pass
                         elif Pi_Cam == 4 and vwidth == 2028:
@@ -7901,9 +8015,14 @@ while True:
                     datastr += " --brightness " + str(brightness/100) + " --contrast " + str(contrast/100)
 
                     # IMPORTANT: Pour un vrai ROI (méthode Test2), ajouter --mode et --roi AVANT --width/--height
-                    if zoom > 0 and zoom <= 5:  # Zoom fixe 1x à 6x (zoom 3 désactivé)
+                    if Pi_Cam == 10 and zoom > 0:  # IMX585 - Hardware crop natif (pas de ROI)
+                        sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+                        if sensor_mode:
+                            # Utiliser directement le mode sensor natif sans ROI
+                            datastr += f" --mode {sensor_mode[0]}:{sensor_mode[1]}:12"
+                    elif zoom > 0 and zoom <= 5:  # Autres caméras - ROI logiciel (zoom 3 désactivé)
                         # Déterminer la profondeur de bits selon la caméra
-                        if Pi_Cam == 4 or Pi_Cam == 10:  # Pi HQ ou IMX585
+                        if Pi_Cam == 4:  # Pi HQ
                             sensor_bits = 12
                         else:
                             sensor_bits = 10
@@ -7938,7 +8057,11 @@ while True:
                     # Supprimé: ancien zoom manuel (zoom == 5)
                     if False and zoom == 5:
                         datastr += " --width " + str(preview_width) + " --height " + str(preview_height)
-                    elif zoom > 0 and zoom <= 5:  # Zoom fixe avec ROI (zoom 3 désactivé)
+                    elif Pi_Cam == 10 and zoom > 0:  # IMX585: ajouter --width et --height du mode sensor
+                        sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+                        if sensor_mode:
+                            datastr += f" --width {sensor_mode[0]} --height {sensor_mode[1]}"
+                    elif zoom > 0 and zoom <= 5:  # Autres caméras - Zoom fixe avec ROI (zoom 3 désactivé)
                         # NE RIEN FAIRE : le ROI a déjà défini la taille de sortie
                         pass
                     elif Pi_Cam == 4 and vwidth == 2028:
@@ -8149,7 +8272,13 @@ while True:
                             elif Pi_Cam == 8:
                                 datastr += " --width 9248 --height 6944"
                         # Zoom fixe 1x à 6x
-                        if zoom > 0 and zoom <= 5:  # Zoom 3 désactivé
+                        if Pi_Cam == 10 and zoom > 0:  # IMX585 - Hardware crop natif (pas de ROI)
+                            sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+                            if sensor_mode:
+                                # Utiliser directement le mode sensor natif sans ROI
+                                datastr += f" --mode {sensor_mode[0]}:{sensor_mode[1]}:12"
+                                datastr += f" --width {sensor_mode[0]} --height {sensor_mode[1]}"
+                        elif zoom > 0 and zoom <= 5:  # Autres caméras - ROI logiciel (zoom 3 désactivé)
                             # Arrondir à un nombre PAIR pour compatibilité formats vidéo
                             zws = int(igw * zfs[zoom])
                             zhs = int(igh * zfs[zoom])
@@ -8414,7 +8543,12 @@ while True:
                                     elif Pi_Cam == 8:
                                         datastr += " --width 9248 --height 6944"
                                 # Zoom fixe 1x à 6x
-                                if zoom > 0 and zoom <= 5:
+                                if Pi_Cam == 10 and zoom > 0:  # IMX585 - Hardware crop natif (pas de ROI)
+                                    sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+                                    if sensor_mode:
+                                        # Utiliser directement le mode sensor natif sans ROI
+                                        datastr += f" --mode {sensor_mode[0]}:{sensor_mode[1]}:12"
+                                elif zoom > 0 and zoom <= 5:  # Autres caméras - ROI logiciel
                                     zws = int(igw * zfs[zoom])
                                     zhs = int(igh * zfs[zoom])
                                     zxo = ((igw-zws)/2)/igw
@@ -8635,7 +8769,12 @@ while True:
                         if Pi_Cam == 3 or Pi == 5:
                             datastr += " --hdr " + v3_hdrs_cli[v3_hdr]
                         # Zoom fixe 1x à 6x
-                        if zoom > 0 and zoom <= 5:  # Zoom 3 désactivé
+                        if Pi_Cam == 10 and zoom > 0:  # IMX585 - Hardware crop natif (pas de ROI)
+                            sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
+                            if sensor_mode:
+                                # Utiliser directement le mode sensor natif sans ROI
+                                datastr += f" --mode {sensor_mode[0]}:{sensor_mode[1]}:12"
+                        elif zoom > 0 and zoom <= 5:  # Autres caméras - ROI logiciel (zoom 3 désactivé)
                             # Arrondir à un nombre PAIR pour compatibilité formats vidéo
                             zws = int(igw * zfs[zoom])
                             zhs = int(igh * zfs[zoom])
@@ -10441,31 +10580,36 @@ while True:
                         pmax = video_limits[f+2]
                 
                 if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    # set max video format
-                    setmaxvformat()
-                    pmax = max_vformat
-                    vformat = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                    # Utiliser UNIQUEMENT les résolutions natives (comme le zoom)
+                    native_vformats = get_native_vformats()
+                    if len(native_vformats) > 0:
+                        native_idx = int(((mousex-preview_width) / bw) * len(native_vformats))
+                        native_idx = min(native_idx, len(native_vformats) - 1)
+                        vformat = native_vformats[native_idx]
                 elif (mousey > preview_height  + (bh*2) and mousey < preview_height + (bh*2) + int(bh/3)) and alt_dis == 1:
-                    # set max video format    
-                    setmaxvformat()
-                    pmax = max_vformat
-                    vformat = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
+                    # Utiliser UNIQUEMENT les résolutions natives (comme le zoom)
+                    native_vformats = get_native_vformats()
+                    if len(native_vformats) > 0:
+                        native_idx = int(((mousex-((button_row - 1)*bw)) / bw) * len(native_vformats))
+                        native_idx = min(native_idx, len(native_vformats) - 1)
+                        vformat = native_vformats[native_idx]
                 elif (mousey > preview_height * .75  + (bh*2) and mousey < preview_height * .75 + (bh*2) + int(bh/3)) and alt_dis == 2:
-                    # set max video format    
-                    setmaxvformat()
-                    pmax = max_vformat
-                    vformat = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
+                    # Utiliser UNIQUEMENT les résolutions natives (comme le zoom)
+                    native_vformats = get_native_vformats()
+                    if len(native_vformats) > 0:
+                        native_idx = int(((mousex-((button_row - 1)*bw)) / bw) * len(native_vformats))
+                        native_idx = min(native_idx, len(native_vformats) - 1)
+                        vformat = native_vformats[native_idx]
                 else:
                     if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        vformat -=1
-                        # set max video format    
-                        setmaxvformat()
-                        vformat = min(vformat,max_vformat)
+                        # Passer à la résolution native précédente (comme le zoom)
+                        vformat = get_next_native_vformat(vformat, direction=-1)
                     else:
-                        vformat +=1
-                        # set max video format
-                        setmaxvformat()
-                        vformat = min(vformat,max_vformat)
+                        # Passer à la résolution native suivante (comme le zoom)
+                        vformat = get_next_native_vformat(vformat, direction=1)
+                    # set max video format
+                    setmaxvformat()
+                    vformat = min(vformat,max_vformat)
                 draw_Vbar(0,3,lpurColor,'vformat',vformat)
                 vwidth  = vwidths[vformat]
                 vheight = vheights[vformat]
@@ -10536,6 +10680,8 @@ while True:
                 # set max video format
                 setmaxvformat()
                 vformat = min(vformat,max_vformat)
+                # S'assurer que vformat est sur une résolution native (comme le zoom)
+                vformat = get_next_native_vformat(vformat, direction=0 if vformat in get_native_vformats() else -1)
                 text(0,4,3,1,1,codecs[codec],fv,11)
                 draw_Vbar(0,4,lpurColor,'codec',codec)
                 draw_Vbar(0,3,lpurColor,'vformat',vformat)
@@ -10842,6 +10988,48 @@ while True:
                       config[39] = stretch_p_high
                       config[40] = stretch_factor
                       config[41] = stretch_preset
+                      config[42] = ghs_D
+                      config[43] = ghs_b
+                      config[44] = ghs_SP
+                      config[45] = ghs_LP
+                      config[46] = ghs_HP
+                      config[47] = ghs_preset
+                      config[48] = ls_preview_refresh
+                      config[49] = ls_alignment_mode
+                      config[50] = ls_enable_qc
+                      config[51] = ls_max_fwhm
+                      config[52] = ls_min_sharpness
+                      config[53] = ls_max_drift
+                      config[54] = ls_min_stars
+                      config[55] = ls_stack_method
+                      config[56] = ls_stack_kappa
+                      config[57] = ls_stack_iterations
+                      config[58] = ls_planetary_enable
+                      config[59] = ls_planetary_mode
+                      config[60] = ls_planetary_disk_min
+                      config[61] = ls_planetary_disk_max
+                      config[62] = ls_planetary_threshold
+                      config[63] = ls_planetary_margin
+                      config[64] = ls_planetary_ellipse
+                      config[65] = ls_planetary_window
+                      config[66] = ls_planetary_upsample
+                      config[67] = ls_planetary_highpass
+                      config[68] = ls_planetary_roi_center
+                      config[69] = ls_planetary_corr
+                      config[70] = ls_planetary_max_shift
+                      config[71] = ls_lucky_buffer
+                      config[72] = ls_lucky_keep
+                      config[73] = ls_lucky_score
+                      config[74] = ls_lucky_stack
+                      config[75] = ls_lucky_align
+                      config[76] = ls_lucky_roi
+                      config[77] = use_native_sensor_mode
+                      config[78] = focus_method
+                      config[79] = star_metric
+                      config[80] = snr_display
+                      config[81] = metrics_interval
+                      config[82] = ls_lucky_save_progress
+                      config[83] = isp_enable
                       # Add allsky parameters
                       config[84] = allsky_mode
                       config[85] = allsky_mean_target
@@ -11011,6 +11199,48 @@ while True:
                       config[39] = stretch_p_high
                       config[40] = stretch_factor
                       config[41] = stretch_preset
+                      config[42] = ghs_D
+                      config[43] = ghs_b
+                      config[44] = ghs_SP
+                      config[45] = ghs_LP
+                      config[46] = ghs_HP
+                      config[47] = ghs_preset
+                      config[48] = ls_preview_refresh
+                      config[49] = ls_alignment_mode
+                      config[50] = ls_enable_qc
+                      config[51] = ls_max_fwhm
+                      config[52] = ls_min_sharpness
+                      config[53] = ls_max_drift
+                      config[54] = ls_min_stars
+                      config[55] = ls_stack_method
+                      config[56] = ls_stack_kappa
+                      config[57] = ls_stack_iterations
+                      config[58] = ls_planetary_enable
+                      config[59] = ls_planetary_mode
+                      config[60] = ls_planetary_disk_min
+                      config[61] = ls_planetary_disk_max
+                      config[62] = ls_planetary_threshold
+                      config[63] = ls_planetary_margin
+                      config[64] = ls_planetary_ellipse
+                      config[65] = ls_planetary_window
+                      config[66] = ls_planetary_upsample
+                      config[67] = ls_planetary_highpass
+                      config[68] = ls_planetary_roi_center
+                      config[69] = ls_planetary_corr
+                      config[70] = ls_planetary_max_shift
+                      config[71] = ls_lucky_buffer
+                      config[72] = ls_lucky_keep
+                      config[73] = ls_lucky_score
+                      config[74] = ls_lucky_stack
+                      config[75] = ls_lucky_align
+                      config[76] = ls_lucky_roi
+                      config[77] = use_native_sensor_mode
+                      config[78] = focus_method
+                      config[79] = star_metric
+                      config[80] = snr_display
+                      config[81] = metrics_interval
+                      config[82] = ls_lucky_save_progress
+                      config[83] = isp_enable
                       # Add allsky parameters
                       config[84] = allsky_mode
                       config[85] = allsky_mean_target
