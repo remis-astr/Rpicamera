@@ -272,12 +272,18 @@ def pause_picamera2():
     Ferme complètement Picamera2 pour libérer la caméra.
     IMPORTANT: Doit être suivi de resume_picamera2() pour recréer Picamera2.
     """
-    global picam2, use_picamera2
+    global picam2, use_picamera2, capture_thread
 
     print(f"[DEBUG] pause_picamera2() called - use_picamera2={use_picamera2}, picam2={picam2 is not None}")
 
     if use_picamera2 and picam2 is not None:
         try:
+            # Arrêter le thread de capture d'abord
+            if capture_thread is not None:
+                print("[DEBUG] Stopping capture thread...")
+                capture_thread.stop()
+                capture_thread = None
+
             # Fermer complètement Picamera2 pour libérer le pipeline
             print("[DEBUG] Closing Picamera2 completely...")
             picam2.stop()
@@ -316,6 +322,187 @@ def resume_picamera2():
             return False
     print("[DEBUG] Picamera2 not resumed (not in use)")
     return False
+
+
+def apply_controls_immediately(exposure_time=None, gain_value=None):
+    """
+    Applique immédiatement les changements de contrôles (exposition, gain)
+    sans recréer la caméra. Annule la capture en cours pour appliquer
+    les nouveaux paramètres plus rapidement.
+
+    Args:
+        exposure_time: Temps d'exposition en microsecondes (None = ne pas changer)
+        gain_value: Valeur de gain (None = ne pas changer)
+
+    Returns:
+        True si les contrôles ont été appliqués, False sinon
+    """
+    global picam2, capture_thread, Pi_Cam, max_shutters, livestack_active, luckystack_active, raw_format
+
+    if not use_picamera2 or picam2 is None:
+        return False
+
+    try:
+        controls_to_apply = {}
+
+        # Préparer les contrôles à appliquer
+        if exposure_time is not None:
+            max_exposure_seconds = max_shutters[Pi_Cam]
+            max_frame_duration = int(max_exposure_seconds * 1_000_000)
+            min_frame_duration = 11415 if Pi_Cam == 10 else 100
+
+            controls_to_apply["FrameDurationLimits"] = (min_frame_duration, max(max_frame_duration, exposure_time))
+            controls_to_apply["ExposureTime"] = exposure_time
+
+        if gain_value is not None:
+            controls_to_apply["AnalogueGain"] = float(gain_value)
+
+        # Appliquer les contrôles
+        if controls_to_apply:
+            picam2.set_controls(controls_to_apply)
+
+            # IMPORTANT: Redémarrer le thread pour que les nouveaux paramètres
+            # s'appliquent immédiatement (sinon le thread continue avec les anciens)
+            if capture_thread is not None:
+                if show_cmds == 1:
+                    print(f"[AsyncCapture] Redémarrage du thread pour nouveaux paramètres")
+
+                # Arrêter le thread actuel
+                capture_thread.stop()
+
+                # Recréer et redémarrer avec les mêmes paramètres de type
+                new_thread = AsyncCaptureThread(picam2)
+                if (livestack_active or luckystack_active) and raw_format >= 2:
+                    new_thread.set_capture_params({'type': 'raw'})
+                else:
+                    new_thread.set_capture_params({'type': 'main'})
+                new_thread.start()
+
+                # Remplacer l'ancien thread
+                capture_thread = new_thread
+
+            if show_cmds == 1:
+                print(f"[AsyncCapture] Contrôles appliqués immédiatement: {controls_to_apply}")
+
+            return True
+
+    except Exception as e:
+        print(f"[AsyncCapture] Erreur lors de l'application des contrôles: {e}")
+        return False
+
+    return False
+
+
+# ============================================================================
+# Capture asynchrone pour éviter le blocage de l'interface
+# ============================================================================
+class AsyncCaptureThread:
+    """
+    Thread de capture asynchrone pour Picamera2.
+    Permet de capturer des images en arrière-plan sans bloquer l'interface.
+    """
+    def __init__(self, picam2_instance):
+        self.picam2 = picam2_instance
+        self.thread = None
+        self.running = False
+        self.capturing = False
+        self.latest_frame = None
+        self.latest_metadata = None
+        self.frame_lock = threading.Lock()
+        self.cancel_current = False  # Flag pour ignorer la capture en cours
+        self.capture_params = {}  # Paramètres de la capture en cours
+
+    def start(self):
+        """Démarre le thread de capture"""
+        if not self.running:
+            self.running = True
+            self.thread = threading.Thread(target=self._capture_loop, daemon=True)
+            self.thread.start()
+            print("[AsyncCapture] Thread de capture démarré")
+
+    def stop(self):
+        """Arrête le thread de capture"""
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=2.0)
+            print("[AsyncCapture] Thread de capture arrêté")
+
+    def _capture_loop(self):
+        """Boucle de capture en arrière-plan"""
+        while self.running:
+            try:
+                if self.picam2 is None:
+                    time.sleep(0.1)
+                    continue
+
+                self.capturing = True
+                self.cancel_current = False
+
+                # Capturer l'image (BLOQUANT mais dans le thread)
+                # On ne peut pas vraiment interrompre l'intégration hardware
+                frame = None
+                metadata = None
+
+                try:
+                    # Capturer selon le type demandé
+                    capture_type = self.capture_params.get('type', 'main')
+                    if capture_type == 'raw':
+                        frame = self.picam2.capture_array("raw")
+                    else:
+                        frame = self.picam2.capture_array("main")
+                    metadata = self.picam2.capture_metadata()
+                except Exception as e:
+                    print(f"[AsyncCapture] Erreur capture: {e}")
+                    self.capturing = False
+                    time.sleep(0.1)
+                    continue
+
+                # Si la capture a été annulée pendant l'acquisition, on ignore le résultat
+                if self.cancel_current:
+                    print(f"[AsyncCapture] Capture annulée (nouveaux paramètres appliqués)")
+                    self.capturing = False
+                    continue
+
+                # Stocker la frame capturée
+                with self.frame_lock:
+                    self.latest_frame = frame
+                    self.latest_metadata = metadata
+
+                self.capturing = False
+
+            except Exception as e:
+                print(f"[AsyncCapture] Erreur dans la boucle de capture: {e}")
+                self.capturing = False
+                time.sleep(0.1)
+
+    def get_latest_frame(self):
+        """
+        Récupère la dernière frame capturée (non-bloquant).
+        Retourne (frame, metadata) ou (None, None) si aucune frame disponible.
+        """
+        with self.frame_lock:
+            frame = self.latest_frame
+            metadata = self.latest_metadata
+            # Réinitialiser pour éviter de réutiliser la même frame
+            self.latest_frame = None
+            self.latest_metadata = None
+            return frame, metadata
+
+    def cancel_capture(self):
+        """
+        Marque la capture en cours comme obsolète.
+        Elle continuera physiquement (limitation hardware) mais sera ignorée.
+        """
+        self.cancel_current = True
+        print(f"[AsyncCapture] Annulation de la capture en cours demandée")
+
+    def set_capture_params(self, params):
+        """Définit les paramètres pour la prochaine capture"""
+        self.capture_params = params.copy()
+
+    def is_capturing(self):
+        """Retourne True si une capture est en cours"""
+        return self.capturing
 
 
 def create_ser_header(width, height, pixel_depth=8, color_id=100):
@@ -1199,7 +1386,7 @@ meter       = 2    # metering mode (2 = average), see meters below
 awb         = 1    # auto white balance mode, off, auto etc (1 = auto), see awbs below
 sharpness   = 15   # set sharpness level
 denoise     = 1    # set denoise level, see denoises below
-fix_bad_pixels = 1  # auto-fix bad/hot pixels in RAW mode (0=off, 1=on)
+fix_bad_pixels = 0  # auto-fix bad/hot pixels in RAW mode (0=off, 1=on)
 fix_bad_pixels_sigma = 40  # threshold for bad pixel detection (×10, 50=5.0 sigma)
 fix_bad_pixels_min_adu = 100  # seuil minimum absolu en ADU (×10, 200=20 ADU, 0=désactivé)
 quality     = 93   # set quality level
@@ -1312,6 +1499,7 @@ p = None  # Subprocess rpicam-vid (None en mode Picamera2)
 
 # Picamera2 variables
 picam2 = None  # Instance Picamera2
+capture_thread = None  # Thread de capture asynchrone
 use_picamera2 = True  # Flag pour activer Picamera2 (False = utiliser rpicam-vid)
 use_native_sensor_mode = 0  # 0=binning rapide (1080p), 1=résolution native complète du capteur
 
@@ -1708,7 +1896,8 @@ titles = ['mode','speed','gain','brightness','contrast','frame','red','blue','ev
           'ls_lucky_buffer','ls_lucky_keep','ls_lucky_score','ls_lucky_stack','ls_lucky_align','ls_lucky_roi','use_native_sensor_mode',
           'focus_method','star_metric','snr_display','metrics_interval','ls_lucky_save_progress','isp_enable',
           'allsky_mode','allsky_mean_target','allsky_mean_threshold','allsky_video_fps','allsky_max_gain','allsky_apply_stretch','allsky_cleanup_jpegs',
-          'ls_save_progress','ls_save_final','ls_lucky_save_final']
+          'ls_save_progress','ls_save_final','ls_lucky_save_final',
+          'fix_bad_pixels','fix_bad_pixels_sigma','fix_bad_pixels_min_adu']
 points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat,codec,tinterval,tshots,extn,zx,zy,zoom,saturation,
           meter,awb,sharpness,denoise,quality,profile,level,histogram,histarea,v3_f_speed,v3_f_range,rotate,IRF,str_cap,v3_hdr,raw_format,vflip,hflip,
           stretch_p_low,stretch_p_high,stretch_factor,stretch_preset,ghs_D,ghs_b,ghs_SP,ghs_LP,ghs_HP,ghs_preset,
@@ -1718,7 +1907,8 @@ points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat
           ls_lucky_buffer,ls_lucky_keep,ls_lucky_score,ls_lucky_stack,ls_lucky_align,ls_lucky_roi,use_native_sensor_mode,
           focus_method,star_metric,snr_display,metrics_interval,ls_lucky_save_progress,isp_enable,
           allsky_mode,allsky_mean_target,allsky_mean_threshold,allsky_video_fps,allsky_max_gain,allsky_apply_stretch,allsky_cleanup_jpegs,
-          ls_save_progress,ls_save_final,ls_lucky_save_final]
+          ls_save_progress,ls_save_final,ls_lucky_save_final,
+          fix_bad_pixels,fix_bad_pixels_sigma,fix_bad_pixels_min_adu]
 if not os.path.exists(config_file):
     with open(config_file, 'w') as f:
         for item in range(0,len(titles)):
@@ -1962,6 +2152,11 @@ ls_save_progress      = config[91] if len(config) > 91 else 1
 ls_save_final         = config[92] if len(config) > 92 else 1
 ls_lucky_save_final   = config[93] if len(config) > 93 else 1
 
+# Suppression des pixels chauds (hot pixels)
+fix_bad_pixels        = config[94] if len(config) > 94 else 1
+fix_bad_pixels_sigma  = config[95] if len(config) > 95 else 40
+fix_bad_pixels_min_adu = config[96] if len(config) > 96 else 100
+
 # ISP configuration (chemin en dur pour le fichier de config ISP)
 # Config neutre (transparente) pour astrophotographie - n'affecte que les PNG de prévisualisation
 isp_config_path = "isp_config_neutral.json"
@@ -2027,11 +2222,20 @@ use_native_sensor_mode = max(0, min(use_native_sensor_mode, 1))  # 0-1: Binning/
 # ISP parameter
 isp_enable = max(0, min(isp_enable, 1))  # 0-1: OFF/ON
 
+# Hot pixels removal parameters
+fix_bad_pixels = max(0, min(fix_bad_pixels, 1))  # 0-1: OFF/ON
+fix_bad_pixels_sigma = max(10, min(fix_bad_pixels_sigma, 100))  # 1.0-10.0 sigma (×10)
+fix_bad_pixels_min_adu = max(0, min(fix_bad_pixels_min_adu, 1000))  # 0-100 ADU (×10)
+
 # Debug ISP
 print(f"[DEBUG CONFIG] isp_enable = {isp_enable}, isp_config_path = {isp_config_path}")
 
-# Étendre config à 94 éléments si nécessaire (pour ls_lucky_save_final à index 93)
-while len(config) <= 93:
+# Debug Hot Pixels Removal
+status = "ON" if fix_bad_pixels else "OFF"
+print(f"[DEBUG CONFIG] Hot Pixels Removal: {status}, sigma={fix_bad_pixels_sigma/10.0}, min_adu={fix_bad_pixels_min_adu/10.0}")
+
+# Étendre config à 97 éléments si nécessaire (pour fix_bad_pixels_min_adu à index 96)
+while len(config) <= 96:
     config.append(0)
 
 if codec > len(codecs)-1:
@@ -4240,7 +4444,7 @@ def preview():
     global use_ard,lver,Pi,scientif,scientific,fxx,fxy,fxz,v3_focus,v3_hdr,v3_f_mode,v3_f_modes,prev_fps,focus_fps,focus_mode,restart,datastr
     global count,p, brightness,contrast,modes,mode,red,blue,gain,sspeed,ev,preview_width,preview_height,zoom,igw,igh,zx,zy,awbs,awb,saturations
     global saturation,meters,meter,flickers,flicker,sharpnesss,sharpness,rotate,v3_hdrs,mjpeg_extractor
-    global picam2, use_picamera2, Pi_Cam, camera, v3_af, v5_af, vflip, hflip, denoise, denoises, quality, use_native_sensor_mode, zfs
+    global picam2, capture_thread, use_picamera2, Pi_Cam, camera, v3_af, v5_af, vflip, hflip, denoise, denoises, quality, use_native_sensor_mode, zfs
     global livestack_active, luckystack_active, raw_format, raw_stream_size, capture_size
 
     # Variables statiques pour mémoriser la configuration précédente
@@ -4394,6 +4598,26 @@ def preview():
                 if show_cmds == 1:
                     print(f"  DEBUG: fast_controls = {fast_controls}")
                 picam2.set_controls(fast_controls)
+
+                # IMPORTANT: Redémarrer le thread pour que les nouveaux paramètres
+                # s'appliquent immédiatement au lieu de juste annuler
+                if capture_thread is not None:
+                    # Arrêter le thread actuel
+                    capture_thread.stop()
+
+                    # Recréer et redémarrer immédiatement
+                    new_thread = AsyncCaptureThread(picam2)
+                    if (livestack_active or luckystack_active) and raw_format >= 2:
+                        new_thread.set_capture_params({'type': 'raw'})
+                    else:
+                        new_thread.set_capture_params({'type': 'main'})
+                    new_thread.start()
+
+                    # Remplacer l'ancien thread
+                    capture_thread = new_thread
+
+                    if show_cmds == 1:
+                        print(f"  [AsyncCapture] Thread redémarré avec nouveaux paramètres")
 
                 # Vérifier que les contrôles ont été appliqués
                 if show_cmds == 1:
@@ -4890,6 +5114,19 @@ def preview():
                 if mode == 0 and abs(actual_exp - speed2) > speed2 * 0.1:  # Plus de 10% de différence
                     print(f"  ⚠ WARNING: ExposureTime réel différent de la demande!")
                     print(f"    Écart: {speed2 - actual_exp}µs ({100*(speed2-actual_exp)/speed2:.1f}%)")
+
+        # Créer et démarrer le thread de capture asynchrone
+        if capture_thread is not None:
+            # Arrêter l'ancien thread s'il existe
+            capture_thread.stop()
+
+        capture_thread = AsyncCaptureThread(picam2)
+        # Définir les paramètres de capture selon le format RAW
+        if (livestack_active or luckystack_active) and raw_format >= 2:
+            capture_thread.set_capture_params({'type': 'raw'})
+        else:
+            capture_thread.set_capture_params({'type': 'main'})
+        capture_thread.start()
 
         # Mémoriser la configuration actuelle pour la prochaine fois
         preview.prev_config = {
@@ -5899,382 +6136,390 @@ while True:
             print("DEBUG: Entering Picamera2 capture section")
             pygame._picam2_section_debug = True
         try:
-            # Capturer l'image directement depuis Picamera2
-            # Si livestack/luckystack actif ET format RAW Bayer sélectionné → capturer et débayériser en uint16
-            if (livestack_active or luckystack_active) and raw_format >= 2:
-                # Capturer flux RAW (SRGGB12 ou SRGGB16) - raw_format 2 ou 3
-                raw_array = picam2.capture_array("raw")
+            # Récupérer la dernière frame depuis le thread de capture asynchrone
+            # Au lieu de bloquer avec capture_array(), on récupère la frame si disponible
+            frame_from_thread, metadata_from_thread = None, None
+            if capture_thread is not None:
+                frame_from_thread, metadata_from_thread = capture_thread.get_latest_frame()
 
-                # Validation: Vérifier que la résolution capturée correspond à celle attendue
-                expected_height = raw_stream_size[1]
-                actual_height = raw_array.shape[0]
+            # Si une frame est disponible, la traiter et l'afficher
+            # Sinon, on saute juste le traitement (l'interface reste réactive)
+            if frame_from_thread is not None:
+                # Si livestack/luckystack actif ET format RAW Bayer sélectionné → débayériser en uint16
+                if (livestack_active or luckystack_active) and raw_format >= 2:
+                    # Utiliser la frame RAW capturée par le thread
+                    raw_array = frame_from_thread
 
-                if actual_height != expected_height:
-                    if not hasattr(pygame, '_raw_resolution_mismatch_warning'):
-                        print(f"\n⚠️  [RAW VALIDATION] Incompatibilité de résolution détectée!")
-                        print(f"  Attendu: {raw_stream_size}")
-                        print(f"  Capturé: {raw_array.shape}")
-                        print(f"  → Cette résolution n'est pas compatible avec le mode RAW")
-                        print(f"  → Utilisez XRGB8888 ISP ou changez de résolution")
-                        pygame._raw_resolution_mismatch_warning = True
+                    # Validation: Vérifier que la résolution capturée correspond à celle attendue
+                    expected_height = raw_stream_size[1]
+                    actual_height = raw_array.shape[0]
 
-                # Débayériser en RGB uint16 [0-65535] (préserve dynamique 12/16-bit)
-                # *** NOUVEAU : Passer les gains AWB pour corriger la balance des blancs en RAW ***
-                # INVERSÉS pour compenser le pattern Bayer RGGB qui inverse les canaux
-                array_uint16 = debayer_raw_array(raw_array, raw_formats[raw_format],
-                                                  red_gain=(blue/10),   # Le curseur BLEU contrôle le rouge
-                                                  blue_gain=(red/10),   # Le curseur ROUGE contrôle le bleu
-                                                  fix_bad_pixels=bool(fix_bad_pixels) and livestack_active,  # SEULEMENT LiveStack, PAS LuckyStack
-                                                  sigma_threshold=fix_bad_pixels_sigma/10.0,
-                                                  min_adu_threshold=fix_bad_pixels_min_adu/10.0)
-                # CORRECTION: Garder la pleine dynamique 16-bit [0-65535] pour RAW12/16
-                # Ne plus compresser à [0-255] car libastrostack gère correctement les données haute résolution
-                # Convertir juste en float32 pour compatibilité avec libastrostack
-                array = array_uint16.astype(np.float32)  # Garder [0-65535]
+                    if actual_height != expected_height:
+                        if not hasattr(pygame, '_raw_resolution_mismatch_warning'):
+                            print(f"\n⚠️  [RAW VALIDATION] Incompatibilité de résolution détectée!")
+                            print(f"  Attendu: {raw_stream_size}")
+                            print(f"  Capturé: {raw_array.shape}")
+                            print(f"  → Cette résolution n'est pas compatible avec le mode RAW")
+                            print(f"  → Utilisez XRGB8888 ISP ou changez de résolution")
+                            pygame._raw_resolution_mismatch_warning = True
 
-                # Appliquer boost de contraste SEULEMENT si ISP libastrostack est désactivé
-                # Si ISP activé, on passe les données RAW brutes à libastrostack qui fera le traitement
-                if isp_enable == 0:
-                    # CORRECTION: Boost calibré pour plage 16-bit [0-65535]
-                    # Appliquer boost de contraste au lieu du gamma (préserve mieux les noirs)
-                    # Méthode : (value - midpoint) × factor + midpoint + brightness_offset
-                    midpoint = 32768.0  # Milieu de la plage 16-bit
-                    contrast_factor = 1.15  # Léger boost de contraste
-                    brightness_offset = 2048  # Légère augmentation de luminosité (équivalent de +8 en 8-bit)
-                    array = np.clip((array - midpoint) * contrast_factor + midpoint + brightness_offset, 0, 65535.0)
-                if show_cmds == 1 and not hasattr(pygame, '_stacking_mode_shown'):
-                    metadata = picam2.capture_metadata()
-                    print(f"\n[STACKING] Mode actif, capture depuis stream RAW")
-                    print(f"  Format RAW: {raw_formats[raw_format]}")
-                    print(f"  Array débayérisé uint16: shape={array_uint16.shape}, range=[{array_uint16.min()}, {array_uint16.max()}]")
-                    print(f"  Array après conversion float32: shape={array.shape}, dtype={array.dtype}, range=[{array.min():.2f}, {array.max():.2f}]")
-                    print(f"  Dynamique préservée: {len(np.unique(array_uint16))} niveaux distincts")
-                    if isp_enable == 1:
-                        print(f"  Traitement ISP software: DÉSACTIVÉ (libastrostack ISP actif)")
-                    else:
-                        print(f"  Traitement ISP software: ACTIVÉ (Contraste ×1.15 + Luminosité +8)")
-                    print(f"  Métadonnées caméra:")
-                    print(f"    ExposureTime: {metadata.get('ExposureTime', 'N/A')}µs")
-                    print(f"    AnalogueGain: {metadata.get('AnalogueGain', 'N/A')}")
-                    print(f"    ColourGains: {metadata.get('ColourGains', 'N/A')}")
-                    print(f"    Sensor Mode: {'NATIVE' if use_native_sensor_mode == 1 else 'BINNING'}")
-                    pygame._stacking_mode_shown = True
-            else:
-                # Capture depuis stream MAIN (YUV420, XRGB8888, ou livestack inactif)
-                array = picam2.capture_array("main")
+                    # Débayériser en RGB uint16 [0-65535] (préserve dynamique 12/16-bit)
+                    # *** NOUVEAU : Passer les gains AWB pour corriger la balance des blancs en RAW ***
+                    # INVERSÉS pour compenser le pattern Bayer RGGB qui inverse les canaux
+                    array_uint16 = debayer_raw_array(raw_array, raw_formats[raw_format],
+                                                      red_gain=(blue/10),   # Le curseur BLEU contrôle le rouge
+                                                      blue_gain=(red/10),   # Le curseur ROUGE contrôle le bleu
+                                                      fix_bad_pixels=bool(fix_bad_pixels) and livestack_active,  # SEULEMENT LiveStack, PAS LuckyStack
+                                                      sigma_threshold=fix_bad_pixels_sigma/10.0,
+                                                      min_adu_threshold=fix_bad_pixels_min_adu/10.0)
+                    # CORRECTION: Garder la pleine dynamique 16-bit [0-65535] pour RAW12/16
+                    # Ne plus compresser à [0-255] car libastrostack gère correctement les données haute résolution
+                    # Convertir juste en float32 pour compatibilité avec libastrostack
+                    array = array_uint16.astype(np.float32)  # Garder [0-65535]
 
-                # Si XRGB8888, extraire seulement BGR (ignorer le canal X)
-                if raw_format == 1 and len(array.shape) == 3 and array.shape[2] == 4:
-                    # DEBUG: Analyser les canaux AVANT extraction (si show_cmds activé)
-                    if show_cmds == 1 and not hasattr(pygame, '_xrgb_debug_shown'):
-                        print(f"\n[DEBUG XRGB8888] Array AVANT extraction:")
-                        print(f"  Shape: {array.shape}, dtype: {array.dtype}")
-                        for i in range(4):
-                            channel_mean = array[:,:,i].mean()
-                            channel_min = array[:,:,i].min()
-                            channel_max = array[:,:,i].max()
-                            print(f"  Canal {i}: mean={channel_mean:.1f}, min={channel_min}, max={channel_max}")
-                        pygame._xrgb_debug_shown = True
-
-                    # XRGB8888 format libcamera : B, G, R, X (BGR + padding)
-                    # PyGame et OpenCV utilisent BGR, donc on garde l'ordre natif
-                    # Ne PAS inverser les canaux !
-                    array = array[:, :, 0:3].copy()  # Prendre les 3 premiers canaux BGR tel quel
-
-                    if show_cmds == 1 and (livestack_active or luckystack_active) and not hasattr(pygame, '_stacking_xrgb_shown'):
-                        metadata = picam2.capture_metadata()
-                        print(f"\n[STACKING] Mode XRGB8888 ISP, capture depuis stream MAIN")
-                        print(f"  Array BGR uint8: shape={array.shape}, dtype={array.dtype}, range=[{array.min()}, {array.max()}]")
-                        print(f"  Canaux (ordre BGR): B={array[:,:,0].mean():.1f}, G={array[:,:,1].mean():.1f}, R={array[:,:,2].mean():.1f}")
-                        print(f"  ISP natif RPi5: Debayer + Denoise + AWB + Gamma")
+                    # Appliquer boost de contraste SEULEMENT si ISP libastrostack est désactivé
+                    # Si ISP activé, on passe les données RAW brutes à libastrostack qui fera le traitement
+                    if isp_enable == 0:
+                        # CORRECTION: Boost calibré pour plage 16-bit [0-65535]
+                        # Appliquer boost de contraste au lieu du gamma (préserve mieux les noirs)
+                        # Méthode : (value - midpoint) × factor + midpoint + brightness_offset
+                        midpoint = 32768.0  # Milieu de la plage 16-bit
+                        contrast_factor = 1.15  # Léger boost de contraste
+                        brightness_offset = 2048  # Légère augmentation de luminosité (équivalent de +8 en 8-bit)
+                        array = np.clip((array - midpoint) * contrast_factor + midpoint + brightness_offset, 0, 65535.0)
+                    if show_cmds == 1 and not hasattr(pygame, '_stacking_mode_shown'):
+                        metadata = metadata_from_thread if metadata_from_thread else {}
+                        print(f"\n[STACKING] Mode actif, capture depuis stream RAW")
+                        print(f"  Format RAW: {raw_formats[raw_format]}")
+                        print(f"  Array débayérisé uint16: shape={array_uint16.shape}, range=[{array_uint16.min()}, {array_uint16.max()}]")
+                        print(f"  Array après conversion float32: shape={array.shape}, dtype={array.dtype}, range=[{array.min():.2f}, {array.max():.2f}]")
+                        print(f"  Dynamique préservée: {len(np.unique(array_uint16))} niveaux distincts")
+                        if isp_enable == 1:
+                            print(f"  Traitement ISP software: DÉSACTIVÉ (libastrostack ISP actif)")
+                        else:
+                            print(f"  Traitement ISP software: ACTIVÉ (Contraste ×1.15 + Luminosité +8)")
                         print(f"  Métadonnées caméra:")
                         print(f"    ExposureTime: {metadata.get('ExposureTime', 'N/A')}µs")
                         print(f"    AnalogueGain: {metadata.get('AnalogueGain', 'N/A')}")
                         print(f"    ColourGains: {metadata.get('ColourGains', 'N/A')}")
                         print(f"    Sensor Mode: {'NATIVE' if use_native_sensor_mode == 1 else 'BINNING'}")
-                        pygame._stacking_xrgb_shown = True
-                elif show_cmds == 1 and (livestack_active or luckystack_active) and not hasattr(pygame, '_stacking_yuv_shown'):
-                    metadata = picam2.capture_metadata()
-                    print(f"\n[STACKING] Mode YUV420, capture depuis stream MAIN")
-                    print(f"  Array uint8: shape={array.shape}, dtype={array.dtype}, range=[{array.min()}, {array.max()}]")
-                    print(f"  Métadonnées caméra:")
-                    print(f"    ExposureTime: {metadata.get('ExposureTime', 'N/A')}µs")
-                    print(f"    AnalogueGain: {metadata.get('AnalogueGain', 'N/A')}")
-                    print(f"    ColourGains: {metadata.get('ColourGains', 'N/A')}")
-                    print(f"    Sensor Mode: {'NATIVE' if use_native_sensor_mode == 1 else 'BINNING'}")
-                    pygame._stacking_yuv_shown = True
+                        pygame._stacking_mode_shown = True
+                else:
+                    # Utiliser la frame MAIN capturée par le thread
+                    array = frame_from_thread
 
-            # DEBUG: afficher une fois au démarrage (si show_cmds activé)
-            if show_cmds == 1 and not hasattr(pygame, '_picam2_debug_done'):
-                print(f"DEBUG: Array shape: {array.shape}, dtype: {array.dtype}")
-                print(f"DEBUG: Array min: {array.min()}, max: {array.max()}, mean: {array.mean():.1f}")
-                # Analyser les canaux RGB séparément (si image non-noire)
-                if len(array.shape) == 3 and array.max() > 0:
-                    r_mean, g_mean, b_mean = array[:,:,0].mean(), array[:,:,1].mean(), array[:,:,2].mean()
-                    r_max, g_max, b_max = array[:,:,0].max(), array[:,:,1].max(), array[:,:,2].max()
-                    print(f"DEBUG: RGB channels - R: mean={r_mean:.1f} max={r_max}, G: mean={g_mean:.1f} max={g_max}, B: mean={b_mean:.1f} max={b_max}")
-                    # Vérifier si les canaux sont similaires (image quasi-mono)
-                    channel_diff = max(abs(r_mean - g_mean), abs(g_mean - b_mean), abs(r_mean - b_mean))
-                    if channel_diff < 5:
-                        print(f"[WARNING] Canaux RGB très similaires (diff={channel_diff:.1f}) - image quasi-monochrome!")
-                        print(f"           Vérifiez: saturation caméra, AWB, gains couleur (red={red}, blue={blue})")
-                # Sauvegarder une frame de test pour vérifier
-                import cv2
-                cv2.imwrite('/home/admin/debug_picamera2_frame.jpg', cv2.cvtColor(array, cv2.COLOR_RGB2BGR))
-                print("DEBUG: Frame saved to /home/admin/debug_picamera2_frame.jpg")
-                pygame._picam2_debug_done = True
+                    # Si XRGB8888, extraire seulement BGR (ignorer le canal X)
+                    if raw_format == 1 and len(array.shape) == 3 and array.shape[2] == 4:
+                        # DEBUG: Analyser les canaux AVANT extraction (si show_cmds activé)
+                        if show_cmds == 1 and not hasattr(pygame, '_xrgb_debug_shown'):
+                            print(f"\n[DEBUG XRGB8888] Array AVANT extraction:")
+                            print(f"  Shape: {array.shape}, dtype: {array.dtype}")
+                            for i in range(4):
+                                channel_mean = array[:,:,i].mean()
+                                channel_min = array[:,:,i].min()
+                                channel_max = array[:,:,i].max()
+                                print(f"  Canal {i}: mean={channel_mean:.1f}, min={channel_min}, max={channel_max}")
+                            pygame._xrgb_debug_shown = True
 
-            # CORRECTION AUTOMATIQUE DÉSACTIVÉE: L'IMX585 fonctionne correctement en 0-255
-            # Si nécessaire, activer uniquement pour le vrai bug 0-127 avec seuil < 128
-            # if array.max() < 128 and array.max() > 0:
-            #     if not hasattr(pygame, '_picam2_range_warning'):
-            #         print(f"[WARNING] Camera output range 0-{array.max()} detected, expanding to 0-255")
-            #         pygame._picam2_range_warning = True
-            #     array = (array.astype(np.float32) * 2.0).clip(0, 255).astype(np.uint8)
+                        # XRGB8888 format libcamera : B, G, R, X (BGR + padding)
+                        # PyGame et OpenCV utilisent BGR, donc on garde l'ordre natif
+                        # Ne PAS inverser les canaux !
+                        array = array[:, :, 0:3].copy()  # Prendre les 3 premiers canaux BGR tel quel
 
-            # ===== LIVE STACK PROCESSING =====
-            livestack_display_done = False
-            if livestack_active and livestack is not None:
-                # Traiter la frame avec LiveStack (module avancé)
-                livestack.process_frame(array)
+                        if show_cmds == 1 and (livestack_active or luckystack_active) and not hasattr(pygame, '_stacking_xrgb_shown'):
+                            metadata = metadata_from_thread if metadata_from_thread else {}
+                            print(f"\n[STACKING] Mode XRGB8888 ISP, capture depuis stream MAIN")
+                            print(f"  Array BGR uint8: shape={array.shape}, dtype={array.dtype}, range=[{array.min()}, {array.max()}]")
+                            print(f"  Canaux (ordre BGR): B={array[:,:,0].mean():.1f}, G={array[:,:,1].mean():.1f}, R={array[:,:,2].mean():.1f}")
+                            print(f"  ISP natif RPi5: Debayer + Denoise + AWB + Gamma")
+                            print(f"  Métadonnées caméra:")
+                            print(f"    ExposureTime: {metadata.get('ExposureTime', 'N/A')}µs")
+                            print(f"    AnalogueGain: {metadata.get('AnalogueGain', 'N/A')}")
+                            print(f"    ColourGains: {metadata.get('ColourGains', 'N/A')}")
+                            print(f"    Sensor Mode: {'NATIVE' if use_native_sensor_mode == 1 else 'BINNING'}")
+                            pygame._stacking_xrgb_shown = True
+                    elif show_cmds == 1 and (livestack_active or luckystack_active) and not hasattr(pygame, '_stacking_yuv_shown'):
+                        metadata = metadata_from_thread if metadata_from_thread else {}
+                        print(f"\n[STACKING] Mode YUV420, capture depuis stream MAIN")
+                        print(f"  Array uint8: shape={array.shape}, dtype={array.dtype}, range=[{array.min()}, {array.max()}]")
+                        print(f"  Métadonnées caméra:")
+                        print(f"    ExposureTime: {metadata.get('ExposureTime', 'N/A')}µs")
+                        print(f"    AnalogueGain: {metadata.get('AnalogueGain', 'N/A')}")
+                        print(f"    ColourGains: {metadata.get('ColourGains', 'N/A')}")
+                        print(f"    Sensor Mode: {'NATIVE' if use_native_sensor_mode == 1 else 'BINNING'}")
+                        pygame._stacking_yuv_shown = True
 
-                # Récupérer le master stack pour affichage
-                try:
-                    # NOUVEAU: Utiliser get_preview_for_display() qui applique le MÊME pipeline
-                    # que le PNG sauvegardé (ISP + stretch complet), mais converti en uint8 pour pygame
-                    # Ceci garantit que l'affichage à l'écran correspond exactement au PNG
-                    stacked_array = livestack.get_preview_for_display()
+                # DEBUG: afficher une fois au démarrage (si show_cmds activé)
+                if show_cmds == 1 and not hasattr(pygame, '_picam2_debug_done'):
+                    print(f"DEBUG: Array shape: {array.shape}, dtype: {array.dtype}")
+                    print(f"DEBUG: Array min: {array.min()}, max: {array.max()}, mean: {array.mean():.1f}")
+                    # Analyser les canaux RGB séparément (si image non-noire)
+                    if len(array.shape) == 3 and array.max() > 0:
+                        r_mean, g_mean, b_mean = array[:,:,0].mean(), array[:,:,1].mean(), array[:,:,2].mean()
+                        r_max, g_max, b_max = array[:,:,0].max(), array[:,:,1].max(), array[:,:,2].max()
+                        print(f"DEBUG: RGB channels - R: mean={r_mean:.1f} max={r_max}, G: mean={g_mean:.1f} max={g_max}, B: mean={b_mean:.1f} max={b_max}")
+                        # Vérifier si les canaux sont similaires (image quasi-mono)
+                        channel_diff = max(abs(r_mean - g_mean), abs(g_mean - b_mean), abs(r_mean - b_mean))
+                        if channel_diff < 5:
+                            print(f"[WARNING] Canaux RGB très similaires (diff={channel_diff:.1f}) - image quasi-monochrome!")
+                            print(f"           Vérifiez: saturation caméra, AWB, gains couleur (red={red}, blue={blue})")
+                    # Sauvegarder une frame de test pour vérifier
+                    import cv2
+                    cv2.imwrite('/home/admin/debug_picamera2_frame.jpg', cv2.cvtColor(array, cv2.COLOR_RGB2BGR))
+                    print("DEBUG: Frame saved to /home/admin/debug_picamera2_frame.jpg")
+                    pygame._picam2_debug_done = True
 
-                    if stacked_array is not None:
-                        # Afficher les infos de traitement une fois par session
-                        if not hasattr(pygame, '_livestack_display_info_shown'):
-                            print(f"\n[LIVESTACK DISPLAY] Affichage avec pipeline PNG complet:")
-                            print(f"  ✓ ISP software (si activé et format RAW)")
-                            print(f"  ✓ Stretch configuré (méthode: {livestack.session.config.png_stretch_method if livestack.session else 'N/A'})")
-                            print(f"  ✓ Conversion uint8 pour pygame")
-                            print(f"  → L'affichage correspond maintenant au PNG sauvegardé")
-                            pygame._livestack_display_info_shown = True
+                # CORRECTION AUTOMATIQUE DÉSACTIVÉE: L'IMX585 fonctionne correctement en 0-255
+                # Si nécessaire, activer uniquement pour le vrai bug 0-127 avec seuil < 128
+                # if array.max() < 128 and array.max() > 0:
+                #     if not hasattr(pygame, '_picam2_range_warning'):
+                #         print(f"[WARNING] Camera output range 0-{array.max()} detected, expanding to 0-255")
+                #         pygame._picam2_range_warning = True
+                #     array = (array.astype(np.float32) * 2.0).clip(0, 255).astype(np.uint8)
 
-                        # Convertir en surface pygame
-                        if len(stacked_array.shape) == 3:
-                            # RGB: transposer et échanger R/B pour pygame
-                            image = pygame.surfarray.make_surface(
-                                np.swapaxes(stacked_array, 0, 1)[:,:,[2,1,0]]
-                            )
-                        else:
-                            # MONO
-                            image = pygame.surfarray.make_surface(stacked_array.T)
+                # ===== LIVE STACK PROCESSING =====
+                livestack_display_done = False
+                if livestack_active and livestack is not None:
+                    # Traiter la frame avec LiveStack (module avancé)
+                    livestack.process_frame(array)
 
-                        # Redimensionner en fullscreen si stretch activé
-                        if stretch_mode == 1:
-                            display_modes = pygame.display.list_modes()
-                            if display_modes and display_modes != -1:
-                                max_width, max_height = display_modes[0]
-                            else:
-                                screen_info = pygame.display.Info()
-                                max_width, max_height = screen_info.current_w, screen_info.current_h
-                            image = pygame.transform.scale(image, (max_width, max_height))
-                        elif image.get_width() != preview_width or image.get_height() != preview_height:
-                            image = pygame.transform.scale(image, (preview_width, preview_height))
+                    # Récupérer le master stack pour affichage
+                    try:
+                        # NOUVEAU: Utiliser get_preview_for_display() qui applique le MÊME pipeline
+                        # que le PNG sauvegardé (ISP + stretch complet), mais converti en uint8 pour pygame
+                        # Ceci garantit que l'affichage à l'écran correspond exactement au PNG
+                        stacked_array = livestack.get_preview_for_display()
 
-                        # Afficher
-                        windowSurfaceObj.blit(image, (0, 0))
-                        pygame.display.update()
-
-                        # Afficher les statistiques Live Stack
-                        stats = livestack.get_stats()
-                        stats_text = f"LiveStack: {stats['accepted_frames']}/{stats['total_frames']} | Rejected: {stats['rejected_frames']}"
-                        text(0, 0, 2, 2, 1, stats_text, ft, 1)  # top=2 pour position absolue à gauche
-
-                        # Sauvegarder PNG intermédiaire (si activé)
-                        accepted = stats['accepted_frames']
-                        if ls_save_progress == 1 and accepted > 0:
-                            if not hasattr(pygame, '_livestack_last_saved'):
-                                pygame._livestack_last_saved = 0
-                            if accepted > pygame._livestack_last_saved:
-                                try:
-                                    livestack.save(filename=f"livestack_progress_{accepted:04d}")
-                                    pygame._livestack_last_saved = accepted
-                                    if show_cmds == 1:
-                                        print(f"[LIVESTACK] PNG intermédiaire sauvegardé: {accepted} frames")
-                                except Exception as e:
-                                    if show_cmds == 1:
-                                        print(f"[LIVESTACK] Erreur save PNG: {e}")
-
-                        # Marquer que l'affichage est fait
-                        livestack_display_done = True
-                    else:
-                        # Pas encore de stack, afficher le flux vidéo en attendant
-                        livestack_display_done = False
-                        # Afficher message d'attente avec stats détaillées
-                        stats = livestack.get_stats()
-                        wait_text = f"LiveStack: {stats['accepted_frames']}/{stats['total_frames']} acceptées | Rejetées: {stats['rejected_frames']}"
-                        text(0, 0, 2, 2, 1, wait_text, ft, 1)  # top=2 pour position absolue à gauche
-
-                        # Afficher aussi un warning si trop de rejets (QC trop strict)
-                        if stats['total_frames'] > 20 and stats['accepted_frames'] == 0:
-                            warning_text = "⚠ Toutes les frames rejetées! Désactiver QC ou réduire min_stars"
-                            text(0, 1, 2, 2, 1, warning_text, ft, 1)  # top=2 pour position absolue à gauche
-
-                except Exception as e:
-                    if show_cmds == 1:
-                        print(f"[DEBUG] Erreur affichage LiveStack: {e}")
-                        import traceback
-                        traceback.print_exc()
-                    livestack_display_done = False
-
-            # ===== LUCKY STACK PROCESSING =====
-            elif luckystack_active and luckystack is not None:
-                # DEBUG: Vérifier la résolution de l'array reçu
-                if not hasattr(pygame, '_lucky_resolution_check'):
-                    print(f"\n[LUCKYSTACK DEBUG] Résolution de capture:")
-                    print(f"  Array shape: {array.shape}")
-                    print(f"  Array dtype: {array.dtype}")
-                    print(f"  Array range: [{array.min():.1f}, {array.max():.1f}]")
-                    print(f"  Zoom actuel: {zoom}")
-                    print(f"  Résolution configurée (capture_size): {capture_size}")
-                    print(f"  Résolution RAW stream (raw_stream_size): {raw_stream_size}")
-                    print(f"  Format RAW: {raw_formats[raw_format]}")
-                    pygame._lucky_resolution_check = True
-
-                # Traiter la frame avec Lucky Stack (nécessaire pour le fonctionnement interne)
-                luckystack.process_frame(array)
-
-                # Récupérer les statistiques
-                stats = luckystack.get_stats()
-                buffer_fill = stats.get('lucky_buffer_fill', 0)
-                buffer_size = stats.get('lucky_buffer_size', 0)
-                stacks_done = stats.get('lucky_stacks_done', 0)
-                total_frames = stats.get('total_frames', 0)
-                avg_score = stats.get('lucky_avg_score', 0)
-                stats_text1 = f"Lucky: Buffer {buffer_fill}/{buffer_size} | Frames: {total_frames}"
-                stats_text2 = f"Stacks: {stacks_done} | Score moy: {avg_score:.1f}"
-
-                # Initialiser le compteur de stacks affichés si nécessaire
-                if not hasattr(pygame, '_lucky_last_displayed'):
-                    pygame._lucky_last_displayed = 0
-
-                # CORRECTION: Toujours essayer de récupérer et afficher le preview Lucky
-                # (que ce soit un nouveau stack ou le dernier stack existant)
-                try:
-                    # NOUVEAU: Utiliser get_preview_for_display() qui applique le MÊME pipeline
-                    # que le PNG sauvegardé (ISP + stretch complet), mais converti en uint8 pour pygame
-                    # Ceci garantit que l'affichage à l'écran correspond exactement au PNG
-                    stacked_array = luckystack.get_preview_for_display()
-
-                    if stacked_array is not None:
-                        # Détecter un nouveau stack seulement pour les sauvegardes PNG
-                        is_new_stack = (stacks_done > pygame._lucky_last_displayed)
-
-                        if is_new_stack:
-                            # Afficher les infos de traitement une fois au premier stack
-                            if not hasattr(pygame, '_luckystack_display_info_shown'):
-                                print(f"\n[LUCKYSTACK DISPLAY] Affichage avec pipeline PNG complet:")
+                        if stacked_array is not None:
+                            # Afficher les infos de traitement une fois par session
+                            if not hasattr(pygame, '_livestack_display_info_shown'):
+                                print(f"\n[LIVESTACK DISPLAY] Affichage avec pipeline PNG complet:")
                                 print(f"  ✓ ISP software (si activé et format RAW)")
-                                print(f"  ✓ Stretch configuré (méthode: {luckystack.session.config.png_stretch_method if luckystack.session else 'N/A'})")
+                                print(f"  ✓ Stretch configuré (méthode: {livestack.session.config.png_stretch_method if livestack.session else 'N/A'})")
                                 print(f"  ✓ Conversion uint8 pour pygame")
                                 print(f"  → L'affichage correspond maintenant au PNG sauvegardé")
-                                pygame._luckystack_display_info_shown = True
+                                pygame._livestack_display_info_shown = True
 
-                            # Mettre à jour le compteur
-                            pygame._lucky_last_displayed = stacks_done
-
-                        # Convertir en surface pygame
-                        if len(stacked_array.shape) == 3:
-                            # RGB: transposer et échanger R/B pour pygame
-                            image = pygame.surfarray.make_surface(
-                                np.swapaxes(stacked_array, 0, 1)[:,:,[2,1,0]]
-                            )
-                        else:
-                            # MONO
-                            image = pygame.surfarray.make_surface(stacked_array.T)
-
-                        # Redimensionner pour l'affichage
-                        if stretch_mode == 1:
-                            display_modes = pygame.display.list_modes()
-                            if display_modes and display_modes != -1:
-                                max_width, max_height = display_modes[0]
+                            # Convertir en surface pygame
+                            if len(stacked_array.shape) == 3:
+                                # RGB: transposer et échanger R/B pour pygame
+                                image = pygame.surfarray.make_surface(
+                                    np.swapaxes(stacked_array, 0, 1)[:,:,[2,1,0]]
+                                )
                             else:
-                                screen_info = pygame.display.Info()
-                                max_width, max_height = screen_info.current_w, screen_info.current_h
-                            image = pygame.transform.scale(image, (max_width, max_height))
-                        elif image.get_width() != preview_width or image.get_height() != preview_height:
+                                # MONO
+                                image = pygame.surfarray.make_surface(stacked_array.T)
+
+                            # Redimensionner en fullscreen si stretch activé
+                            if stretch_mode == 1:
+                                display_modes = pygame.display.list_modes()
+                                if display_modes and display_modes != -1:
+                                    max_width, max_height = display_modes[0]
+                                else:
+                                    screen_info = pygame.display.Info()
+                                    max_width, max_height = screen_info.current_w, screen_info.current_h
+                                image = pygame.transform.scale(image, (max_width, max_height))
+                            elif image.get_width() != preview_width or image.get_height() != preview_height:
+                                image = pygame.transform.scale(image, (preview_width, preview_height))
+
+                            # Afficher
+                            windowSurfaceObj.blit(image, (0, 0))
+                            pygame.display.update()
+
+                            # Afficher les statistiques Live Stack
+                            stats = livestack.get_stats()
+                            stats_text = f"LiveStack: {stats['accepted_frames']}/{stats['total_frames']} | Rejected: {stats['rejected_frames']}"
+                            text(0, 0, 2, 2, 1, stats_text, ft, 1)  # top=2 pour position absolue à gauche
+
+                            # Sauvegarder PNG intermédiaire (si activé)
+                            accepted = stats['accepted_frames']
+                            if ls_save_progress == 1 and accepted > 0:
+                                if not hasattr(pygame, '_livestack_last_saved'):
+                                    pygame._livestack_last_saved = 0
+                                if accepted > pygame._livestack_last_saved:
+                                    try:
+                                        livestack.save(filename=f"livestack_progress_{accepted:04d}")
+                                        pygame._livestack_last_saved = accepted
+                                        if show_cmds == 1:
+                                            print(f"[LIVESTACK] PNG intermédiaire sauvegardé: {accepted} frames")
+                                    except Exception as e:
+                                        if show_cmds == 1:
+                                            print(f"[LIVESTACK] Erreur save PNG: {e}")
+
+                            # Marquer que l'affichage est fait
+                            livestack_display_done = True
+                        else:
+                            # Pas encore de stack, afficher le flux vidéo en attendant
+                            livestack_display_done = False
+                            # Afficher message d'attente avec stats détaillées
+                            stats = livestack.get_stats()
+                            wait_text = f"LiveStack: {stats['accepted_frames']}/{stats['total_frames']} acceptées | Rejetées: {stats['rejected_frames']}"
+                            text(0, 0, 2, 2, 1, wait_text, ft, 1)  # top=2 pour position absolue à gauche
+
+                            # Afficher aussi un warning si trop de rejets (QC trop strict)
+                            if stats['total_frames'] > 20 and stats['accepted_frames'] == 0:
+                                warning_text = "⚠ Toutes les frames rejetées! Désactiver QC ou réduire min_stars"
+                                text(0, 1, 2, 2, 1, warning_text, ft, 1)  # top=2 pour position absolue à gauche
+
+                    except Exception as e:
+                        if show_cmds == 1:
+                            print(f"[DEBUG] Erreur affichage LiveStack: {e}")
+                            import traceback
+                            traceback.print_exc()
+                        livestack_display_done = False
+
+                # ===== LUCKY STACK PROCESSING =====
+                elif luckystack_active and luckystack is not None:
+                    # DEBUG: Vérifier la résolution de l'array reçu
+                    if not hasattr(pygame, '_lucky_resolution_check'):
+                        print(f"\n[LUCKYSTACK DEBUG] Résolution de capture:")
+                        print(f"  Array shape: {array.shape}")
+                        print(f"  Array dtype: {array.dtype}")
+                        print(f"  Array range: [{array.min():.1f}, {array.max():.1f}]")
+                        print(f"  Zoom actuel: {zoom}")
+                        print(f"  Résolution configurée (capture_size): {capture_size}")
+                        print(f"  Résolution RAW stream (raw_stream_size): {raw_stream_size}")
+                        print(f"  Format RAW: {raw_formats[raw_format]}")
+                        pygame._lucky_resolution_check = True
+
+                    # Traiter la frame avec Lucky Stack (nécessaire pour le fonctionnement interne)
+                    luckystack.process_frame(array)
+
+                    # Récupérer les statistiques
+                    stats = luckystack.get_stats()
+                    buffer_fill = stats.get('lucky_buffer_fill', 0)
+                    buffer_size = stats.get('lucky_buffer_size', 0)
+                    stacks_done = stats.get('lucky_stacks_done', 0)
+                    total_frames = stats.get('total_frames', 0)
+                    avg_score = stats.get('lucky_avg_score', 0)
+                    stats_text1 = f"Lucky: Buffer {buffer_fill}/{buffer_size} | Frames: {total_frames}"
+                    stats_text2 = f"Stacks: {stacks_done} | Score moy: {avg_score:.1f}"
+
+                    # Initialiser le compteur de stacks affichés si nécessaire
+                    if not hasattr(pygame, '_lucky_last_displayed'):
+                        pygame._lucky_last_displayed = 0
+
+                    # CORRECTION: Toujours essayer de récupérer et afficher le preview Lucky
+                    # (que ce soit un nouveau stack ou le dernier stack existant)
+                    try:
+                        # NOUVEAU: Utiliser get_preview_for_display() qui applique le MÊME pipeline
+                        # que le PNG sauvegardé (ISP + stretch complet), mais converti en uint8 pour pygame
+                        # Ceci garantit que l'affichage à l'écran correspond exactement au PNG
+                        stacked_array = luckystack.get_preview_for_display()
+
+                        if stacked_array is not None:
+                            # Détecter un nouveau stack seulement pour les sauvegardes PNG
+                            is_new_stack = (stacks_done > pygame._lucky_last_displayed)
+
+                            if is_new_stack:
+                                # Afficher les infos de traitement une fois au premier stack
+                                if not hasattr(pygame, '_luckystack_display_info_shown'):
+                                    print(f"\n[LUCKYSTACK DISPLAY] Affichage avec pipeline PNG complet:")
+                                    print(f"  ✓ ISP software (si activé et format RAW)")
+                                    print(f"  ✓ Stretch configuré (méthode: {luckystack.session.config.png_stretch_method if luckystack.session else 'N/A'})")
+                                    print(f"  ✓ Conversion uint8 pour pygame")
+                                    print(f"  → L'affichage correspond maintenant au PNG sauvegardé")
+                                    pygame._luckystack_display_info_shown = True
+
+                                # Mettre à jour le compteur
+                                pygame._lucky_last_displayed = stacks_done
+
+                            # Convertir en surface pygame
+                            if len(stacked_array.shape) == 3:
+                                # RGB: transposer et échanger R/B pour pygame
+                                image = pygame.surfarray.make_surface(
+                                    np.swapaxes(stacked_array, 0, 1)[:,:,[2,1,0]]
+                                )
+                            else:
+                                # MONO
+                                image = pygame.surfarray.make_surface(stacked_array.T)
+
+                            # Redimensionner pour l'affichage
+                            if stretch_mode == 1:
+                                display_modes = pygame.display.list_modes()
+                                if display_modes and display_modes != -1:
+                                    max_width, max_height = display_modes[0]
+                                else:
+                                    screen_info = pygame.display.Info()
+                                    max_width, max_height = screen_info.current_w, screen_info.current_h
+                                image = pygame.transform.scale(image, (max_width, max_height))
+                            elif image.get_width() != preview_width or image.get_height() != preview_height:
+                                image = pygame.transform.scale(image, (preview_width, preview_height))
+
+                            # Afficher
+                            windowSurfaceObj.blit(image, (0, 0))
+                            pygame.display.update()
+
+                            # Marquer que l'affichage Lucky est fait
+                            livestack_display_done = True
+
+                            # Sauvegarder PNG intermédiaire tous les 2 stacks (si activé ET nouveau stack)
+                            if is_new_stack and ls_lucky_save_progress == 1 and stacks_done > 0 and stacks_done % 2 == 0:
+                                if not hasattr(pygame, '_lucky_last_saved'):
+                                    pygame._lucky_last_saved = 0
+                                if stacks_done > pygame._lucky_last_saved:
+                                    try:
+                                        luckystack.save(filename=f"lucky_progress_{stacks_done:04d}")
+                                        pygame._lucky_last_saved = stacks_done
+                                        if show_cmds == 1:
+                                            print(f"[LUCKYSTACK] PNG intermédiaire sauvegardé: stack #{stacks_done}")
+                                    except Exception as e:
+                                        if show_cmds == 1:
+                                            print(f"[LUCKYSTACK] Erreur save PNG: {e}")
+
+                    except Exception as e:
+                        if show_cmds == 1:
+                            print(f"[DEBUG] Erreur affichage Lucky: {e}")
+                            import traceback
+                            traceback.print_exc()
+
+                    # Si aucun stack n'est disponible, le flux vidéo sera affiché par le code normal
+                    # (livestack_display_done reste False)
+
+                    # Afficher les stats Lucky par-dessus avec fond noir stable (évite le clignotement)
+                    # Le paramètre top=2 dessine à la position absolue, bkgnd_Color=1 dessine fond noir
+                    text(0, 0, 2, 2, 1, stats_text1, ft, 1)  # top=2 position absolue, bkgnd_Color=1 fond noir
+                    text(0, 1, 2, 2, 1, stats_text2, ft, 1)  # upd=1 force update
+
+                # Traitement normal seulement si LiveStack/LuckyStack n'a pas déjà affiché
+                if not livestack_display_done:
+                    # Appliquer le stretch astro si le mode est activé ET que le preset n'est pas OFF
+                    if stretch_mode == 1 and stretch_preset != 0:
+                        array = astro_stretch(array)
+
+                    # Convertir float32 → uint8 pour pygame (si nécessaire)
+                    # Le stretch GHS préserve maintenant float32 pour garder la dynamique RAW12/16
+                    if array.dtype == np.float32:
+                        array = np.clip(array, 0, 255).astype(np.uint8)
+
+                    # Convertir numpy array → pygame surface
+                    # Picamera2 retourne (height, width, 3) en RGB
+                    # pygame.surfarray.make_surface attend (width, height, 3)
+                    # MAIS pygame interprète les couleurs comme (R,G,B) dans l'ordre (0,1,2)
+                    # On doit transposer width/height ET échanger R et B pour pygame
+                    image = pygame.surfarray.make_surface(np.swapaxes(array, 0, 1)[:,:,[2,1,0]])
+
+                    # Scaling si nécessaire
+                    if stretch_mode == 1:
+                        # En mode stretch, afficher en VRAI plein écran (cache la barre de tâches)
+                        # Obtenir la résolution maximale de l'écran
+                        display_modes = pygame.display.list_modes()
+                        if display_modes and display_modes != -1:
+                            # Prendre la résolution la plus grande (la première de la liste)
+                            max_width, max_height = display_modes[0]
+                        else:
+                            # Fallback si list_modes ne fonctionne pas
+                            screen_info = pygame.display.Info()
+                            max_width, max_height = screen_info.current_w, screen_info.current_h
+                        image = pygame.transform.scale(image, (max_width, max_height))
+                    elif image.get_width() != preview_width or image.get_height() != preview_height:
+                        if igw/igh > 1.5:
+                            image = pygame.transform.scale(image, (preview_width, int(preview_height * 0.75)))
+                        else:
                             image = pygame.transform.scale(image, (preview_width, preview_height))
 
-                        # Afficher
-                        windowSurfaceObj.blit(image, (0, 0))
-                        pygame.display.update()
-
-                        # Marquer que l'affichage Lucky est fait
-                        livestack_display_done = True
-
-                        # Sauvegarder PNG intermédiaire tous les 2 stacks (si activé ET nouveau stack)
-                        if is_new_stack and ls_lucky_save_progress == 1 and stacks_done > 0 and stacks_done % 2 == 0:
-                            if not hasattr(pygame, '_lucky_last_saved'):
-                                pygame._lucky_last_saved = 0
-                            if stacks_done > pygame._lucky_last_saved:
-                                try:
-                                    luckystack.save(filename=f"lucky_progress_{stacks_done:04d}")
-                                    pygame._lucky_last_saved = stacks_done
-                                    if show_cmds == 1:
-                                        print(f"[LUCKYSTACK] PNG intermédiaire sauvegardé: stack #{stacks_done}")
-                                except Exception as e:
-                                    if show_cmds == 1:
-                                        print(f"[LUCKYSTACK] Erreur save PNG: {e}")
-
-                except Exception as e:
-                    if show_cmds == 1:
-                        print(f"[DEBUG] Erreur affichage Lucky: {e}")
-                        import traceback
-                        traceback.print_exc()
-
-                # Si aucun stack n'est disponible, le flux vidéo sera affiché par le code normal
-                # (livestack_display_done reste False)
-
-                # Afficher les stats Lucky par-dessus avec fond noir stable (évite le clignotement)
-                # Le paramètre top=2 dessine à la position absolue, bkgnd_Color=1 dessine fond noir
-                text(0, 0, 2, 2, 1, stats_text1, ft, 1)  # top=2 position absolue, bkgnd_Color=1 fond noir
-                text(0, 1, 2, 2, 1, stats_text2, ft, 1)  # upd=1 force update
-
-            # Traitement normal seulement si LiveStack/LuckyStack n'a pas déjà affiché
-            if not livestack_display_done:
-                # Appliquer le stretch astro si le mode est activé ET que le preset n'est pas OFF
-                if stretch_mode == 1 and stretch_preset != 0:
-                    array = astro_stretch(array)
-
-                # Convertir float32 → uint8 pour pygame (si nécessaire)
-                # Le stretch GHS préserve maintenant float32 pour garder la dynamique RAW12/16
-                if array.dtype == np.float32:
-                    array = np.clip(array, 0, 255).astype(np.uint8)
-
-                # Convertir numpy array → pygame surface
-                # Picamera2 retourne (height, width, 3) en RGB
-                # pygame.surfarray.make_surface attend (width, height, 3)
-                # MAIS pygame interprète les couleurs comme (R,G,B) dans l'ordre (0,1,2)
-                # On doit transposer width/height ET échanger R et B pour pygame
-                image = pygame.surfarray.make_surface(np.swapaxes(array, 0, 1)[:,:,[2,1,0]])
-
-                # Scaling si nécessaire
-                if stretch_mode == 1:
-                    # En mode stretch, afficher en VRAI plein écran (cache la barre de tâches)
-                    # Obtenir la résolution maximale de l'écran
-                    display_modes = pygame.display.list_modes()
-                    if display_modes and display_modes != -1:
-                        # Prendre la résolution la plus grande (la première de la liste)
-                        max_width, max_height = display_modes[0]
-                    else:
-                        # Fallback si list_modes ne fonctionne pas
-                        screen_info = pygame.display.Info()
-                        max_width, max_height = screen_info.current_w, screen_info.current_h
-                    image = pygame.transform.scale(image, (max_width, max_height))
-                elif image.get_width() != preview_width or image.get_height() != preview_height:
-                    if igw/igh > 1.5:
-                        image = pygame.transform.scale(image, (preview_width, int(preview_height * 0.75)))
-                    else:
-                        image = pygame.transform.scale(image, (preview_width, preview_height))
-
-                # Affichage
-                windowSurfaceObj.blit(image, (0, 0))
+                    # Affichage
+                    windowSurfaceObj.blit(image, (0, 0))
 
         except Exception as e:
             # En cas d'erreur, afficher dans la console
@@ -6718,6 +6963,9 @@ while True:
     for event in pygame.event.get():
       #QUIT
       if event.type == QUIT:
+          # Arrêter le thread de capture asynchrone
+          if capture_thread is not None:
+              capture_thread.stop()
           # Arrêter proprement l'extracteur MJPEG
           if mjpeg_extractor is not None:
               mjpeg_extractor.stop()
@@ -9211,7 +9459,14 @@ while True:
                         luckystack.configure(
                             isp_enable=isp_should_be_enabled,
                             isp_config_path=isp_config_to_use if isp_should_be_enabled else None,
-                            video_format=video_format_map.get(raw_format, 'yuv420')
+                            video_format=video_format_map.get(raw_format, 'yuv420'),
+                            # Mettre à jour les paramètres Lucky modifiés entre deux sessions
+                            lucky_stack_method=['mean', 'median', 'sigma_clip'][ls_lucky_stack],
+                            lucky_buffer_size=ls_lucky_buffer,
+                            lucky_keep_percent=float(ls_lucky_keep),
+                            lucky_score_method=['laplacian', 'gradient', 'sobel', 'tenengrad'][ls_lucky_score],
+                            lucky_align_enabled=bool(ls_lucky_align),
+                            lucky_score_roi_percent=float(ls_lucky_roi)
                         )
 
                         # Mettre à jour le format RAW actuel avant de démarrer
@@ -9239,6 +9494,10 @@ while True:
                             delattr(pygame, '_lucky_stretch_applied_shown')
                         if hasattr(pygame, '_lucky_no_stretch_shown'):
                             delattr(pygame, '_lucky_no_stretch_shown')
+                        # Réinitialiser le flag de debug pour voir la méthode de stacking
+                        if luckystack is not None and luckystack.lucky_stacker is not None:
+                            if hasattr(luckystack.lucky_stacker, '_stack_method_shown'):
+                                delattr(luckystack.lucky_stacker, '_stack_method_shown')
 
                         print("[LUCKYSTACK] Mode activé")
                     else:
@@ -9891,6 +10150,9 @@ while True:
                    config[91] = ls_save_progress
                    config[92] = ls_save_final
                    config[93] = ls_lucky_save_final
+                   config[94] = fix_bad_pixels
+                   config[95] = fix_bad_pixels_sigma
+                   config[96] = fix_bad_pixels_min_adu
                    with open(config_file, 'w') as f:
                       for item in range(0,len(titles)):
                           f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -10509,6 +10771,9 @@ while True:
                    config[91] = ls_save_progress
                    config[92] = ls_save_final
                    config[93] = ls_lucky_save_final
+                   config[94] = fix_bad_pixels
+                   config[95] = fix_bad_pixels_sigma
+                   config[96] = fix_bad_pixels_min_adu
                    with open(config_file, 'w') as f:
                       for item in range(0,len(titles)):
                           f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -10926,6 +11191,9 @@ while True:
                    config[91] = ls_save_progress
                    config[92] = ls_save_final
                    config[93] = ls_lucky_save_final
+                   config[94] = fix_bad_pixels
+                   config[95] = fix_bad_pixels_sigma
+                   config[96] = fix_bad_pixels_min_adu
                    with open(config_file, 'w') as f:
                       for item in range(0,len(titles)):
                           f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -11041,6 +11309,9 @@ while True:
                       config[91] = ls_save_progress
                       config[92] = ls_save_final
                       config[93] = ls_lucky_save_final
+                      config[94] = fix_bad_pixels
+                      config[95] = fix_bad_pixels_sigma
+                      config[96] = fix_bad_pixels_min_adu
 
                       with open(config_file, 'w') as f:
                          for item in range(0,len(titles)):
@@ -11252,6 +11523,9 @@ while True:
                       config[91] = ls_save_progress
                       config[92] = ls_save_final
                       config[93] = ls_lucky_save_final
+                      config[94] = fix_bad_pixels
+                      config[95] = fix_bad_pixels_sigma
+                      config[96] = fix_bad_pixels_min_adu
                       with open(config_file, 'w') as f:
                           for item in range(0,len(titles)):
                               f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -11835,6 +12109,9 @@ while True:
                    config[91] = ls_save_progress
                    config[92] = ls_save_final
                    config[93] = ls_lucky_save_final
+                   config[94] = fix_bad_pixels
+                   config[95] = fix_bad_pixels_sigma
+                   config[96] = fix_bad_pixels_min_adu
                    with open(config_file, 'w') as f:
                       for item in range(0,len(titles)):
                           f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -12031,7 +12308,7 @@ while True:
                       config[32] = IRF
                       config[33] = str_cap
                       config[34] = v3_hdr
-                      config[35] = timet
+                      config[35] = raw_format  # Remplace timet (fixé à 100ms)
                       config[36] = vflip
                       config[37] = hflip
                       config[38] = stretch_p_low
@@ -12090,6 +12367,9 @@ while True:
                       config[91] = ls_save_progress
                       config[92] = ls_save_final
                       config[93] = ls_lucky_save_final
+                      config[94] = fix_bad_pixels
+                      config[95] = fix_bad_pixels_sigma
+                      config[96] = fix_bad_pixels_min_adu
                       with open(config_file, 'w') as f:
                           for item in range(0,len(titles)):
                               f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -12359,6 +12639,9 @@ while True:
                    config[91] = ls_save_progress
                    config[92] = ls_save_final
                    config[93] = ls_lucky_save_final
+                   config[94] = fix_bad_pixels
+                   config[95] = fix_bad_pixels_sigma
+                   config[96] = fix_bad_pixels_min_adu
                    with open(config_file, 'w') as f:
                        for item in range(0,len(titles)):
                            f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -12487,7 +12770,7 @@ while True:
                 config[32] = IRF
                 config[33] = str_cap
                 config[34] = v3_hdr
-                config[35] = timet
+                config[35] = raw_format  # Remplace timet (fixé à 100ms)
                 config[36] = vflip
                 config[37] = hflip
                 config[38] = stretch_p_low
@@ -12546,6 +12829,9 @@ while True:
                 config[91] = ls_save_progress
                 config[92] = ls_save_final
                 config[93] = ls_lucky_save_final
+                config[94] = fix_bad_pixels
+                config[95] = fix_bad_pixels_sigma
+                config[96] = fix_bad_pixels_min_adu
                 with open(config_file, 'w') as f:
                     for item in range(0,len(titles)):
                         f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -12801,6 +13087,9 @@ while True:
                    config[91] = ls_save_progress
                    config[92] = ls_save_final
                    config[93] = ls_lucky_save_final
+                   config[94] = fix_bad_pixels
+                   config[95] = fix_bad_pixels_sigma
+                   config[96] = fix_bad_pixels_min_adu
                    with open(config_file, 'w') as f:
                        for item in range(0,len(titles)):
                            f.write(titles[item] + " : " + str(config[item]) + "\n")
