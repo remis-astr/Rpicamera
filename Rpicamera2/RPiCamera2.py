@@ -2251,7 +2251,9 @@ def get_native_vformats():
     # Résolutions correspondant aux niveaux de zoom (IDENTIQUES à sync_video_resolution_with_zoom)
     if Pi_Cam == 10:  # IMX585 - Utiliser modes hardware crop (ordre décroissant)
         zoom_resolutions = [
+            (3856, 2180),  # Mode natif full frame (zoom 0)
             (2880, 2160),  # Mode 2 crop (zoom 1)
+            (1928, 1090),  # Mode binning 2x2
             (1920, 1080),  # Mode 3 crop (zoom 2)
             (1280, 720),   # Mode 4 crop (zoom 3)
             (800, 600),    # Mode 5 crop (zoom 4/5)
@@ -4599,25 +4601,8 @@ def preview():
                     print(f"  DEBUG: fast_controls = {fast_controls}")
                 picam2.set_controls(fast_controls)
 
-                # IMPORTANT: Redémarrer le thread pour que les nouveaux paramètres
-                # s'appliquent immédiatement au lieu de juste annuler
-                if capture_thread is not None:
-                    # Arrêter le thread actuel
-                    capture_thread.stop()
-
-                    # Recréer et redémarrer immédiatement
-                    new_thread = AsyncCaptureThread(picam2)
-                    if (livestack_active or luckystack_active) and raw_format >= 2:
-                        new_thread.set_capture_params({'type': 'raw'})
-                    else:
-                        new_thread.set_capture_params({'type': 'main'})
-                    new_thread.start()
-
-                    # Remplacer l'ancien thread
-                    capture_thread = new_thread
-
-                    if show_cmds == 1:
-                        print(f"  [AsyncCapture] Thread redémarré avec nouveaux paramètres")
+                # Les contrôles sont appliqués immédiatement par set_controls()
+                # Pas besoin de redémarrer le thread (sauf si changement de type de capture raw/main)
 
                 # Vérifier que les contrôles ont été appliqués
                 if show_cmds == 1:
@@ -7445,15 +7430,20 @@ while True:
                                     actual_vheight = preview_height
                                 datastr += " --width " + str(actual_vwidth) + " --height " + str(actual_vheight)
                             else:
-                                # Pas de zoom : utiliser les dimensions demandées
-                                actual_vwidth = vwidth
-                                actual_vheight = vheight
-                                # Spécifier le mode sensor pour IMX585
+                                # Pas de zoom : utiliser la résolution du mode sensor
                                 if Pi_Cam == 10:
                                     sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
                                     if sensor_mode:
+                                        actual_vwidth = sensor_mode[0]
+                                        actual_vheight = sensor_mode[1]
                                         datastr += f" --mode {sensor_mode[0]}:{sensor_mode[1]}:12"
-                                datastr += " --width " + str(vwidth) + " --height " + str(vheight)
+                                    else:
+                                        actual_vwidth = vwidth
+                                        actual_vheight = vheight
+                                else:
+                                    actual_vwidth = vwidth
+                                    actual_vheight = vheight
+                                datastr += " --width " + str(actual_vwidth) + " --height " + str(actual_vheight)
 
                             if mode != 0:
                                 datastr += " --framerate " + str(fps)
