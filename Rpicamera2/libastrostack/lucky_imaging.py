@@ -868,25 +868,30 @@ class LuckyImagingStacker:
         """Combine les frames selon la méthode configurée"""
         if not frames:
             return None
-        
+
         if len(frames) == 1:
             return frames[0].copy()
-        
+
         # Convertir en array 3D/4D
         stack = np.array(frames)
-        
+
+        # DEBUG: Afficher la méthode utilisée (seulement une fois)
+        if not hasattr(self, '_stack_method_shown'):
+            print(f"[LUCKY _stack_frames] self.config.stack_method = {self.config.stack_method} (type: {type(self.config.stack_method)})")
+            self._stack_method_shown = True
+
         if self.config.stack_method == StackMethod.MEAN:
             result = np.mean(stack, axis=0)
-        
+
         elif self.config.stack_method == StackMethod.MEDIAN:
             result = np.median(stack, axis=0)
-        
+
         elif self.config.stack_method == StackMethod.SIGMA_CLIP:
             result = self._sigma_clip_stack(stack)
-        
+
         else:
             result = np.mean(stack, axis=0)
-        
+
         return result.astype(np.float32)
     
     def _sigma_clip_stack(self, stack: np.ndarray) -> np.ndarray:

@@ -36,6 +36,9 @@ class ISPConfig:
     # Netteté
     sharpening: float = 0.0
 
+    # Swap R/B pour débayeurisation RAW (RGGB → BGR inversion)
+    swap_rb: bool = False
+
     # Color Correction Matrix
     ccm: Optional[np.ndarray] = None
 
@@ -459,7 +462,7 @@ class ISP:
         self.config = config or ISPConfig()
 
     def process(self, image: np.ndarray, return_uint8: bool = False,
-                return_uint16: bool = False, swap_rb: bool = False,
+                return_uint16: bool = False, swap_rb: bool = None,
                 format_hint: str = None) -> np.ndarray:
         """
         Applique le pipeline ISP complet
@@ -468,13 +471,16 @@ class ISP:
             image: Image d'entrée (uint8, uint16, float32)
             return_uint8: Si True, retourne uint8 (0-255)
             return_uint16: Si True, retourne uint16 (0-65535)
-            swap_rb: Si True, inverse les gains rouge et bleu (pour RAW avec inversion dans débayeurisation)
+            swap_rb: Si True, inverse les gains R/B. Si None, utilise config.swap_rb
             format_hint: Format de l'image ('raw12', 'raw16', None=auto-détection)
             Si les deux False, retourne float32 (0.0-1.0) [RECOMMANDÉ]
 
         Returns:
             Image traitée dans le format demandé
         """
+        # Utiliser config.swap_rb si non spécifié
+        if swap_rb is None:
+            swap_rb = self.config.swap_rb
         # Adaptation dynamique des paramètres selon le format
         # RAW12 vs RAW16 Clear HDR ont des caractéristiques différentes
         original_black_level = self.config.black_level
@@ -541,8 +547,23 @@ class ISP:
         return (img_clipped * 65535).astype(np.uint16)
 
     def _apply_black_level(self, image: np.ndarray) -> np.ndarray:
-        """Soustrait le niveau de noir"""
+        """
+        Soustrait le niveau de noir
+
+        Si black_level == 0, détecte automatiquement à partir du 1er percentile
+        """
         if self.config.black_level == 0:
+            # Auto-détection du black level à partir du 1er percentile
+            # Cela fonctionne bien pour les images astro avec fond de ciel sombre
+            black_auto = np.percentile(image, 1)
+            if black_auto > 0.01:  # Seulement si significatif (>1% de la plage)
+                print(f"  [ISP] Black level auto-détecté: {black_auto:.3f}")
+                img = image - black_auto
+                img = np.clip(img, 0, None)
+                # Renormaliser à [0, 1]
+                if img.max() > 0:
+                    img = img / img.max()
+                return img
             return image
 
         # Black level normalisé (supposant 12-bit)
@@ -718,6 +739,7 @@ class ISP:
             'contrast': self.config.contrast,
             'saturation': self.config.saturation,
             'sharpening': self.config.sharpening,
+            'swap_rb': self.config.swap_rb,
             'calibration_info': self.config.calibration_info
         }
 

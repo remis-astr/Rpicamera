@@ -485,13 +485,16 @@ class AdvancedStackingConfig:
         legacy.png_bit_depth = getattr(self.output, 'png_bit_depth', None)
         legacy.png_stretch_method = self.output.png_stretch_method.value
         legacy.png_stretch_factor = self.output.png_stretch_factor
-        legacy.png_clip_low = self.output.png_clip_low
-        legacy.png_clip_high = self.output.png_clip_high
+        legacy.png_clip_low = getattr(self, 'png_clip_low', self.output.png_clip_low)
+        legacy.png_clip_high = getattr(self, 'png_clip_high', self.output.png_clip_high)
 
-        # GHS
-        legacy.ghs_D = self.output.ghs_D
-        legacy.ghs_B = self.output.ghs_B
-        legacy.ghs_SP = self.output.ghs_SP
+        # GHS - Lire depuis niveau racine (configure()) ou fallback sur output
+        legacy.ghs_D = getattr(self, 'ghs_D', self.output.ghs_D)
+        legacy.ghs_b = getattr(self, 'ghs_b', getattr(self.output, 'ghs_b', self.output.ghs_B))
+        legacy.ghs_SP = getattr(self, 'ghs_SP', self.output.ghs_SP)
+        legacy.ghs_LP = getattr(self, 'ghs_LP', getattr(self.output, 'ghs_LP', 0.0))
+        legacy.ghs_HP = getattr(self, 'ghs_HP', getattr(self.output, 'ghs_HP', 0.0))
+        legacy.ghs_auto_adjust_sp = getattr(self, 'ghs_auto_adjust_sp', True)
 
         # FITS
         legacy.fits_linear = getattr(self.output, 'fits_linear', True)

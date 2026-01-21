@@ -364,35 +364,54 @@ class RPiCameraLiveStackAdvanced:
 
         if 'lucky_score_method' in kwargs:
             method = kwargs['lucky_score_method'].lower()
-            from .config_advanced import LuckyScoreMethod
-            method_map = {
-                'laplacian': LuckyScoreMethod.LAPLACIAN,
-                'gradient': LuckyScoreMethod.GRADIENT,
-                'sobel': LuckyScoreMethod.SOBEL,
-                'tenengrad': LuckyScoreMethod.TENENGRAD,
+            from .config_advanced import LuckyScoreMethod as ConfigLuckyScoreMethod
+            method_map_config = {
+                'laplacian': ConfigLuckyScoreMethod.LAPLACIAN,
+                'gradient': ConfigLuckyScoreMethod.GRADIENT,
+                'sobel': ConfigLuckyScoreMethod.SOBEL,
+                'tenengrad': ConfigLuckyScoreMethod.TENENGRAD,
             }
-            new_method = method_map.get(method, LuckyScoreMethod.LAPLACIAN)
+            new_method = method_map_config.get(method, ConfigLuckyScoreMethod.LAPLACIAN)
             self.config.lucky.score_method = new_method
             # Mise à jour dynamique : recréer le scorer
             if self.lucky_stacker and self.is_running:
-                self.lucky_stacker.config.score_method = new_method
+                # Convertir vers le type de lucky_imaging.py
+                method_map_lucky = {
+                    'laplacian': LuckyScoreMethod.LAPLACIAN,
+                    'gradient': LuckyScoreMethod.GRADIENT,
+                    'sobel': LuckyScoreMethod.SOBEL,
+                    'tenengrad': LuckyScoreMethod.TENENGRAD,
+                }
+                converted_method = method_map_lucky.get(method, LuckyScoreMethod.LAPLACIAN)
+                self.lucky_stacker.config.score_method = converted_method
                 # Recréer le scorer avec la nouvelle méthode
                 self.lucky_stacker.scorer = QualityScorer(self.lucky_stacker.config)
                 print(f"[LUCKY] score_method mis à jour: {method}")
 
         if 'lucky_stack_method' in kwargs:
             method = kwargs['lucky_stack_method'].lower()
-            from .config_advanced import LuckyStackMethod
-            method_map = {
-                'mean': LuckyStackMethod.MEAN,
-                'median': LuckyStackMethod.MEDIAN,
-                'sigma_clip': LuckyStackMethod.SIGMA_CLIP,
+            from .config_advanced import LuckyStackMethod as ConfigLuckyStackMethod
+            method_map_config = {
+                'mean': ConfigLuckyStackMethod.MEAN,
+                'median': ConfigLuckyStackMethod.MEDIAN,
+                'sigma_clip': ConfigLuckyStackMethod.SIGMA_CLIP,
             }
-            new_method = method_map.get(method, LuckyStackMethod.MEAN)
+            new_method = method_map_config.get(method, ConfigLuckyStackMethod.MEAN)
             self.config.lucky.stack_method = new_method
-            if self.lucky_stacker and self.is_running:
-                self.lucky_stacker.config.stack_method = new_method
-                print(f"[LUCKY] stack_method mis à jour: {method}")
+            print(f"[DEBUG] lucky_stack_method configure: method='{method}', self.lucky_stacker={self.lucky_stacker}, self.is_running={self.is_running}")
+            # Mise à jour dynamique : convertir vers le type de lucky_imaging.py
+            # (même si arrêté, pour que ce soit appliqué au prochain start())
+            if self.lucky_stacker:
+                method_map_lucky = {
+                    'mean': LuckyStackMethod.MEAN,
+                    'median': LuckyStackMethod.MEDIAN,
+                    'sigma_clip': LuckyStackMethod.SIGMA_CLIP,
+                }
+                converted_method = method_map_lucky.get(method, LuckyStackMethod.MEAN)
+                self.lucky_stacker.config.stack_method = converted_method
+                print(f"[LUCKY] stack_method mis à jour: {method} → {converted_method}")
+            else:
+                print(f"[LUCKY] stack_method sera appliqué au prochain start(): {method}")
 
         if 'lucky_align_enabled' in kwargs:
             new_align = bool(kwargs['lucky_align_enabled'])
@@ -475,24 +494,47 @@ class RPiCameraLiveStackAdvanced:
                 'auto': StretchMethod.AUTO,
                 'ghs': StretchMethod.GHS,
             }
-            self.config.output.png_stretch_method = stretch_map.get(
-                kwargs['png_stretch'],
-                StretchMethod.ASINH
-            )
+            stretch_method = stretch_map.get(kwargs['png_stretch'], StretchMethod.ASINH)
+            # Stocker dans les deux emplacements pour compatibilité
+            self.config.output.png_stretch_method = stretch_method
+            # session.py utilise config.png_stretch_method directement (string ou enum)
+            self.config.png_stretch_method = stretch_method
+            print(f"[DEBUG] png_stretch configuré: {kwargs['png_stretch']} → {stretch_method}")
         if 'png_factor' in kwargs:
             self.config.output.png_stretch_factor = float(kwargs['png_factor'])
         if 'png_clip_low' in kwargs:
-            self.config.output.png_clip_low = float(kwargs['png_clip_low'])
+            self.config.png_clip_low = float(kwargs['png_clip_low'])
         if 'png_clip_high' in kwargs:
-            self.config.output.png_clip_high = float(kwargs['png_clip_high'])
+            self.config.png_clip_high = float(kwargs['png_clip_high'])
 
-        # Paramètres GHS
+        # Paramètres GHS - stocker à la racine de config pour compatibilité session.py
+        ghs_updated = False
         if 'ghs_D' in kwargs:
-            self.config.output.ghs_D = float(kwargs['ghs_D'])
-        if 'ghs_B' in kwargs:
-            self.config.output.ghs_B = float(kwargs['ghs_B'])
+            self.config.ghs_D = float(kwargs['ghs_D'])
+            ghs_updated = True
+        if 'ghs_b' in kwargs:
+            self.config.ghs_b = float(kwargs['ghs_b'])
+            ghs_updated = True
+        if 'ghs_B' in kwargs:  # Rétro-compatibilité
+            self.config.ghs_b = float(kwargs['ghs_B'])
+            ghs_updated = True
         if 'ghs_SP' in kwargs:
-            self.config.output.ghs_SP = float(kwargs['ghs_SP'])
+            self.config.ghs_SP = float(kwargs['ghs_SP'])
+            ghs_updated = True
+        if 'ghs_LP' in kwargs:
+            self.config.ghs_LP = float(kwargs['ghs_LP'])
+            ghs_updated = True
+        if 'ghs_HP' in kwargs:
+            self.config.ghs_HP = float(kwargs['ghs_HP'])
+            ghs_updated = True
+        if 'ghs_auto_adjust_sp' in kwargs:
+            self.config.ghs_auto_adjust_sp = bool(kwargs['ghs_auto_adjust_sp'])
+
+        # Debug GHS si modifié
+        if ghs_updated:
+            print(f"[DEBUG GHS CONFIGURE] D={getattr(self.config, 'ghs_D', '?')}, "
+                  f"b={getattr(self.config, 'ghs_b', '?')}, SP={getattr(self.config, 'ghs_SP', '?')}, "
+                  f"LP={getattr(self.config, 'ghs_LP', '?')}, HP={getattr(self.config, 'ghs_HP', '?')}")
         if 'preview_refresh' in kwargs:
             self.config.preview_refresh_interval = int(kwargs['preview_refresh'])
         if 'save_dng' in kwargs:
@@ -625,9 +667,12 @@ class RPiCameraLiveStackAdvanced:
                 'MEDIAN': LuckyStackMethod.MEDIAN,
                 'SIGMA_CLIP': LuckyStackMethod.SIGMA_CLIP,
             }
+            print(f"[DEBUG START] self.config.lucky.stack_method = {self.config.lucky.stack_method} (type: {type(self.config.lucky.stack_method)})")
+            print(f"[DEBUG START] self.config.lucky.stack_method.name = '{self.config.lucky.stack_method.name}'")
             lucky_config.stack_method = stack_method_map.get(
                 self.config.lucky.stack_method.name, LuckyStackMethod.MEAN
             )
+            print(f"[DEBUG START] lucky_config.stack_method = {lucky_config.stack_method} (type: {type(lucky_config.stack_method)})")
             lucky_config.sigma_clip_kappa = self.config.lucky.sigma_clip_kappa
 
             # CORRECTION BUG IMAGE BLANCHE: Passer le format RAW explicite
@@ -980,11 +1025,31 @@ class RPiCameraLiveStackAdvanced:
         """
         if filename is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            method = self.config.stacking.method.value
-            drizzle_str = f"_drizzle{self.config.drizzle.scale}x" if self.use_drizzle else ""
-            # Ajouter le format RAW au nom de fichier (priorité au paramètre)
+
+            # Format RAW
             raw_format_str = raw_format_name or self.camera_params.get('raw_format', 'YUV420')
-            filename = f"stack_{raw_format_str}_{method}{drizzle_str}_{timestamp}"
+
+            # ISP software (seulement pour formats RAW)
+            isp_str = ""
+            if self.config.isp_enable and 'RAW' in raw_format_str.upper():
+                isp_str = "_isp"
+
+            # Méthode de stacking
+            if self.use_lucky:
+                method = f"lucky_{self.config.lucky.stack_method.value}"
+                # Ajouter paramètres Lucky importants
+                keep = int(self.config.lucky.keep_percent)
+                score = self.config.lucky.score_method.value
+                align_str = "_align" if self.config.lucky.align_enabled else ""
+                lucky_params = f"_k{keep}_{score}{align_str}"
+            else:
+                method = self.config.stacking.method.value
+                lucky_params = ""
+
+            # Planétaire
+            planetary_str = f"_{self.config.planetary.mode.value}" if self.use_planetary else ""
+
+            filename = f"stack_{raw_format_str}{isp_str}_{method}{lucky_params}{planetary_str}_{timestamp}"
 
         output_path = self.output_dir / f"{filename}.fit"
         

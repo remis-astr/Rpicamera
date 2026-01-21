@@ -91,6 +91,11 @@ class StackingConfig:
         self.ghs_LP = 0.0                 # Protect shadows (0.0 à SP) - protection basses lumières
         self.ghs_HP = 0.0                 # Protect highlights (SP à 1.0) - protection hautes lumières
 
+        # NOUVEAU: Ajustement automatique SP pour RAW
+        # Compense la différence entre preview hardware ISP et ISP software
+        # En mode RAW, ajuste SP au pic d'histogramme réel des données
+        self.ghs_auto_adjust_sp = True    # Auto-ajuster SP pour RAW (recommandé)
+
         # Paramètres FITS
         self.fits_linear = True            # Sauvegarder FITS en linéaire (True=RAW, False=stretched)
 

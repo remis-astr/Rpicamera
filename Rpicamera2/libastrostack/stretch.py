@@ -166,9 +166,9 @@ def stretch_auto(data, clip_low=0.1, clip_high=99.9):
     return stretched
 
 
-def stretch_ghs(data, D=3.0, b=0.13, SP=0.2, LP=0.0, HP=0.0, clip_low=0.0, clip_high=99.97, B=None):
+def stretch_ghs(data, D=3.0, b=0.13, SP=0.2, LP=0.0, HP=0.0, clip_low=0.0, clip_high=99.97, B=None, normalize_output=True):
     """
-    Generalized Hyperbolic Stretch (GHS) - Implémentation complète
+    Generalized Hyperbolic Stretch (GHS) - Implémentation IDENTIQUE à RPiCamera2.py
     Conforme à RPiCamera2 et ghsastro.co.uk
 
     Args:
@@ -181,14 +181,17 @@ def stretch_ghs(data, D=3.0, b=0.13, SP=0.2, LP=0.0, HP=0.0, clip_low=0.0, clip_
         clip_low: Percentile bas (%) - normalisation pré-traitement (défaut: 0.0)
         clip_high: Percentile haut (%) - normalisation pré-traitement (défaut: 99.97)
         B: [DEPRECATED] Ancien paramètre, utilisez 'b' à la place
+        normalize_output: Si True, normalise le résultat pour couvrir [0,1] (défaut: True)
+                         Mettre à False pour RAW où les données sont déjà dans [0,1]
 
     Returns:
         Image étirée (0-1 float)
 
     Notes:
         - Normalisation par percentiles appliquée AVANT la transformation GHS
-        - Valeurs par défaut optimisées pour préserver la dynamique complète
-        - Pour désactiver normalisation: clip_low=0, clip_high=100
+        - Normalisation finale (si activée) garantit que le résultat couvre [0, 1]
+        - Pour YUV/RGB: normalize_output=True (données ne couvrent pas [0,1])
+        - Pour RAW après ISP: normalize_output=False (données déjà dans [0,1])
     """
     # Rétro-compatibilité: si B est fourni et b n'est pas modifié
     if B is not None and b == 0.13:
@@ -202,19 +205,21 @@ def stretch_ghs(data, D=3.0, b=0.13, SP=0.2, LP=0.0, HP=0.0, clip_low=0.0, clip_
         if vmax > vmin:
             data = np.clip((data - vmin) / (vmax - vmin), 0, 1)
 
-    # Transformation GHS complète (version RPiCamera2)
+    # Transformation GHS complète (IDENTIQUE à RPiCamera2.py ghs_stretch)
     epsilon = 1e-10
     img_float = np.clip(data.astype(np.float64), epsilon, 1.0 - epsilon)
 
     if abs(D) < epsilon:
         return img_float.astype(np.float32)
 
-    # Contraintes
+    # Contraintes : 0 <= LP <= SP <= HP <= 1
     LP = max(0.0, min(LP, SP))
     HP = max(SP, min(HP, 1.0))
 
+    # =========================================================================
+    # FONCTIONS DE TRANSFORMATION DE BASE T(x) selon la valeur de b
+    # =========================================================================
     def T_base(x, D, b):
-        """Transformation de base selon b"""
         x = np.asarray(x, dtype=np.float64)
         result = np.zeros_like(x)
 
@@ -235,7 +240,6 @@ def stretch_ghs(data, D=3.0, b=0.13, SP=0.2, LP=0.0, HP=0.0, clip_low=0.0, clip_
         return result
 
     def T_prime(x, D, b):
-        """Dérivée première"""
         x = np.asarray(x, dtype=np.float64)
 
         if abs(b - (-1.0)) < epsilon:
@@ -251,47 +255,73 @@ def stretch_ghs(data, D=3.0, b=0.13, SP=0.2, LP=0.0, HP=0.0, clip_low=0.0, clip_
             base = np.maximum(1.0 + b * D * x, epsilon)
             return D * np.power(base, -(1.0 / b + 1.0))
 
-    T_1 = T_base(1.0, D, b)
+    # =========================================================================
+    # CONSTRUCTION DE LA TRANSFORMATION COMPLÈTE (identique RPiCamera2.py)
+    # =========================================================================
+
+    # T3(x) = T(x - SP) pour x >= SP (transformation centrée sur SP)
+    def T3(x):
+        return T_base(x - SP, D, b)
+
+    def T3_prime(x):
+        return T_prime(x - SP, D, b)
+
+    # T2(x) = -T(SP - x) pour LP <= x < SP (symétrie autour de SP)
+    def T2(x):
+        return -T_base(SP - x, D, b)
+
+    def T2_prime(x):
+        return T_prime(SP - x, D, b)
+
+    # Valeurs aux bornes pour les segments linéaires
+    T2_LP = float(T2(LP))
+    T2_prime_LP = float(T2_prime(LP))
+    T3_HP = float(T3(HP))
+    T3_prime_HP = float(T3_prime(HP))
+
+    # T1(x) = T2'(LP) * (x - LP) + T2(LP) pour x < LP (linéaire - protection shadows)
+    def T1(x):
+        return T2_prime_LP * (x - LP) + T2_LP
+
+    # T4(x) = T3'(HP) * (x - HP) + T3(HP) pour x >= HP (linéaire - protection highlights)
+    def T4(x):
+        return T3_prime_HP * (x - HP) + T3_HP
+
+    # Valeurs pour la normalisation (transformation doit aller de 0 à 1)
+    T1_0 = float(T1(0.0))
+    T4_1 = float(T4(1.0))
+    norm_range = T4_1 - T1_0
+
+    if abs(norm_range) < epsilon:
+        return img_float.astype(np.float32)  # Pas de transformation possible
+
+    # =========================================================================
+    # APPLICATION DE LA TRANSFORMATION PAR RÉGION
+    # =========================================================================
+
     img_stretched = np.zeros_like(img_float)
 
-    # Zone 1: x < LP (linéaire - shadows)
-    if LP > epsilon:
-        mask_low = img_float < LP
-        if np.any(mask_low):
-            slope_SP = T_prime(SP, D, b) / T_1
-            slope_LP = slope_SP * (LP / SP)
-            img_stretched[mask_low] = slope_LP * img_float[mask_low]
+    # Masques pour les 4 régions
+    mask1 = img_float < LP                          # Région 1: 0 <= x < LP (linéaire)
+    mask2 = (img_float >= LP) & (img_float < SP)    # Région 2: LP <= x < SP (symétrie)
+    mask3 = (img_float >= SP) & (img_float < HP)    # Région 3: SP <= x < HP (principale)
+    mask4 = img_float >= HP                         # Région 4: HP <= x <= 1 (linéaire)
 
-    # Zone 2: LP <= x < SP (transformation hyperbolic)
-    mask_mid_low = (img_float >= LP) & (img_float < SP)
-    if np.any(mask_mid_low):
-        x_norm = img_float[mask_mid_low] / SP
-        T_x = T_base(x_norm, D, b) / T_1
-        img_stretched[mask_mid_low] = SP * T_x
+    # Appliquer les transformations par région
+    if np.any(mask1):
+        img_stretched[mask1] = T1(img_float[mask1])
+    if np.any(mask2):
+        img_stretched[mask2] = T2(img_float[mask2])
+    if np.any(mask3):
+        img_stretched[mask3] = T3(img_float[mask3])
+    if np.any(mask4):
+        img_stretched[mask4] = T4(img_float[mask4])
 
-    # Zone 3: x >= SP (symétrie miroir)
-    mask_high = img_float >= SP
-    if np.any(mask_high):
-        if HP < 1.0 - epsilon:
-            mask_mid_high = (img_float >= SP) & (img_float < HP)
-            if np.any(mask_mid_high):
-                x_mirror = 1.0 - img_float[mask_mid_high]
-                x_norm_mirror = x_mirror / (1.0 - SP)
-                T_mirror = T_base(x_norm_mirror, D, b) / T_1
-                img_stretched[mask_mid_high] = 1.0 - (1.0 - SP) * T_mirror
-
-            mask_very_high = img_float >= HP
-            if np.any(mask_very_high):
-                slope_SP_high = T_prime(SP, D, b) / T_1
-                slope_HP = slope_SP_high * ((1.0 - HP) / (1.0 - SP))
-                T_HP_val = T_base((1.0 - HP) / (1.0 - SP), D, b) / T_1
-                y_HP = 1.0 - (1.0 - SP) * T_HP_val
-                img_stretched[mask_very_high] = y_HP + slope_HP * (img_float[mask_very_high] - HP)
-        else:
-            x_mirror = 1.0 - img_float[mask_high]
-            x_norm_mirror = x_mirror / (1.0 - SP)
-            T_mirror = T_base(x_norm_mirror, D, b) / T_1
-            img_stretched[mask_high] = 1.0 - (1.0 - SP) * T_mirror
+    # NORMALISATION FINALE: garantit que le résultat couvre [0, 1]
+    # Pour YUV/RGB: nécessaire car données ne couvrent pas [0,1]
+    # Pour RAW après ISP: désactivé car données déjà dans [0,1]
+    if normalize_output:
+        img_stretched = (img_stretched - T1_0) / norm_range
 
     return np.clip(img_stretched, 0.0, 1.0).astype(np.float32)
 
@@ -302,12 +332,26 @@ def apply_stretch(data, method=StretchMethod.ASINH, **params):
 
     Args:
         data: Image à étirer (float array)
-        method: Méthode ('off', 'linear', 'asinh', 'log', 'sqrt', 'histogram', 'auto', 'ghs')
+        method: Méthode ('off', 'linear', 'asinh', 'log', 'sqrt', 'histogram', 'auto', 'ghs') ou StretchMethod enum
         **params: Paramètres (factor, clip_low, clip_high, ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP)
 
     Returns:
         Image étirée (0-1)
     """
+    # Convertir string en enum si nécessaire
+    if isinstance(method, str):
+        method_map = {
+            'off': StretchMethod.OFF,
+            'linear': StretchMethod.LINEAR,
+            'asinh': StretchMethod.ASINH,
+            'log': StretchMethod.LOG,
+            'sqrt': StretchMethod.SQRT,
+            'histogram': StretchMethod.HISTOGRAM,
+            'auto': StretchMethod.AUTO,
+            'ghs': StretchMethod.GHS,
+        }
+        method = method_map.get(method.lower(), StretchMethod.ASINH)
+
     if method == StretchMethod.OFF:
         # Pas de stretch - juste clip [0, 1] SANS normalisation
         # IMPORTANT: Ne PAS normaliser pour préserver l'histogramme original
@@ -359,7 +403,8 @@ def apply_stretch(data, method=StretchMethod.ASINH, **params):
             LP=params.get('ghs_LP', 0.0),
             HP=params.get('ghs_HP', 0.0),
             clip_low=params.get('clip_low', 0.0),
-            clip_high=params.get('clip_high', 99.97)
+            clip_high=params.get('clip_high', 99.97),
+            normalize_output=params.get('normalize_output', True)  # False pour RAW après ISP
         )
 
     else:  # AUTO

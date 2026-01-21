@@ -62,9 +62,14 @@ class LiveStackSession:
                     print(f"[DEBUG ISP] ✓ Chargé avec succès")
                 except Exception as e:
                     print(f"[DEBUG ISP] ✗ Erreur: {e}")
+                    # Créer ISP avec config par défaut en cas d'erreur
+                    self.isp = ISP()
+                    print(f"[DEBUG ISP] → ISP créé avec config par défaut")
             else:
-                print(f"[DEBUG ISP] Pas de chemin de config, isp_config_path est vide/None")
-            # Sinon, calibration auto plus tard avec première frame
+                # Créer ISP avec config par défaut (sera configuré par le panneau RAW)
+                print(f"[DEBUG ISP] Pas de chemin de config, création ISP avec config par défaut")
+                self.isp = ISP()
+                print(f"[DEBUG ISP] ✓ ISP créé avec config par défaut")
         else:
             print(f"[DEBUG ISP] ISP désactivé (isp_enable=False)")
 
@@ -265,19 +270,19 @@ class LiveStackSession:
         # L'ISP ne doit s'appliquer QUE sur RAW12/RAW16, JAMAIS sur YUV420 (déjà traité par ISP hardware)
         is_raw_format = self.config.video_format in ['raw12', 'raw16']
         if self.config.isp_enable and self.isp is not None and is_raw_format:
-            # print(f"  → Application ISP (format {self.config.video_format} détecté)...")
+            print(f"  [ISP] Application ISP (format={self.config.video_format}, gamma={self.isp.config.gamma:.1f})")
+            print(f"  [ISP] Avant: range=[{result.min():.3f}, {result.max():.3f}], mean={result.mean():.3f}")
             # swap_rb=True pour RAW car le débayeurisation inverse R/B (RPiCamera2.py:4931-4932)
             # Passer format_hint pour adapter les paramètres ISP (RAW12 vs RAW16 Clear HDR)
             result = self.isp.process(result, return_uint8=False, swap_rb=True,
                                      format_hint=self.config.video_format)  # Reste en float32
-            # print(f"  → Après ISP: shape={result.shape}, dtype={result.dtype}, range=[{result.min():.3f}, {result.max():.3f}]")
-            # TRACEUR RGB: Après ISP
-            # if len(result.shape) == 3 and result.shape[2] == 3:
-            #     print(f"  • [APRÈS ISP] RGB moyennes: R={result[:,:,0].mean():.3f}, G={result[:,:,1].mean():.3f}, B={result[:,:,2].mean():.3f}")
-        # elif self.config.isp_enable and not is_raw_format:
-        #     print(f"  → ISP ignoré (format {self.config.video_format} déjà traité par camera ISP)")
-        # else:
-        #     print(f"  → Pas d'ISP (enable={self.config.isp_enable}, isp={self.isp is not None})")
+            print(f"  [ISP] Après: range=[{result.min():.3f}, {result.max():.3f}], mean={result.mean():.3f}")
+            if len(result.shape) == 3 and result.shape[2] == 3:
+                print(f"  [ISP] RGB moyennes: R={result[:,:,0].mean():.3f}, G={result[:,:,1].mean():.3f}, B={result[:,:,2].mean():.3f}")
+        elif self.config.isp_enable and not is_raw_format:
+            print(f"  [ISP] Ignoré (format {self.config.video_format} déjà traité par camera ISP)")
+        else:
+            print(f"  [ISP] Désactivé (enable={self.config.isp_enable}, isp={self.isp is not None}, raw={is_raw_format})")
 
         # Appliquer étirement
         is_color = len(result.shape) == 3
@@ -292,6 +297,10 @@ class LiveStackSession:
 
         # Détecter automatiquement la plage de données
         max_val = result.max()
+        min_val = result.min()
+
+        # DEBUG: Tracer les valeurs pour diagnostiquer le problème de blanc
+        print(f"  [DEBUG STRETCH] Avant normalisation: min={min_val:.2f}, max={max_val:.2f}, dtype={result.dtype}")
 
         # IMPORTANT: Détecter 3 cas au lieu de 2 pour éviter bug avec ISP
         if max_val <= 1.1:
@@ -300,9 +309,32 @@ class LiveStackSession:
             normalization_factor = 1.0
             data_type_str = "Déjà normalisé [0-1]"
         elif max_val > 256:
-            # Cas 2: Données haute résolution (RAW12/16) : [0-65535]
-            normalization_factor = 65535.0
-            data_type_str = f"RAW 16-bit ({self.config.video_format})"
+            # Cas 2: Données haute résolution (RAW12/16)
+            # CORRECTION: Utiliser le max théorique du format au lieu de 65535 fixe
+            # RAW12 = 4095, RAW16 = 65535
+            # Mais si les données sont déjà débayérisées avec interpolation,
+            # le max peut dépasser le théorique → utiliser max réel + marge
+            if self.config.video_format:
+                fmt_lower = self.config.video_format.lower()
+                if 'raw12' in fmt_lower or 'srggb12' in fmt_lower:
+                    # RAW 12 bits théorique = 4095, mais débayérisé peut aller plus haut
+                    # Utiliser le max entre théorique et réel pour éviter le clipping
+                    theoretical_max = 4095.0
+                    normalization_factor = max(theoretical_max, max_val * 1.02)  # +2% marge
+                    data_type_str = f"RAW 12-bit ({self.config.video_format})"
+                elif 'raw10' in fmt_lower or 'srggb10' in fmt_lower:
+                    theoretical_max = 1023.0
+                    normalization_factor = max(theoretical_max, max_val * 1.02)
+                    data_type_str = f"RAW 10-bit ({self.config.video_format})"
+                else:
+                    # RAW 16 bits ou autre
+                    normalization_factor = 65535.0
+                    data_type_str = f"RAW 16-bit ({self.config.video_format})"
+            else:
+                # Pas de format spécifié - utiliser max réel avec marge
+                # pour s'assurer que les données occupent bien [0, 1]
+                normalization_factor = max_val * 1.02 if max_val > 0 else 65535.0
+                data_type_str = f"RAW auto (max={max_val:.0f})"
         else:
             # Cas 3: Données 8-bit (YUV420) : [0-255]
             normalization_factor = 255.0
@@ -312,17 +344,74 @@ class LiveStackSession:
         result = result / normalization_factor
         result = np.clip(result, 0, 1)
 
+        # DEBUG: Après normalisation
+        print(f"  [DEBUG STRETCH] Après normalisation: min={result.min():.4f}, max={result.max():.4f}, factor={normalization_factor:.1f}")
+
         # Configurer le clipping par percentiles selon le format
+        clip_low = self.config.png_clip_low
+        clip_high = self.config.png_clip_high
+
         if is_raw_format:
             # RAW: normalisation par percentiles (data brute avec possibles pixels chauds)
-            clip_low = self.config.png_clip_low
-            clip_high = self.config.png_clip_high
-            # print(f"  • Normalisation: {data_type_str} → [0-1] (/{normalization_factor:.0f}) + Percentiles - clip_low={clip_low}%, clip_high={clip_high}%")
+            # CORRECTION: En mode RAW, FORCER une normalisation minimale si désactivée
+            # Les données RAW linéaires ont besoin d'être normalisées pour le stretch
+            if clip_low == 0.0 and clip_high >= 100.0:
+                # Utiliser des valeurs par défaut raisonnables pour RAW
+                clip_low = 0.1    # Exclure le bruit de fond (pixels noirs)
+                clip_high = 99.9  # Exclure les pixels chauds/saturés
         else:
-            # YUV420: déjà traité par ISP caméra, pas de pixels chauds → pas de clipping par percentiles
+            # YUV420/XRGB8888: déjà traité par ISP caméra hardware
+            # IMPORTANT: Pour correspondre à la preview (ghs_stretch dans RPiCamera2.py),
+            # NE PAS appliquer de normalisation par percentiles
+            # La preview divise juste par 255 sans percentiles → même comportement ici
             clip_low = 0.0
             clip_high = 100.0
-            # print(f"  • Normalisation: {data_type_str} → [0-1] (/{normalization_factor:.0f})")
+
+        # Récupérer paramètres GHS
+        ghs_D = getattr(self.config, 'ghs_D', 3.0)
+        ghs_b = getattr(self.config, 'ghs_b', getattr(self.config, 'ghs_B', 0.13))
+        ghs_SP = getattr(self.config, 'ghs_SP', 0.2)
+        ghs_LP = getattr(self.config, 'ghs_LP', 0.0)
+        ghs_HP = getattr(self.config, 'ghs_HP', 0.0)
+        ghs_auto_adjust = getattr(self.config, 'ghs_auto_adjust_sp', True)
+
+        # Auto-ajustement SP pour RAW UNIQUEMENT
+        # Après ISP software, les données RAW ont un histogramme centré ~0.5
+        # mais SP configuré est souvent bas (0.04). On ajuste SP au pic réel.
+        # NOTE: La normalisation finale GHS est DÉSACTIVÉE pour RAW (normalize_output=False)
+        # donc l'auto-ajustement SP ne cause plus de double éclaircissement.
+        original_SP = ghs_SP
+        is_raw_only = is_raw_format and self.config.video_format in ['raw12', 'raw16']
+
+        if (ghs_auto_adjust and is_raw_only and
+            self.config.png_stretch_method == 'ghs' and ghs_SP < 0.15):
+            # Calculer le pic d'histogramme des données normalisées
+            if is_color:
+                gray_data = 0.299 * result[:,:,0] + 0.587 * result[:,:,1] + 0.114 * result[:,:,2]
+            else:
+                gray_data = result
+
+            # Histogramme avec 256 bins, ignorer les extrêmes
+            mask = (gray_data > 0.01) & (gray_data < 0.99)
+            if np.sum(mask) > 1000:
+                hist, bin_edges = np.histogram(gray_data[mask], bins=256, range=(0.01, 0.99))
+                peak_bin = np.argmax(hist)
+                peak_value = (bin_edges[peak_bin] + bin_edges[peak_bin + 1]) / 2.0
+
+                # Ajuster SP pour cibler le pic d'histogramme
+                if peak_value > ghs_SP * 2:
+                    ghs_SP = peak_value * 0.8  # Légèrement en dessous du pic
+                    ghs_SP = max(ghs_SP, 0.05)  # Minimum 5%
+                    ghs_SP = min(ghs_SP, 0.5)   # Maximum 50%
+                    print(f"  [GHS AUTO-SP] Pic histogramme={peak_value:.3f}, SP ajusté: {original_SP:.3f} → {ghs_SP:.3f}")
+
+        # Normalisation finale GHS: désactivée pour RAW (données déjà dans [0,1])
+        # Activée pour YUV/RGB (données ne couvrent pas [0,1])
+        normalize_ghs_output = not is_raw_format
+
+        # DEBUG: Paramètres stretch (après ajustement éventuel)
+        print(f"  [DEBUG STRETCH] Paramètres: method={self.config.png_stretch_method}, clip=[{clip_low:.1f}%, {clip_high:.1f}%], normalize={normalize_ghs_output}")
+        print(f"  [DEBUG STRETCH] GHS: D={ghs_D:.2f}, b={ghs_b:.2f}, SP={ghs_SP:.2f}, LP={ghs_LP:.2f}, HP={ghs_HP:.2f}")
 
         if is_color:
             stretched = np.zeros_like(result, dtype=np.float32)
@@ -333,11 +422,12 @@ class LiveStackSession:
                     factor=self.config.png_stretch_factor,
                     clip_low=clip_low,
                     clip_high=clip_high,
-                    ghs_D=getattr(self.config, 'ghs_D', 3.0),
-                    ghs_b=getattr(self.config, 'ghs_b', getattr(self.config, 'ghs_B', 0.13)),
-                    ghs_SP=getattr(self.config, 'ghs_SP', 0.2),
-                    ghs_LP=getattr(self.config, 'ghs_LP', 0.0),
-                    ghs_HP=getattr(self.config, 'ghs_HP', 0.0)
+                    ghs_D=ghs_D,
+                    ghs_b=ghs_b,
+                    ghs_SP=ghs_SP,
+                    ghs_LP=ghs_LP,
+                    ghs_HP=ghs_HP,
+                    normalize_output=normalize_ghs_output
                 )
         else:
             stretched = apply_stretch(
@@ -346,12 +436,16 @@ class LiveStackSession:
                 factor=self.config.png_stretch_factor,
                 clip_low=clip_low,
                 clip_high=clip_high,
-                ghs_D=getattr(self.config, 'ghs_D', 3.0),
-                ghs_b=getattr(self.config, 'ghs_b', getattr(self.config, 'ghs_B', 0.13)),
-                ghs_SP=getattr(self.config, 'ghs_SP', 0.2),
-                ghs_LP=getattr(self.config, 'ghs_LP', 0.0),
-                ghs_HP=getattr(self.config, 'ghs_HP', 0.0)
+                ghs_D=ghs_D,
+                ghs_b=ghs_b,
+                ghs_SP=ghs_SP,
+                ghs_LP=ghs_LP,
+                ghs_HP=ghs_HP,
+                normalize_output=normalize_ghs_output
             )
+
+        # DEBUG: Après stretch - inclure moyenne pour diagnostiquer image blanche
+        print(f"  [DEBUG STRETCH] Après stretch: min={stretched.min():.4f}, max={stretched.max():.4f}, mean={stretched.mean():.4f}")
 
         # TRACEUR RGB: Après stretch (avant conversion PNG)
         # if len(stretched.shape) == 3 and stretched.shape[2] == 3:
