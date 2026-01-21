@@ -1123,12 +1123,38 @@ def debayer_raw_array(raw_array, raw_format_str, red_gain=1.0, blue_gain=1.0, ap
         Array numpy uint16 (height, width, 3) RGB [0-65535]
     """
     try:
-        height, stride_bytes = raw_array.shape
+        # *** VALIDATION: Vérifier que l'array est bien 2D (format RAW Bayer) ***
+        if len(raw_array.shape) != 2:
+            print(f"[WARNING] debayer_raw_array: Array reçu n'est PAS du format RAW Bayer!")
+            print(f"  Shape reçu: {raw_array.shape} (attendu: 2D)")
+            print(f"  dtype: {raw_array.dtype}")
+            if len(raw_array.shape) == 3:
+                print(f"  → Array 3D détecté - probablement une image ISP du stream MAIN au lieu de RAW")
+                # Retourner l'array tel quel s'il est déjà RGB/XRGB (pour éviter crash)
+                if raw_array.shape[2] == 4:
+                    # XRGB8888 - extraire les 3 premiers canaux (BGR)
+                    print(f"  → Extraction BGR depuis XRGB (4 canaux)")
+                    return (raw_array[:, :, :3].astype(np.float32) * 256).astype(np.uint16)
+                elif raw_array.shape[2] == 3:
+                    # RGB/BGR - convertir en uint16 pour compatibilité
+                    print(f"  → Conversion RGB en uint16")
+                    return (raw_array.astype(np.float32) * 256).astype(np.uint16)
+            raise ValueError(f"Format RAW attendu (2D), reçu: {raw_array.shape}")
 
-        # Convertir en uint16 (little-endian, 2 bytes par pixel)
-        raw_uint16 = raw_array.view(np.uint16)
-        width = stride_bytes // 2
-        raw_image = raw_uint16.reshape(height, -1)[:, :width]
+        height, dim2 = raw_array.shape
+
+        # Détecter si les données sont déjà uint16 (unpacked) ou uint8 (packed)
+        if raw_array.dtype == np.uint16:
+            # Données déjà en uint16 (unpacked=True dans la config)
+            # dim2 est la vraie largeur en pixels
+            width = dim2
+            raw_image = raw_array
+        else:
+            # Données en uint8 (packed) - conversion nécessaire
+            # dim2 est le stride en bytes (2 bytes par pixel)
+            raw_uint16 = raw_array.view(np.uint16)
+            width = dim2 // 2
+            raw_image = raw_uint16.reshape(height, -1)[:, :width]
 
         # *** CORRECTION PIXELS MORTS (automatique par sigma-clipping) ***
         if fix_bad_pixels:
@@ -1366,6 +1392,7 @@ STR            = 12  # external GPIO trigger for capture
 camera      = 0    # choose camera to use, usually 0 unless using a Pi5 or multiswitcher
 mode        = 1    # set camera mode ['manual','normal','sport'] 
 speed       = 16   # position in shutters list (16 = 1/125th)
+custom_sspeed = 0  # valeur d'exposition personnalisée en microsecondes (0 = utiliser shutters[speed])
 gain        = 0    # set gain , 0 = AUTO
 brightness  = 0    # set camera brightness
 contrast    = 70   # set camera contrast 
@@ -1456,6 +1483,8 @@ video       = 0
 timelapse   = 0
 stream      = 0
 stretch_mode = 0  # Mode stretch astro pour le preview
+stretch_adjust_mode = 0  # Mode ajustement des paramètres stretch en plein écran (0=off, 1=on)
+_stretch_slider_rects = {}  # Rectangles des sliders stretch pour détection clics
 stretch_p_low = 0    # Percentile bas pour stretch (0% à 0.2%, stocké x10 pour slider)
 stretch_p_high = 9998 # Percentile haut pour stretch (99.95% à 100%, stocké x100 pour slider)
 stretch_factor = 25 # Facteur de stretch (0 à 8, stocké x10 pour slider)
@@ -1562,6 +1591,22 @@ capture_size = (1928, 1090)  # Taille de capture/ROI (sera calculée dans previe
 
 # ISP (Image Signal Processor) parameters
 isp_enable = 0  # 0=off, 1=on (utilise isp_config_imx585.json)
+
+# RAW Adjustment Panel (mode plein écran)
+raw_adjust_mode = 0           # 0=off, 1=on
+raw_adjust_tab = 0            # 0=ISP, 1=Stretch
+_raw_slider_rects = {}        # Rectangles pour clics sliders RAW
+
+# Paramètres ISP GUI (stockés x100 pour sliders, sauf black_level)
+isp_wb_red = 100              # 0.5-2.0 → 50-200 (défaut 1.0)
+isp_wb_green = 100            # 0.5-2.0 → 50-200 (défaut 1.0)
+isp_wb_blue = 100             # 0.5-2.0 → 50-200 (défaut 1.0)
+isp_gamma = 100               # 0.5-3.0 → 50-300 (défaut 1.0, correspond à gamma 2.2)
+isp_black_level = 64          # 0-500 direct (défaut 64)
+isp_brightness = 0            # -0.5-0.5 → -50-50 (défaut 0)
+isp_contrast = 100            # 0.5-2.0 → 50-200 (défaut 1.0)
+isp_saturation = 100          # 0.0-2.0 → 0-200 (défaut 1.0)
+isp_sharpening = 0            # 0.0-2.0 → 0-200 (défaut 0)
 
 # set button sizes
 bw = int(preview_width/5.66)
@@ -2382,7 +2427,7 @@ def Camera_Version():
     global lver,v3_af,camera,vwidths2,vheights2,configtxt,mode,mag,max_gain,max_shutter,Pi_Cam,max_camera,same_cams,x_sens,y_sens,igw,igh
     global cam0,cam1,cam2,cam3,max_gains,max_shutters,scientif,max_vformat,vformat,vwidth,vheight,vfps,sspeed,tduration,video_limits,lo_res
     global speed,shutter,max_vf_7,max_vf_6,max_vf_5,max_vf_4,max_vf_3,max_vf_2,max_vf_1,max_vf_4a,max_vf_0,max_vf_8,max_vf_9,IRF,foc_sub3
-    global foc_sub5,v3_hdr,windowSurfaceObj,cam1
+    global foc_sub5,v3_hdr,windowSurfaceObj,cam1,custom_sspeed
     # DETERMINE NUMBER OF CAMERAS (FOR ARDUCAM MULITPLEXER or Pi5)
     if os.path.exists('rpicams.txt'):
         os.rename('rpicams.txt', 'oldrpicams.txt')
@@ -2590,18 +2635,23 @@ def Camera_Version():
         tduration = tinterval * tshots
     else:
         tduration = 5
-    shutter = shutters[speed]
-    if shutter < 0:
-        shutter = abs(1/shutter)
-    sspeed = int(shutter * 1000000)
-    if (shutter * 1000000) - int(shutter * 1000000) > 0.5:
-        sspeed +=1
+    # Calculer sspeed: utiliser custom_sspeed si défini, sinon depuis shutters[speed]
+    if custom_sspeed > 0:
+        sspeed = custom_sspeed
+    else:
+        shutter = shutters[speed]
+        if shutter < 0:
+            shutter = abs(1/shutter)
+        sspeed = int(shutter * 1000000)
+        if (shutter * 1000000) - int(shutter * 1000000) > 0.5:
+            sspeed +=1
     # determine max speed for camera
     max_speed = 0
     while max_shutter > shutters[max_speed]:
         max_speed +=1
     if speed > max_speed:
         speed = max_speed
+        custom_sspeed = 0  # Réinitialiser car speed a changé
         shutter = shutters[speed]
         if shutter < 0:
             shutter = abs(1/shutter)
@@ -3404,6 +3454,259 @@ def button(col,row,bkgnd_Color,border_Color):
     #     windowSurfaceObj.blit(but, (preview_width + 2,by + 2))
     pygame.display.update()
 
+def ms_to_shutter_index(ms_value):
+    """
+    Convertit une valeur en millisecondes vers l'index le plus proche dans la liste shutters.
+
+    Args:
+        ms_value: Temps d'exposition en millisecondes
+
+    Returns:
+        L'index dans la liste shutters correspondant à la valeur la plus proche
+    """
+    global shutters, max_speed
+
+    # Convertir ms en secondes
+    seconds = ms_value / 1000.0
+
+    best_index = 0
+    best_diff = float('inf')
+
+    for i in range(min(len(shutters), max_speed + 1)):
+        shutter_val = shutters[i]
+        # Convertir la valeur shutters en secondes
+        if shutter_val < 0:
+            shutter_seconds = abs(1.0 / shutter_val)
+        else:
+            shutter_seconds = shutter_val
+
+        diff = abs(shutter_seconds - seconds)
+        if diff < best_diff:
+            best_diff = diff
+            best_index = i
+
+    return best_index
+
+def shutter_index_to_ms(index):
+    """
+    Convertit un index shutters en millisecondes.
+
+    Args:
+        index: Index dans la liste shutters
+
+    Returns:
+        Temps d'exposition en millisecondes
+    """
+    global shutters
+
+    if index < 0 or index >= len(shutters):
+        return 0
+
+    shutter_val = shutters[index]
+    if shutter_val < 0:
+        seconds = abs(1.0 / shutter_val)
+    else:
+        seconds = shutter_val
+
+    return seconds * 1000.0
+
+def get_sspeed():
+    """
+    Retourne la valeur d'exposition en microsecondes.
+    Utilise custom_sspeed si défini (> 0), sinon calcule depuis shutters[speed].
+
+    Returns:
+        Temps d'exposition en microsecondes (int)
+    """
+    global custom_sspeed, speed, shutters
+
+    if custom_sspeed > 0:
+        return custom_sspeed
+    else:
+        shutter = shutters[speed]
+        if shutter < 0:
+            shutter = abs(1/shutter)
+        sspeed_val = int(shutter * 1000000)
+        if (shutter * 1000000) - int(shutter * 1000000) > 0.5:
+            sspeed_val += 1
+        return sspeed_val
+
+def update_sspeed():
+    """
+    Met à jour la variable globale sspeed en utilisant get_sspeed().
+    Appeler cette fonction après avoir changé speed ou custom_sspeed.
+    """
+    global sspeed
+    sspeed = get_sspeed()
+
+def numeric_input_dialog(title, current_value, min_value, max_value):
+    """
+    Affiche une boîte de dialogue avec clavier virtuel pour saisir une valeur numérique.
+    Fonctionne sans clavier physique.
+
+    Args:
+        title: Titre de la boîte de dialogue
+        current_value: Valeur actuelle à afficher
+        min_value: Valeur minimale autorisée
+        max_value: Valeur maximale autorisée
+
+    Returns:
+        La nouvelle valeur saisie, ou None si annulé
+    """
+    global windowSurfaceObj, whiteColor, blackColor, greyColor, dgryColor, greenColor, redColor
+
+    # Dimensions de la boîte de dialogue (augmentée pour éviter superposition)
+    dialog_width = 320
+    dialog_height = 420
+    dialog_x = (windowSurfaceObj.get_width() - dialog_width) // 2
+    dialog_y = (windowSurfaceObj.get_height() - dialog_height) // 2
+
+    # Sauvegarder l'écran actuel
+    screen_backup = windowSurfaceObj.copy()
+
+    # Valeur en cours de saisie
+    input_text = str(current_value)
+
+    # Disposition du clavier numérique (touches plus compactes)
+    keys = [
+        ['7', '8', '9'],
+        ['4', '5', '6'],
+        ['1', '2', '3'],
+        ['0', '.', 'Del']
+    ]
+
+    key_width = 70
+    key_height = 45
+    key_margin = 8
+    keyboard_y = dialog_y + 100
+
+    # Police pour l'affichage
+    try:
+        font_large = pygame.font.Font('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 32)
+        font_medium = pygame.font.Font('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 24)
+        font_small = pygame.font.Font('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 18)
+    except:
+        font_large = pygame.font.Font(None, 32)
+        font_medium = pygame.font.Font(None, 24)
+        font_small = pygame.font.Font(None, 18)
+
+    running = True
+    result = None
+
+    while running:
+        # Fond semi-transparent
+        s = pygame.Surface((windowSurfaceObj.get_width(), windowSurfaceObj.get_height()))
+        s.set_alpha(180)
+        s.fill((0, 0, 0))
+        windowSurfaceObj.blit(screen_backup, (0, 0))
+        windowSurfaceObj.blit(s, (0, 0))
+
+        # Boîte de dialogue principale
+        pygame.draw.rect(windowSurfaceObj, dgryColor, (dialog_x, dialog_y, dialog_width, dialog_height))
+        pygame.draw.rect(windowSurfaceObj, whiteColor, (dialog_x, dialog_y, dialog_width, dialog_height), 2)
+
+        # Titre
+        title_surface = font_medium.render(title, True, whiteColor)
+        title_rect = title_surface.get_rect(center=(dialog_x + dialog_width // 2, dialog_y + 25))
+        windowSurfaceObj.blit(title_surface, title_rect)
+
+        # Affichage de la valeur saisie (plus compact)
+        input_bg_rect = pygame.Rect(dialog_x + 20, dialog_y + 50, dialog_width - 40, 40)
+        pygame.draw.rect(windowSurfaceObj, blackColor, input_bg_rect)
+        pygame.draw.rect(windowSurfaceObj, greenColor, input_bg_rect, 2)
+
+        input_surface = font_medium.render(input_text if input_text else "0", True, whiteColor)
+        input_rect = input_surface.get_rect(center=input_bg_rect.center)
+        windowSurfaceObj.blit(input_surface, input_rect)
+
+        # Dessiner le clavier numérique
+        key_buttons = []
+        for row_idx, row in enumerate(keys):
+            for col_idx, key in enumerate(row):
+                x = dialog_x + (dialog_width - (len(row) * key_width + (len(row) - 1) * key_margin)) // 2 + col_idx * (key_width + key_margin)
+                y = keyboard_y + row_idx * (key_height + key_margin)
+
+                key_rect = pygame.Rect(x, y, key_width, key_height)
+                key_buttons.append((key_rect, key))
+
+                # Couleur du bouton
+                if key == 'Del':
+                    color = redColor
+                else:
+                    color = greyColor
+
+                pygame.draw.rect(windowSurfaceObj, color, key_rect)
+                pygame.draw.rect(windowSurfaceObj, whiteColor, key_rect, 2)
+
+                key_surface = font_medium.render(key, True, whiteColor)
+                key_text_rect = key_surface.get_rect(center=key_rect.center)
+                windowSurfaceObj.blit(key_surface, key_text_rect)
+
+        # Boutons OK et Annuler (positionnés sous le clavier)
+        button_y = dialog_y + dialog_height - 70
+        button_width = 120
+        button_spacing = 20
+        ok_rect = pygame.Rect(dialog_x + (dialog_width // 2) - button_width - (button_spacing // 2), button_y, button_width, 45)
+        cancel_rect = pygame.Rect(dialog_x + (dialog_width // 2) + (button_spacing // 2), button_y, button_width, 45)
+
+        pygame.draw.rect(windowSurfaceObj, greenColor, ok_rect)
+        pygame.draw.rect(windowSurfaceObj, whiteColor, ok_rect, 2)
+        ok_surface = font_small.render("OK", True, whiteColor)
+        ok_text_rect = ok_surface.get_rect(center=ok_rect.center)
+        windowSurfaceObj.blit(ok_surface, ok_text_rect)
+
+        pygame.draw.rect(windowSurfaceObj, redColor, cancel_rect)
+        pygame.draw.rect(windowSurfaceObj, whiteColor, cancel_rect, 2)
+        cancel_surface = font_small.render("Annuler", True, whiteColor)
+        cancel_text_rect = cancel_surface.get_rect(center=cancel_rect.center)
+        windowSurfaceObj.blit(cancel_surface, cancel_text_rect)
+
+        pygame.display.flip()
+
+        # Gestion des événements
+        for event in pygame.event.get():
+            if event.type == QUIT:
+                running = False
+                result = None
+            elif event.type == MOUSEBUTTONUP:
+                mouse_pos = event.pos
+
+                # Vérifier les touches du clavier
+                for key_rect, key in key_buttons:
+                    if key_rect.collidepoint(mouse_pos):
+                        if key == 'Del':
+                            input_text = input_text[:-1] if input_text else ""
+                        elif key == '.':
+                            if '.' not in input_text:
+                                input_text += key
+                        else:
+                            input_text += key
+                        break
+
+                # Vérifier le bouton OK
+                if ok_rect.collidepoint(mouse_pos):
+                    try:
+                        value = float(input_text) if input_text else current_value
+                        if min_value <= value <= max_value:
+                            result = value
+                            running = False
+                        else:
+                            # Valeur hors limites, afficher un message rapide
+                            input_text = str(current_value)
+                    except ValueError:
+                        input_text = str(current_value)
+
+                # Vérifier le bouton Annuler
+                if cancel_rect.collidepoint(mouse_pos):
+                    running = False
+                    result = None
+
+    # Restaurer l'écran
+    windowSurfaceObj.blit(screen_backup, (0, 0))
+    pygame.display.flip()
+
+    return result
+
 def text(col,row,fColor,top,upd,msg,fsize,bkgnd_Color):
     global bh,preview_width,fv,tduration,menu
     colors =  [dgryColor, greenColor, yellowColor, redColor, purpleColor, blueColor, whiteColor, greyColor, blackColor, purpleColor,lgrnColor,lpurColor,lyelColor]
@@ -3490,7 +3793,48 @@ def draw_bar(col,row,color,msg,value):
     if msg == "gain" and value > mag:
         pygame.draw.rect(windowSurfaceObj,(180,160,70),Rect(int(preview_width + int(col*bw) + 2 + jag),int(row * bh),int(j+1 - jag),int(bh/3)))
     pygame.draw.rect(windowSurfaceObj,(120,90,130),Rect(int(preview_width + int(col*bw) + j ),int(row * bh)+1,3,int(bh/3)))
+    # Dessiner l'icône de main pour les sliders EV, SPEED et GAIN
+    if msg in ["ev", "speed", "gain"]:
+        draw_hand_icon(col, row)
     pygame.display.update()
+
+def draw_hand_icon(col, row):
+    """
+    Dessine une icône de main au centre de la zone de click sous un slider.
+    Cette zone permet d'activer le pavé numérique pour saisir une valeur.
+    La main est dessinée dans la zone centrale (entre "-" et "+").
+    """
+    global bw, bh, preview_width, _font_cache
+
+    # Position de la zone centrale (entre "-" et "+")
+    # La zone de click est divisée en 3 parties: gauche (-), centre (main), droite (+)
+    bx = preview_width + (col * bw)
+    by = row * bh
+
+    # Zone de l'icône : au centre de la zone bh/3 à bh*2/3
+    # La zone de click totale va de bh/3 à bh*2/3 (hauteur bh/3)
+    icon_y = by + int(bh/3) + int(bh/12)  # Un peu en dessous du haut de la zone de click
+    icon_x = bx + int(bw/2) - int(bh/12)  # Centré horizontalement
+
+    # Taille de l'icône basée sur bh
+    icon_size = int(bh/6)
+
+    # Dessiner un petit rectangle de fond pour l'icône
+    icon_rect = pygame.Rect(icon_x - 2, icon_y - 2, icon_size + 4, icon_size + 4)
+    pygame.draw.rect(windowSurfaceObj, (60, 65, 70), icon_rect)  # Fond légèrement plus clair
+    pygame.draw.rect(windowSurfaceObj, (100, 110, 120), icon_rect, 1)  # Bordure
+
+    # Dessiner le symbole de la main (utiliser un caractère unicode ou dessiner simplement)
+    # On utilise le caractère unicode ✋ ou on dessine une main stylisée
+    cache_key = int(icon_size + 2)
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+
+    fontObj = _font_cache[cache_key]
+    # Utiliser le symbole "☰" (menu) ou "#" comme alternative simple
+    hand_surface = fontObj.render("#", True, (200, 200, 100))  # Jaune clair
+    hand_rect = hand_surface.get_rect(center=icon_rect.center)
+    windowSurfaceObj.blit(hand_surface, hand_rect)
 
 def draw_Vbar(col,row,color,msg,value):
     global bw,bh,preview_width,video_limits,livestack_limits
@@ -3549,8 +3893,1635 @@ def draw_Vbar(col,row,color,msg,value):
     j = min(j,bw-5)
     pygame.draw.rect(windowSurfaceObj,(120,110,130),Rect(int(preview_width + (col*bw) + 2),int(row * bh)+1,int(j+1),int(bh/3)))
     pygame.draw.rect(windowSurfaceObj,(120,90,130),Rect(int(preview_width + (col*bw) + j ),int(row * bh)+1,3,int(bh/3)))
-                
+
     pygame.display.update()
+
+# ============================================================================
+# STRETCH FULLSCREEN CONTROLS - Mode ajustement interactif des paramètres
+# ============================================================================
+
+def draw_stretch_hand_icon(screen_width, screen_height, active=False, is_raw_mode=False):
+    """
+    Dessine l'icône de réglage en haut à droite de l'écran en mode stretch fullscreen.
+    Cette icône permet d'activer/désactiver les contrôles de réglage.
+    Le texte s'adapte selon le mode: "ISP" pour RAW, "ADJ" pour RGB/YUV.
+
+    Args:
+        screen_width: Largeur de l'écran
+        screen_height: Hauteur de l'écran
+        active: True si les contrôles sont actifs
+        is_raw_mode: True si en mode RAW (affiche ISP), False pour RGB/YUV (affiche ADJ)
+    """
+    global windowSurfaceObj, _font_cache
+
+    # Taille et position de l'icône (coin supérieur droit)
+    icon_size = 50
+    margin = 15
+    icon_x = screen_width - icon_size - margin
+    icon_y = margin
+
+    # Couleur de fond selon l'état et le mode
+    if active:
+        if is_raw_mode:
+            bg_color = (120, 80, 80)  # Rouge/brun si actif en mode RAW
+            border_color = (180, 120, 120)
+        else:
+            bg_color = (80, 120, 80)  # Vert si actif en mode RGB/YUV
+            border_color = (120, 180, 120)
+    else:
+        bg_color = (60, 60, 70)  # Gris si inactif
+        border_color = (100, 100, 110)
+
+    # Dessiner le fond arrondi (simulé par rect avec bordure)
+    icon_rect = pygame.Rect(icon_x, icon_y, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg_color, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border_color, icon_rect, 2, border_radius=8)
+
+    # Dessiner le texte selon le mode
+    cache_key = 32
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    # Texte adapté au mode
+    icon_text = "ISP" if is_raw_mode else "ADJ"
+    text_color = (220, 220, 100) if active else (180, 180, 180)
+    hand_text = fontObj.render(icon_text, True, text_color)
+    hand_rect = hand_text.get_rect(center=icon_rect.center)
+    windowSurfaceObj.blit(hand_text, hand_rect)
+
+    return icon_rect  # Retourner le rect pour détecter les clics
+
+def draw_stretch_slider(x, y, width, height, label, value, vmin, vmax, color=(100, 140, 180)):
+    """
+    Dessine un slider horizontal pour ajuster un paramètre stretch.
+
+    Args:
+        x, y: Position du slider
+        width, height: Dimensions
+        label: Texte du label
+        value: Valeur actuelle
+        vmin, vmax: Plage de valeurs
+        color: Couleur du slider
+
+    Returns:
+        Rect du slider pour détection clics
+    """
+    global windowSurfaceObj, _font_cache
+
+    # Fond semi-transparent
+    slider_rect = pygame.Rect(x, y, width, height)
+    s = pygame.Surface((width, height), pygame.SRCALPHA)
+    s.fill((30, 30, 40, 200))
+    windowSurfaceObj.blit(s, (x, y))
+
+    # Label
+    cache_key = 18
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    # Afficher label et valeur
+    label_text = fontObj.render(f"{label}: {value:.2f}", True, (220, 220, 220))
+    windowSurfaceObj.blit(label_text, (x + 5, y + 2))
+
+    # Barre de progression
+    bar_y = y + 20
+    bar_height = height - 25
+    pygame.draw.rect(windowSurfaceObj, (50, 50, 60), (x + 5, bar_y, width - 10, bar_height))
+
+    # Position du curseur
+    if vmax > vmin:
+        ratio = (value - vmin) / (vmax - vmin)
+    else:
+        ratio = 0
+    cursor_x = x + 5 + int(ratio * (width - 15))
+
+    # Barre remplie
+    pygame.draw.rect(windowSurfaceObj, color, (x + 5, bar_y, cursor_x - x - 5, bar_height))
+
+    # Curseur
+    pygame.draw.rect(windowSurfaceObj, (200, 200, 220), (cursor_x, bar_y - 2, 5, bar_height + 4))
+
+    # Bordure
+    pygame.draw.rect(windowSurfaceObj, (80, 80, 90), slider_rect, 1)
+
+    return slider_rect
+
+def draw_stretch_controls(screen_width, screen_height, image_array=None):
+    """
+    Dessine les contrôles de réglage stretch sur l'écran en mode plein écran.
+    Affiche les sliders selon le preset actif (GHS ou Arcsinh).
+    Inclut également les sliders de gain et exposition pour YUV/RGB.
+
+    Args:
+        screen_width: Largeur de l'écran
+        screen_height: Hauteur de l'écran
+        image_array: Image numpy pour l'histogramme (optionnel)
+
+    Returns:
+        dict avec les rects des sliders pour détection des clics
+    """
+    global stretch_preset, ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
+    global stretch_factor, stretch_p_low, stretch_p_high
+    global windowSurfaceObj, _font_cache
+    global gain, ev, still_limits, custom_sspeed, sspeed
+
+    slider_rects = {}
+
+    # Dimensions des sliders
+    slider_width = 250
+    slider_height = 45
+    margin = 10
+    start_x = 20
+    start_y = 60
+
+    # Titre du mode actif
+    cache_key = 24
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    # Calculer la position Y pour les sliders Exposure (à droite)
+    exp_start_x = screen_width - slider_width - 40
+    exp_start_y = 60
+
+    if stretch_preset == 1:
+        # Mode GHS
+        title = "GHS Stretch"
+        title_color = (100, 200, 150)
+
+        title_text = fontObj.render(title, True, title_color)
+        windowSurfaceObj.blit(title_text, (start_x, 20))
+
+        # Sliders GHS
+        slider_rects['ghs_D'] = draw_stretch_slider(
+            start_x, start_y, slider_width, slider_height,
+            "D (Stretch)", ghs_D / 10.0, -1.0, 10.0, (100, 180, 140)
+        )
+
+        slider_rects['ghs_b'] = draw_stretch_slider(
+            start_x, start_y + slider_height + margin, slider_width, slider_height,
+            "b (Local Int)", ghs_b / 10.0, -30.0, 10.0, (100, 160, 180)
+        )
+
+        slider_rects['ghs_SP'] = draw_stretch_slider(
+            start_x, start_y + 2*(slider_height + margin), slider_width, slider_height,
+            "SP (Symmetry)", ghs_SP / 100.0, 0.0, 1.0, (180, 140, 100)
+        )
+
+        slider_rects['ghs_LP'] = draw_stretch_slider(
+            start_x, start_y + 3*(slider_height + margin), slider_width, slider_height,
+            "LP (Shadows)", ghs_LP / 100.0, 0.0, 1.0, (140, 100, 180)
+        )
+
+        slider_rects['ghs_HP'] = draw_stretch_slider(
+            start_x, start_y + 4*(slider_height + margin), slider_width, slider_height,
+            "HP (Highlights)", ghs_HP / 100.0, 0.0, 1.0, (180, 100, 140)
+        )
+
+    elif stretch_preset == 2:
+        # Mode Arcsinh
+        title = "Arcsinh Stretch"
+        title_color = (200, 150, 100)
+
+        title_text = fontObj.render(title, True, title_color)
+        windowSurfaceObj.blit(title_text, (start_x, 20))
+
+        # Sliders Arcsinh
+        slider_rects['stretch_factor'] = draw_stretch_slider(
+            start_x, start_y, slider_width, slider_height,
+            "Factor", stretch_factor / 10.0, 0.0, 8.0, (200, 160, 100)
+        )
+
+        slider_rects['stretch_p_low'] = draw_stretch_slider(
+            start_x, start_y + slider_height + margin, slider_width, slider_height,
+            "Clip Low %", stretch_p_low / 10.0, 0.0, 2.0, (180, 140, 100)
+        )
+
+        slider_rects['stretch_p_high'] = draw_stretch_slider(
+            start_x, start_y + 2*(slider_height + margin), slider_width, slider_height,
+            "Clip High %", stretch_p_high / 100.0, 99.5, 100.0, (100, 180, 140)
+        )
+    else:
+        # Mode OFF - pas de contrôles
+        title = "Stretch OFF"
+        title_color = (150, 150, 150)
+        title_text = fontObj.render(title, True, title_color)
+        windowSurfaceObj.blit(title_text, (start_x, 20))
+
+    # =========================================================================
+    # SECTION EXPOSURE (Gain + Temps d'exposition) - À droite de l'écran pour YUV/RGB
+    # =========================================================================
+    # Titre Exposure
+    cache_key_exp = 20
+    if cache_key_exp not in _font_cache:
+        _font_cache[cache_key_exp] = pygame.font.Font(None, cache_key_exp)
+    expFont = _font_cache[cache_key_exp]
+
+    exp_title = expFont.render("Exposure (YUV/RGB)", True, (200, 180, 100))
+    windowSurfaceObj.blit(exp_title, (exp_start_x, 20))
+
+    # Slider Gain (0 = AUTO, 1-300 = valeur fixe)
+    gain_max = 300  # Plage étendue pour astrophoto
+    gain_label = "AUTO" if gain == 0 else f"{gain:.0f}"
+    slider_rects['preview_gain'] = draw_stretch_slider(
+        exp_start_x, exp_start_y, slider_width, slider_height,
+        f"Gain ({gain_label})", float(gain), 0.0, float(gain_max), (180, 180, 100)
+    )
+
+    # Slider Temps d'exposition (0.001s à 20s) - échelle logarithmique
+    # custom_sspeed est en microsecondes (1000 = 1ms, 1000000 = 1s)
+    # Plage: 1000µs (1ms) à 20000000µs (20s)
+    exp_min_us = 1000        # 1ms = 0.001s
+    exp_max_us = 20000000    # 20s
+    current_exp_us = custom_sspeed if custom_sspeed > 0 else sspeed
+    current_exp_us = max(exp_min_us, min(exp_max_us, current_exp_us))
+
+    # Afficher en format lisible
+    if current_exp_us >= 1000000:
+        exp_label = f"{current_exp_us / 1000000:.1f}s"
+    elif current_exp_us >= 1000:
+        exp_label = f"{current_exp_us / 1000:.0f}ms"
+    else:
+        exp_label = f"{current_exp_us}µs"
+
+    # Position logarithmique pour le slider (0 à 1)
+    import math
+    log_min = math.log10(exp_min_us)
+    log_max = math.log10(exp_max_us)
+    log_current = math.log10(current_exp_us)
+    exp_ratio = (log_current - log_min) / (log_max - log_min)
+
+    slider_rects['preview_exposure'] = draw_stretch_slider(
+        exp_start_x, exp_start_y + slider_height + margin, slider_width, slider_height,
+        f"Expo ({exp_label})", exp_ratio, 0.0, 1.0, (100, 180, 180)
+    )
+
+    # Dessiner l'histogramme en bas de l'écran
+    if image_array is not None:
+        draw_stretch_histogram(screen_width, screen_height, image_array)
+
+    return slider_rects
+
+def draw_stretch_histogram(screen_width, screen_height, image_array):
+    """
+    Dessine l'histogramme de l'image en bas de l'écran en mode stretch.
+    Version optimisée avec lissage et rendu rapide.
+    Affiche également la courbe de transformation (GHS ou Arcsinh) en violet.
+
+    Args:
+        screen_width: Largeur de l'écran
+        screen_height: Hauteur de l'écran
+        image_array: Image numpy (H, W, 3) en RGB
+    """
+    global windowSurfaceObj
+    global stretch_preset, stretch_factor, stretch_p_low, stretch_p_high
+    global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
+
+    # Dimensions de l'histogramme
+    hist_height = 120
+    hist_y = screen_height - hist_height - 10
+    hist_width = screen_width - 40
+    hist_x = 20
+
+    # Fond semi-transparent
+    s = pygame.Surface((hist_width, hist_height), pygame.SRCALPHA)
+    s.fill((20, 20, 30, 220))
+    windowSurfaceObj.blit(s, (hist_x, hist_y))
+
+    # Bordure
+    pygame.draw.rect(windowSurfaceObj, (80, 80, 100), (hist_x, hist_y, hist_width, hist_height), 1)
+
+    try:
+        # OPTIMISATION 1: Sous-échantillonner l'image (1 pixel sur 4)
+        # Réduit drastiquement le temps de calcul sans perte de précision visible
+        h, w = image_array.shape[:2]
+        step = max(1, min(h, w) // 256)  # Adapter le pas à la taille de l'image
+        img_sampled = image_array[::step, ::step]
+
+        # S'assurer que l'image est en uint8
+        if img_sampled.dtype == np.float32:
+            img_sampled = np.clip(img_sampled, 0, 255).astype(np.uint8)
+
+        # OPTIMISATION 2: Utiliser 64 bins au lieu de 256 (plus lisse naturellement)
+        num_bins = 64
+        bins = np.linspace(0, 256, num_bins + 1)
+
+        # Calculer les histogrammes avec moins de bins
+        hist_r, _ = np.histogram(img_sampled[:,:,0].ravel(), bins=bins)
+        hist_g, _ = np.histogram(img_sampled[:,:,1].ravel(), bins=bins)
+        hist_b, _ = np.histogram(img_sampled[:,:,2].ravel(), bins=bins)
+
+        # Luminance optimisée (calcul vectorisé sur image sous-échantillonnée)
+        # Utiliser une approximation rapide: (R + G + G + B) / 4
+        gray = ((img_sampled[:,:,0].astype(np.uint16) +
+                 img_sampled[:,:,1].astype(np.uint16) * 2 +
+                 img_sampled[:,:,2].astype(np.uint16)) >> 2).astype(np.uint8)
+        hist_l, _ = np.histogram(gray.ravel(), bins=bins)
+
+        # OPTIMISATION 3: Lissage par moyenne mobile (kernel size 3)
+        def smooth_hist(h):
+            # Padding pour éviter les effets de bord
+            padded = np.concatenate([[h[0]], h, [h[-1]]])
+            # Moyenne mobile de 3 points
+            return ((padded[:-2] + padded[1:-1] + padded[2:]) / 3.0)
+
+        hist_r = smooth_hist(hist_r.astype(np.float32))
+        hist_g = smooth_hist(hist_g.astype(np.float32))
+        hist_b = smooth_hist(hist_b.astype(np.float32))
+        hist_l = smooth_hist(hist_l.astype(np.float32))
+
+        # Normaliser avec échelle logarithmique douce pour mieux voir les détails
+        # Évite que les pics dominent complètement
+        def normalize_log(h, max_height):
+            h_log = np.log1p(h)  # log(1 + x) pour éviter log(0)
+            max_val = h_log.max()
+            if max_val > 0:
+                return (h_log / max_val * max_height).astype(int)
+            return np.zeros_like(h, dtype=int)
+
+        draw_height = hist_height - 20
+        hist_r = normalize_log(hist_r, draw_height)
+        hist_g = normalize_log(hist_g, draw_height)
+        hist_b = normalize_log(hist_b, draw_height)
+        hist_l = normalize_log(hist_l, draw_height)
+
+        # OPTIMISATION 4: Utiliser pygame.draw.lines (un seul appel par courbe)
+        bin_width = hist_width / num_bins
+        base_y = hist_y + hist_height - 10
+
+        # Préparer les listes de points pour chaque canal
+        x_coords = np.linspace(hist_x, hist_x + hist_width, num_bins).astype(int)
+
+        # Fonction pour créer la liste de points
+        def make_points(hist_data):
+            return [(int(x_coords[i]), int(base_y - hist_data[i])) for i in range(num_bins)]
+
+        # Dessiner les courbes avec pygame.draw.lines (beaucoup plus rapide)
+        # Ordre: Luminance en fond, puis R, G, B
+        points_l = make_points(hist_l)
+        points_r = make_points(hist_r)
+        points_g = make_points(hist_g)
+        points_b = make_points(hist_b)
+
+        if len(points_l) > 1:
+            pygame.draw.lines(windowSurfaceObj, (180, 180, 180), False, points_l, 2)
+        if len(points_r) > 1:
+            pygame.draw.lines(windowSurfaceObj, (255, 80, 80), False, points_r, 2)
+        if len(points_g) > 1:
+            pygame.draw.lines(windowSurfaceObj, (80, 255, 80), False, points_g, 2)
+        if len(points_b) > 1:
+            pygame.draw.lines(windowSurfaceObj, (80, 80, 255), False, points_b, 2)
+
+        # =====================================================================
+        # COURBE DE TRANSFORMATION EN VIOLET (GHS ou Arcsinh)
+        # =====================================================================
+        if stretch_preset > 0:
+            try:
+                # Calculer la courbe de transformation sur 64 points (même résolution que l'histogramme)
+                x_norm = np.linspace(0, 1, num_bins)  # Entrée normalisée [0, 1]
+                y_transform = np.zeros(num_bins)
+
+                if stretch_preset == 1:
+                    # GHS - Generalized Hyperbolic Stretch
+                    D = ghs_D / 10.0
+                    b = ghs_b / 10.0
+                    SP = ghs_SP / 100.0
+                    LP = ghs_LP / 100.0
+                    HP = ghs_HP / 100.0
+
+                    epsilon = 1e-10
+                    LP = max(0.0, min(LP, SP))
+                    HP = max(SP, min(HP, 1.0))
+
+                    if abs(D) >= epsilon:
+                        # Fonction de transformation de base T(x)
+                        def T_base_curve(x, D_val, b_val):
+                            if abs(b_val - (-1.0)) < epsilon:
+                                return np.log1p(D_val * x)
+                            elif b_val < 0 and abs(b_val - (-1.0)) >= epsilon:
+                                base = np.maximum(1.0 - b_val * D_val * x, epsilon)
+                                exponent = (b_val + 1.0) / b_val
+                                return (1.0 - np.power(base, exponent)) / (D_val * (b_val + 1.0))
+                            elif abs(b_val) < epsilon:
+                                return 1.0 - np.exp(-D_val * x)
+                            elif abs(b_val - 1.0) < epsilon:
+                                return 1.0 - 1.0 / (1.0 + D_val * x)
+                            else:
+                                base = np.maximum(1.0 + b_val * D_val * x, epsilon)
+                                return 1.0 - np.power(base, -1.0 / b_val)
+
+                        def T_prime_curve(x, D_val, b_val):
+                            if abs(b_val - (-1.0)) < epsilon:
+                                return D_val / (1.0 + D_val * x)
+                            elif b_val < 0 and abs(b_val - (-1.0)) >= epsilon:
+                                base = np.maximum(1.0 - b_val * D_val * x, epsilon)
+                                return np.power(base, 1.0 / b_val)
+                            elif abs(b_val) < epsilon:
+                                return D_val * np.exp(-D_val * x)
+                            elif abs(b_val - 1.0) < epsilon:
+                                return D_val * np.power(1.0 + D_val * x, -2.0)
+                            else:
+                                base = np.maximum(1.0 + b_val * D_val * x, epsilon)
+                                return D_val * np.power(base, -(1.0 + b_val) / b_val)
+
+                        # Calculer les valeurs aux bornes
+                        T2_LP = -T_base_curve(SP - LP, D, b)
+                        T2_prime_LP = T_prime_curve(SP - LP, D, b)
+                        T3_HP = T_base_curve(HP - SP, D, b)
+                        T3_prime_HP = T_prime_curve(HP - SP, D, b)
+
+                        T1_0 = T2_prime_LP * (0.0 - LP) + T2_LP
+                        T4_1 = T3_prime_HP * (1.0 - HP) + T3_HP
+                        norm_range = T4_1 - T1_0
+
+                        if abs(norm_range) >= epsilon:
+                            for i, x in enumerate(x_norm):
+                                if x < LP:
+                                    y = T2_prime_LP * (x - LP) + T2_LP
+                                elif x < SP:
+                                    y = -T_base_curve(SP - x, D, b)
+                                elif x < HP:
+                                    y = T_base_curve(x - SP, D, b)
+                                else:
+                                    y = T3_prime_HP * (x - HP) + T3_HP
+                                y_transform[i] = (y - T1_0) / norm_range
+                        else:
+                            y_transform = x_norm.copy()
+                    else:
+                        y_transform = x_norm.copy()
+
+                elif stretch_preset == 2:
+                    # Arcsinh stretch
+                    factor = stretch_factor / 10.0
+                    if factor > 0.01:
+                        # Éviter division par zéro si arcsinh(factor) est très petit
+                        arcsinh_factor = np.arcsinh(factor)
+                        if arcsinh_factor > 1e-10:
+                            y_transform = np.arcsinh(x_norm * factor) / arcsinh_factor
+                        else:
+                            y_transform = x_norm.copy()
+                    else:
+                        y_transform = x_norm.copy()
+
+                # Clip et création des points pour la courbe
+                y_transform = np.clip(y_transform, 0, 1)
+
+                # Convertir en coordonnées écran
+                # x_coords est déjà défini pour l'histogramme
+                curve_points = [(int(x_coords[i]), int(base_y - y_transform[i] * draw_height))
+                               for i in range(num_bins)]
+
+                # Dessiner la courbe de transformation en VIOLET (épaisseur 3 pour visibilité)
+                if len(curve_points) > 1:
+                    pygame.draw.lines(windowSurfaceObj, (180, 80, 255), False, curve_points, 3)
+
+            except Exception as curve_error:
+                # Afficher l'erreur pour debug
+                print(f"[HISTOGRAM] Erreur courbe: {curve_error}")
+
+    except Exception as e:
+        # En cas d'erreur silencieuse
+        pass
+
+def handle_stretch_slider_click(mousex, mousey, slider_rects):
+    """
+    Gère le clic sur un slider stretch et met à jour la valeur correspondante.
+    Inclut aussi les sliders de gain et ev pour YUV/RGB.
+
+    Args:
+        mousex, mousey: Position du clic
+        slider_rects: Dict des rectangles des sliders
+
+    Returns:
+        True si un slider a été modifié, False sinon
+    """
+    global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
+    global stretch_factor, stretch_p_low, stretch_p_high
+    global gain, ev, still_limits, custom_sspeed
+
+    for name, rect in slider_rects.items():
+        if rect.collidepoint(mousex, mousey):
+            # Calculer la position relative dans le slider
+            rel_x = mousex - rect.x - 5
+            slider_width = rect.width - 10
+            ratio = max(0, min(1, rel_x / slider_width))
+
+            # Mettre à jour la valeur selon le slider
+            if name == 'ghs_D':
+                # D: -1.0 à 10.0, stocké x10
+                ghs_D = int(-10 + ratio * 110)
+            elif name == 'ghs_b':
+                # b: -30.0 à 10.0, stocké x10
+                ghs_b = int(-300 + ratio * 400)
+            elif name == 'ghs_SP':
+                # SP: 0.0 à 1.0, stocké x100
+                ghs_SP = int(ratio * 100)
+            elif name == 'ghs_LP':
+                # LP: 0.0 à 1.0, stocké x100
+                ghs_LP = int(ratio * 100)
+            elif name == 'ghs_HP':
+                # HP: 0.0 à 1.0, stocké x100
+                ghs_HP = int(ratio * 100)
+            elif name == 'stretch_factor':
+                # Factor: 0.0 à 8.0, stocké x10
+                stretch_factor = int(ratio * 80)
+                print(f"[ARCSINH] stretch_factor = {stretch_factor} (factor={stretch_factor/10.0})")
+            elif name == 'stretch_p_low':
+                # Clip low: 0.0 à 2.0, stocké x10
+                stretch_p_low = int(ratio * 20)
+                print(f"[ARCSINH] stretch_p_low = {stretch_p_low}")
+            elif name == 'stretch_p_high':
+                # Clip high: 99.5 à 100.0, stocké x100
+                stretch_p_high = int(9950 + ratio * 50)
+                print(f"[ARCSINH] stretch_p_high = {stretch_p_high}")
+            # Sliders Gain et Exposition pour YUV/RGB
+            elif name == 'preview_gain':
+                # Gain: 0 à 300 (0 = AUTO)
+                gain_max = 300  # Plage étendue pour astrophoto
+                gain = int(ratio * gain_max)
+                # Appliquer immédiatement les changements à la caméra
+                apply_gain_exposure_to_camera()
+            elif name == 'preview_exposure':
+                # Exposition: échelle logarithmique de 1ms à 20s
+                import math
+                exp_min_us = 1000        # 1ms
+                exp_max_us = 20000000    # 20s
+                log_min = math.log10(exp_min_us)
+                log_max = math.log10(exp_max_us)
+                # Convertir le ratio (0-1) en valeur logarithmique
+                log_value = log_min + ratio * (log_max - log_min)
+                custom_sspeed = int(10 ** log_value)
+                # Appliquer immédiatement les changements à la caméra
+                apply_gain_exposure_to_camera()
+
+            return True
+
+    return False
+
+def is_click_on_stretch_hand_icon(mousex, mousey, screen_width):
+    """
+    Vérifie si le clic est sur l'icône de main en mode stretch.
+
+    Args:
+        mousex, mousey: Position du clic
+        screen_width: Largeur de l'écran
+
+    Returns:
+        True si clic sur l'icône, False sinon
+    """
+    icon_size = 50
+    margin = 15
+    icon_x = screen_width - icon_size - margin
+    icon_y = margin
+
+    return (icon_x <= mousex <= icon_x + icon_size and
+            icon_y <= mousey <= icon_y + icon_size)
+
+# ============================================================================
+# FIN STRETCH FULLSCREEN CONTROLS
+# ============================================================================
+
+def draw_livestack_button(screen_width, screen_height, is_raw_mode=False):
+    """
+    Dessine le bouton Live Stack à côté de l'icône ISP/ADJ en mode stretch fullscreen.
+    Position: à gauche de ISP (mode RAW) ou à gauche de ADJ (mode RGB/YUV)
+
+    Args:
+        screen_width: Largeur de l'écran
+        screen_height: Hauteur de l'écran
+        is_raw_mode: True si en mode RAW (bouton à gauche de ISP)
+
+    Returns:
+        Rect du bouton pour détecter les clics
+    """
+    global windowSurfaceObj, _font_cache
+
+    # Taille et position du bouton
+    icon_size = 50
+    margin = 15
+    adj_icon_x = screen_width - icon_size - margin  # Position ISP/ADJ
+    icon_x = adj_icon_x - icon_size - 10  # STACK à gauche de ISP/ADJ
+    icon_y = margin
+
+    # Couleur du bouton (vert pour indiquer action de lancement)
+    bg_color = (60, 90, 60)  # Vert foncé
+    border_color = (100, 150, 100)
+    text_color = (150, 220, 150)
+
+    # Dessiner le fond arrondi
+    icon_rect = pygame.Rect(icon_x, icon_y, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg_color, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border_color, icon_rect, 2, border_radius=8)
+
+    # Dessiner le texte "STACK"
+    cache_key = 20
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    stack_text = fontObj.render("STACK", True, text_color)
+    stack_rect = stack_text.get_rect(center=icon_rect.center)
+    windowSurfaceObj.blit(stack_text, stack_rect)
+
+    return icon_rect
+
+
+def is_click_on_livestack_button(mousex, mousey, screen_width):
+    """
+    Vérifie si le clic est sur le bouton Live Stack.
+
+    Args:
+        mousex, mousey: Position du clic
+        screen_width: Largeur de l'écran
+
+    Returns:
+        True si clic sur le bouton, False sinon
+    """
+    icon_size = 50
+    margin = 15
+    adj_icon_x = screen_width - icon_size - margin  # Position ISP/ADJ
+    icon_x = adj_icon_x - icon_size - 10  # STACK à gauche de ISP/ADJ
+    icon_y = margin
+
+    return (icon_x <= mousex <= icon_x + icon_size and
+            icon_y <= mousey <= icon_y + icon_size)
+
+
+# ============================================================================
+# RAW FULLSCREEN CONTROLS - Mode ajustement ISP/Stretch en temps réel
+# ============================================================================
+
+def draw_raw_hand_icon(screen_width, screen_height, active=False):
+    """
+    Dessine l'icône "RAW" à gauche de l'icône ADJ en mode stretch fullscreen.
+    Cette icône permet d'activer/désactiver le panneau de réglage RAW/ISP.
+
+    Args:
+        screen_width: Largeur de l'écran
+        screen_height: Hauteur de l'écran
+        active: True si le panneau RAW est actif
+
+    Returns:
+        Rect de l'icône pour détecter les clics
+    """
+    global windowSurfaceObj, _font_cache
+
+    # Taille et position de l'icône (à gauche de ADJ)
+    icon_size = 50
+    margin = 15
+    adj_icon_x = screen_width - icon_size - margin  # Position ADJ
+    icon_x = adj_icon_x - icon_size - 10  # RAW à gauche de ADJ
+    icon_y = margin
+
+    # Couleur de fond selon l'état
+    if active:
+        bg_color = (120, 80, 80)  # Rouge si actif
+        border_color = (180, 120, 120)
+    else:
+        bg_color = (60, 60, 70)  # Gris si inactif
+        border_color = (100, 100, 110)
+
+    # Dessiner le fond arrondi
+    icon_rect = pygame.Rect(icon_x, icon_y, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg_color, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border_color, icon_rect, 2, border_radius=8)
+
+    # Dessiner le texte "RAW"
+    cache_key = 28
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    raw_text = fontObj.render("RAW", True, (220, 100, 100) if active else (180, 180, 180))
+    raw_rect = raw_text.get_rect(center=icon_rect.center)
+    windowSurfaceObj.blit(raw_text, raw_rect)
+
+    return icon_rect
+
+
+def draw_raw_tab_buttons(start_x, start_y, active_tab):
+    """
+    Dessine les onglets ISP/STRETCH en haut du panneau RAW.
+
+    Args:
+        start_x, start_y: Position de départ
+        active_tab: 0=ISP, 1=Stretch
+
+    Returns:
+        Tuple (isp_rect, stretch_rect) pour détection des clics
+    """
+    global windowSurfaceObj, _font_cache
+
+    tab_width = 100
+    tab_height = 30
+    tab_spacing = 5
+
+    # Onglet ISP
+    isp_rect = pygame.Rect(start_x, start_y, tab_width, tab_height)
+    if active_tab == 0:
+        pygame.draw.rect(windowSurfaceObj, (80, 100, 120), isp_rect, border_radius=5)
+        text_color = (220, 220, 255)
+    else:
+        pygame.draw.rect(windowSurfaceObj, (50, 55, 65), isp_rect, border_radius=5)
+        text_color = (150, 150, 160)
+    pygame.draw.rect(windowSurfaceObj, (100, 110, 130), isp_rect, 1, border_radius=5)
+
+    cache_key = 22
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    isp_text = fontObj.render("ISP", True, text_color)
+    isp_text_rect = isp_text.get_rect(center=isp_rect.center)
+    windowSurfaceObj.blit(isp_text, isp_text_rect)
+
+    # Onglet STRETCH
+    stretch_rect = pygame.Rect(start_x + tab_width + tab_spacing, start_y, tab_width, tab_height)
+    if active_tab == 1:
+        pygame.draw.rect(windowSurfaceObj, (80, 100, 120), stretch_rect, border_radius=5)
+        text_color = (220, 220, 255)
+    else:
+        pygame.draw.rect(windowSurfaceObj, (50, 55, 65), stretch_rect, border_radius=5)
+        text_color = (150, 150, 160)
+    pygame.draw.rect(windowSurfaceObj, (100, 110, 130), stretch_rect, 1, border_radius=5)
+
+    stretch_text = fontObj.render("STRETCH", True, text_color)
+    stretch_text_rect = stretch_text.get_rect(center=stretch_rect.center)
+    windowSurfaceObj.blit(stretch_text, stretch_text_rect)
+
+    return (isp_rect, stretch_rect)
+
+
+def draw_raw_isp_slider(x, y, width, height, label, value, vmin, vmax, color=(100, 140, 180)):
+    """
+    Dessine un slider horizontal pour ajuster un paramètre ISP.
+    """
+    global windowSurfaceObj, _font_cache
+
+    # Fond semi-transparent
+    slider_rect = pygame.Rect(x, y, width, height)
+    s = pygame.Surface((width, height), pygame.SRCALPHA)
+    s.fill((30, 30, 40, 200))
+    windowSurfaceObj.blit(s, (x, y))
+
+    # Label
+    cache_key = 16
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    # Afficher label et valeur formatée
+    if isinstance(value, int):
+        label_text = fontObj.render(f"{label}: {value}", True, (220, 220, 220))
+    else:
+        label_text = fontObj.render(f"{label}: {value:.2f}", True, (220, 220, 220))
+    windowSurfaceObj.blit(label_text, (x + 5, y + 2))
+
+    # Barre de progression
+    bar_y = y + 18
+    bar_height = height - 22
+    pygame.draw.rect(windowSurfaceObj, (50, 50, 60), (x + 5, bar_y, width - 10, bar_height))
+
+    # Position du curseur
+    if vmax > vmin:
+        ratio = (value - vmin) / (vmax - vmin)
+    else:
+        ratio = 0
+    cursor_x = x + 5 + int(ratio * (width - 15))
+
+    # Barre remplie
+    pygame.draw.rect(windowSurfaceObj, color, (x + 5, bar_y, cursor_x - x - 5, bar_height))
+
+    # Curseur
+    pygame.draw.rect(windowSurfaceObj, (200, 200, 220), (cursor_x, bar_y - 2, 5, bar_height + 4))
+
+    # Bordure
+    pygame.draw.rect(windowSurfaceObj, (80, 80, 90), slider_rect, 1)
+
+    return slider_rect
+
+
+def draw_raw_action_buttons(start_x, start_y):
+    """
+    Dessine les boutons RESET et SAVE pour le panneau RAW.
+
+    Returns:
+        Tuple (reset_rect, save_rect) pour détection des clics
+    """
+    global windowSurfaceObj, _font_cache
+
+    btn_width = 80
+    btn_height = 28
+    btn_spacing = 15
+
+    cache_key = 20
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    # Bouton RESET
+    reset_rect = pygame.Rect(start_x, start_y, btn_width, btn_height)
+    pygame.draw.rect(windowSurfaceObj, (80, 60, 60), reset_rect, border_radius=5)
+    pygame.draw.rect(windowSurfaceObj, (120, 90, 90), reset_rect, 2, border_radius=5)
+    reset_text = fontObj.render("RESET", True, (220, 180, 180))
+    reset_text_rect = reset_text.get_rect(center=reset_rect.center)
+    windowSurfaceObj.blit(reset_text, reset_text_rect)
+
+    # Bouton SAVE
+    save_rect = pygame.Rect(start_x + btn_width + btn_spacing, start_y, btn_width, btn_height)
+    pygame.draw.rect(windowSurfaceObj, (60, 80, 60), save_rect, border_radius=5)
+    pygame.draw.rect(windowSurfaceObj, (90, 120, 90), save_rect, 2, border_radius=5)
+    save_text = fontObj.render("SAVE", True, (180, 220, 180))
+    save_text_rect = save_text.get_rect(center=save_rect.center)
+    windowSurfaceObj.blit(save_text, save_text_rect)
+
+    return (reset_rect, save_rect)
+
+
+def draw_raw_controls(screen_width, screen_height, image_array=None):
+    """
+    Dessine le panneau complet de réglage RAW avec onglets ISP/Stretch.
+    Inclut également les sliders de gain et exposition pour RAW.
+
+    Args:
+        screen_width: Largeur de l'écran
+        screen_height: Hauteur de l'écran
+        image_array: Image numpy pour l'histogramme (optionnel)
+
+    Returns:
+        dict avec les rects des contrôles pour détection des clics
+    """
+    global raw_adjust_tab, windowSurfaceObj, _font_cache
+    global isp_wb_red, isp_wb_green, isp_wb_blue, isp_gamma, isp_black_level
+    global isp_brightness, isp_contrast, isp_saturation, isp_sharpening
+    global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
+    global stretch_preset, stretch_factor, stretch_p_low, stretch_p_high
+    global gain, ev, still_limits, custom_sspeed, sspeed
+
+    control_rects = {}
+
+    # Dimensions du panneau
+    panel_width = 280
+    panel_margin = 20
+    start_x = panel_margin
+    start_y = 70
+
+    # Titre
+    cache_key = 26
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    title_text = fontObj.render("RAW Adjustment Panel", True, (200, 150, 150))
+    windowSurfaceObj.blit(title_text, (start_x, 20))
+
+    # =========================================================================
+    # SECTION EXPOSURE (Gain + EV) - À droite de l'écran pour RAW
+    # =========================================================================
+    exp_slider_width = 250
+    exp_slider_height = 45
+    exp_margin = 10
+    exp_start_x = screen_width - exp_slider_width - 40
+    exp_start_y = 60
+
+    # Titre Exposure
+    cache_key_exp = 20
+    if cache_key_exp not in _font_cache:
+        _font_cache[cache_key_exp] = pygame.font.Font(None, cache_key_exp)
+    expFont = _font_cache[cache_key_exp]
+
+    exp_title = expFont.render("Exposure (RAW)", True, (200, 120, 120))
+    windowSurfaceObj.blit(exp_title, (exp_start_x, 20))
+
+    # Slider Gain (0 = AUTO, 1-300 = valeur fixe)
+    gain_max = 300  # Plage étendue pour astrophoto
+    gain_label = "AUTO" if gain == 0 else f"{gain:.0f}"
+    control_rects['raw_gain'] = draw_raw_isp_slider(
+        exp_start_x, exp_start_y, exp_slider_width, exp_slider_height,
+        f"Gain ({gain_label})", float(gain), 0.0, float(gain_max), (200, 160, 100)
+    )
+
+    # Slider Temps d'exposition (0.001s à 20s) - échelle logarithmique
+    # custom_sspeed est en microsecondes (1000 = 1ms, 1000000 = 1s)
+    # Plage: 1000µs (1ms) à 20000000µs (20s)
+    exp_min_us = 1000        # 1ms = 0.001s
+    exp_max_us = 20000000    # 20s
+    current_exp_us = custom_sspeed if custom_sspeed > 0 else sspeed
+    current_exp_us = max(exp_min_us, min(exp_max_us, current_exp_us))
+
+    # Afficher en format lisible
+    if current_exp_us >= 1000000:
+        exp_label = f"{current_exp_us / 1000000:.1f}s"
+    elif current_exp_us >= 1000:
+        exp_label = f"{current_exp_us / 1000:.0f}ms"
+    else:
+        exp_label = f"{current_exp_us}µs"
+
+    # Position logarithmique pour le slider (0 à 1)
+    import math
+    log_min = math.log10(exp_min_us)
+    log_max = math.log10(exp_max_us)
+    log_current = math.log10(current_exp_us)
+    exp_ratio = (log_current - log_min) / (log_max - log_min)
+
+    control_rects['raw_exposure'] = draw_raw_isp_slider(
+        exp_start_x, exp_start_y + exp_slider_height + exp_margin, exp_slider_width, exp_slider_height,
+        f"Expo ({exp_label})", exp_ratio, 0.0, 1.0, (100, 180, 180)
+    )
+
+    # Onglets
+    isp_tab_rect, stretch_tab_rect = draw_raw_tab_buttons(start_x, 50, raw_adjust_tab)
+    control_rects['tab_isp'] = isp_tab_rect
+    control_rects['tab_stretch'] = stretch_tab_rect
+
+    slider_width = 250
+    slider_height = 38
+    margin = 6
+
+    if raw_adjust_tab == 0:
+        # Onglet ISP - 9 sliders
+        cache_key_section = 18
+        if cache_key_section not in _font_cache:
+            _font_cache[cache_key_section] = pygame.font.Font(None, cache_key_section)
+        sectionFont = _font_cache[cache_key_section]
+
+        # Section White Balance
+        section_text = sectionFont.render("White Balance:", True, (150, 180, 200))
+        windowSurfaceObj.blit(section_text, (start_x, start_y))
+        start_y += 18
+
+        control_rects['isp_wb_red'] = draw_raw_isp_slider(
+            start_x, start_y, slider_width, slider_height,
+            "R Gain", isp_wb_red / 100.0, 0.5, 2.0, (180, 100, 100)
+        )
+        control_rects['isp_wb_green'] = draw_raw_isp_slider(
+            start_x, start_y + slider_height + margin, slider_width, slider_height,
+            "G Gain", isp_wb_green / 100.0, 0.5, 2.0, (100, 180, 100)
+        )
+        control_rects['isp_wb_blue'] = draw_raw_isp_slider(
+            start_x, start_y + 2*(slider_height + margin), slider_width, slider_height,
+            "B Gain", isp_wb_blue / 100.0, 0.5, 2.0, (100, 100, 180)
+        )
+
+        # Section Tone
+        start_y += 3*(slider_height + margin) + 10
+        section_text = sectionFont.render("Tone:", True, (150, 180, 200))
+        windowSurfaceObj.blit(section_text, (start_x, start_y))
+        start_y += 18
+
+        control_rects['isp_gamma'] = draw_raw_isp_slider(
+            start_x, start_y, slider_width, slider_height,
+            "Gamma", isp_gamma / 100.0, 0.5, 3.0, (180, 160, 100)
+        )
+        control_rects['isp_black_level'] = draw_raw_isp_slider(
+            start_x, start_y + slider_height + margin, slider_width, slider_height,
+            "Black Level", isp_black_level, 0, 500, (120, 120, 140)
+        )
+        control_rects['isp_brightness'] = draw_raw_isp_slider(
+            start_x, start_y + 2*(slider_height + margin), slider_width, slider_height,
+            "Brightness", isp_brightness / 100.0, -0.5, 0.5, (160, 160, 180)
+        )
+        control_rects['isp_contrast'] = draw_raw_isp_slider(
+            start_x, start_y + 3*(slider_height + margin), slider_width, slider_height,
+            "Contrast", isp_contrast / 100.0, 0.5, 2.0, (140, 180, 160)
+        )
+
+        # Section Color/Detail - À DROITE sous les sliders Gain/Expo
+        # Position sous les sliders Gain et Exposure (à droite de l'écran)
+        color_start_y = exp_start_y + 2*(exp_slider_height + exp_margin) + 20
+        section_text = sectionFont.render("Color/Detail:", True, (150, 180, 200))
+        windowSurfaceObj.blit(section_text, (exp_start_x, color_start_y))
+        color_start_y += 18
+
+        control_rects['isp_saturation'] = draw_raw_isp_slider(
+            exp_start_x, color_start_y, exp_slider_width, slider_height,
+            "Saturation", isp_saturation / 100.0, 0.0, 2.0, (180, 140, 180)
+        )
+        control_rects['isp_sharpening'] = draw_raw_isp_slider(
+            exp_start_x, color_start_y + slider_height + margin, exp_slider_width, slider_height,
+            "Sharpening", isp_sharpening / 100.0, 0.0, 2.0, (140, 160, 180)
+        )
+
+        # Boutons RESET et SAVE - À DROITE sous Color/Detail
+        color_start_y += 2*(slider_height + margin) + 15
+        reset_rect, save_rect = draw_raw_action_buttons(exp_start_x, color_start_y)
+        control_rects['reset'] = reset_rect
+        control_rects['save'] = save_rect
+
+    else:
+        # Onglet STRETCH - Affiche GHS ou Arcsinh selon stretch_preset
+        cache_key_title = 22
+        if cache_key_title not in _font_cache:
+            _font_cache[cache_key_title] = pygame.font.Font(None, cache_key_title)
+        titleFont = _font_cache[cache_key_title]
+
+        if stretch_preset == 2:
+            # Mode Arcsinh
+            title = titleFont.render("Arcsinh Stretch Parameters", True, (200, 150, 100))
+            windowSurfaceObj.blit(title, (start_x, start_y))
+            start_y += 25
+
+            control_rects['stretch_factor'] = draw_raw_isp_slider(
+                start_x, start_y, slider_width, slider_height,
+                "Factor", stretch_factor / 10.0, 0.0, 8.0, (200, 160, 100)
+            )
+            control_rects['stretch_p_low'] = draw_raw_isp_slider(
+                start_x, start_y + slider_height + margin, slider_width, slider_height,
+                "Clip Low %", stretch_p_low / 10.0, 0.0, 2.0, (180, 140, 100)
+            )
+            control_rects['stretch_p_high'] = draw_raw_isp_slider(
+                start_x, start_y + 2*(slider_height + margin), slider_width, slider_height,
+                "Clip High %", stretch_p_high / 100.0, 99.5, 100.0, (100, 180, 140)
+            )
+
+            # Boutons RESET et SAVE pour stretch aussi
+            start_y += 3*(slider_height + margin) + 15
+            reset_rect, save_rect = draw_raw_action_buttons(start_x, start_y)
+            control_rects['reset'] = reset_rect
+            control_rects['save'] = save_rect
+        else:
+            # Mode GHS (par défaut)
+            title = titleFont.render("GHS Stretch Parameters", True, (100, 200, 150))
+            windowSurfaceObj.blit(title, (start_x, start_y))
+            start_y += 25
+
+            control_rects['ghs_D'] = draw_raw_isp_slider(
+                start_x, start_y, slider_width, slider_height,
+                "D (Stretch)", ghs_D / 10.0, -1.0, 10.0, (100, 180, 140)
+            )
+            control_rects['ghs_b'] = draw_raw_isp_slider(
+                start_x, start_y + slider_height + margin, slider_width, slider_height,
+                "b (Local Int)", ghs_b / 10.0, -30.0, 10.0, (100, 160, 180)
+            )
+            control_rects['ghs_SP'] = draw_raw_isp_slider(
+                start_x, start_y + 2*(slider_height + margin), slider_width, slider_height,
+                "SP (Symmetry)", ghs_SP / 100.0, 0.0, 1.0, (180, 140, 100)
+            )
+            control_rects['ghs_LP'] = draw_raw_isp_slider(
+                start_x, start_y + 3*(slider_height + margin), slider_width, slider_height,
+                "LP (Shadows)", ghs_LP / 100.0, 0.0, 1.0, (140, 100, 180)
+            )
+            control_rects['ghs_HP'] = draw_raw_isp_slider(
+                start_x, start_y + 4*(slider_height + margin), slider_width, slider_height,
+                "HP (Highlights)", ghs_HP / 100.0, 0.0, 1.0, (180, 100, 140)
+            )
+
+            # Boutons RESET et SAVE pour stretch aussi
+            start_y += 5*(slider_height + margin) + 15
+            reset_rect, save_rect = draw_raw_action_buttons(start_x, start_y)
+            control_rects['reset'] = reset_rect
+            control_rects['save'] = save_rect
+
+    # Histogramme en bas
+    if image_array is not None:
+        draw_stretch_histogram(screen_width, screen_height, image_array)
+
+    return control_rects
+
+
+def is_click_on_raw_icon(mousex, mousey, screen_width):
+    """
+    Vérifie si le clic est sur l'icône RAW.
+
+    Args:
+        mousex, mousey: Position du clic
+        screen_width: Largeur de l'écran
+
+    Returns:
+        True si clic sur l'icône, False sinon
+    """
+    icon_size = 50
+    margin = 15
+    adj_icon_x = screen_width - icon_size - margin
+    icon_x = adj_icon_x - icon_size - 10
+    icon_y = margin
+
+    return (icon_x <= mousex <= icon_x + icon_size and
+            icon_y <= mousey <= icon_y + icon_size)
+
+
+def handle_raw_slider_click(mousex, mousey, control_rects):
+    """
+    Gère le clic sur un slider RAW et met à jour la valeur correspondante.
+    Applique immédiatement les changements à la session active.
+    Inclut aussi les sliders de gain et ev pour RAW.
+
+    Args:
+        mousex, mousey: Position du clic
+        control_rects: Dict des rectangles des contrôles
+
+    Returns:
+        True si un contrôle a été modifié, False sinon
+    """
+    global raw_adjust_tab, stretch_preset
+    global isp_wb_red, isp_wb_green, isp_wb_blue, isp_gamma, isp_black_level
+    global isp_brightness, isp_contrast, isp_saturation, isp_sharpening
+    global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
+    global stretch_factor, stretch_p_low, stretch_p_high
+    global gain, ev, still_limits, custom_sspeed
+
+    # Vérifier clic sur onglets
+    if 'tab_isp' in control_rects and control_rects['tab_isp'].collidepoint(mousex, mousey):
+        raw_adjust_tab = 0
+        return True
+    if 'tab_stretch' in control_rects and control_rects['tab_stretch'].collidepoint(mousex, mousey):
+        raw_adjust_tab = 1
+        # Activer automatiquement le preset GHS quand on ouvre l'onglet STRETCH
+        if stretch_preset == 0:
+            stretch_preset = 1
+            print("[RAW PANEL] GHS stretch activé automatiquement")
+        return True
+
+    # Vérifier clic sur boutons RESET et SAVE
+    if 'reset' in control_rects and control_rects['reset'].collidepoint(mousex, mousey):
+        reset_isp_to_defaults()
+        return True
+    if 'save' in control_rects and control_rects['save'].collidepoint(mousex, mousey):
+        save_isp_config_to_file()
+        return True
+
+    # Vérifier clic sur sliders
+    for name, rect in control_rects.items():
+        if name.startswith('tab_') or name in ('reset', 'save'):
+            continue
+
+        if rect.collidepoint(mousex, mousey):
+            # Calculer la position relative dans le slider
+            rel_x = mousex - rect.x - 5
+            slider_width = rect.width - 10
+            ratio = max(0, min(1, rel_x / slider_width))
+
+            # Mettre à jour la valeur selon le slider
+            if name == 'isp_wb_red':
+                isp_wb_red = int(50 + ratio * 150)  # 0.5-2.0 → 50-200
+            elif name == 'isp_wb_green':
+                isp_wb_green = int(50 + ratio * 150)
+            elif name == 'isp_wb_blue':
+                isp_wb_blue = int(50 + ratio * 150)
+            elif name == 'isp_gamma':
+                isp_gamma = int(50 + ratio * 250)  # 0.5-3.0 → 50-300
+            elif name == 'isp_black_level':
+                isp_black_level = int(ratio * 500)  # 0-500 direct
+            elif name == 'isp_brightness':
+                isp_brightness = int(-50 + ratio * 100)  # -0.5-0.5 → -50-50
+            elif name == 'isp_contrast':
+                isp_contrast = int(50 + ratio * 150)  # 0.5-2.0 → 50-200
+            elif name == 'isp_saturation':
+                isp_saturation = int(ratio * 200)  # 0.0-2.0 → 0-200
+            elif name == 'isp_sharpening':
+                isp_sharpening = int(ratio * 200)  # 0.0-2.0 → 0-200
+            # Sliders GHS (onglet STRETCH)
+            elif name == 'ghs_D':
+                ghs_D = int(-10 + ratio * 110)  # -1.0-10.0 → -10-100
+            elif name == 'ghs_b':
+                ghs_b = int(-300 + ratio * 400)  # -30.0-10.0 → -300-100
+            elif name == 'ghs_SP':
+                ghs_SP = int(ratio * 100)  # 0.0-1.0 → 0-100
+            elif name == 'ghs_LP':
+                ghs_LP = int(ratio * 100)
+            elif name == 'ghs_HP':
+                ghs_HP = int(ratio * 100)
+            # Sliders Arcsinh (onglet STRETCH mode Arcsinh)
+            elif name == 'stretch_factor':
+                stretch_factor = int(ratio * 80)  # 0.0-8.0 → 0-80
+                print(f"[RAW ARCSINH] stretch_factor = {stretch_factor} (factor={stretch_factor/10.0})")
+            elif name == 'stretch_p_low':
+                stretch_p_low = int(ratio * 20)  # 0.0-2.0 → 0-20
+                print(f"[RAW ARCSINH] stretch_p_low = {stretch_p_low}")
+            elif name == 'stretch_p_high':
+                stretch_p_high = int(9950 + ratio * 50)  # 99.5-100.0 → 9950-10000
+                print(f"[RAW ARCSINH] stretch_p_high = {stretch_p_high}")
+            # Sliders Gain et Exposition pour RAW
+            elif name == 'raw_gain':
+                # Gain: 0 à 300 (0 = AUTO)
+                gain_max = 300  # Plage étendue pour astrophoto
+                gain = int(ratio * gain_max)
+                # Appliquer immédiatement les changements à la caméra
+                apply_gain_exposure_to_camera()
+            elif name == 'raw_exposure':
+                # Exposition: échelle logarithmique de 1ms à 20s
+                import math
+                exp_min_us = 1000        # 1ms
+                exp_max_us = 20000000    # 20s
+                log_min = math.log10(exp_min_us)
+                log_max = math.log10(exp_max_us)
+                # Convertir le ratio (0-1) en valeur logarithmique
+                log_value = log_min + ratio * (log_max - log_min)
+                custom_sspeed = int(10 ** log_value)
+                # Appliquer immédiatement les changements à la caméra
+                apply_gain_exposure_to_camera()
+
+            # Appliquer les changements ISP à la session active
+            if name.startswith('isp_'):
+                apply_isp_to_session()
+
+            # Activer automatiquement GHS quand on modifie un slider GHS
+            if name.startswith('ghs_') and stretch_preset == 0:
+                stretch_preset = 1
+                print("[RAW PANEL] GHS stretch activé automatiquement (slider modifié)")
+
+            return True
+
+    return False
+
+
+def apply_isp_to_session():
+    """
+    Applique les paramètres ISP GUI à la session de stacking active.
+    Modifie directement session.isp.config pour mise à jour temps réel.
+    """
+    global livestack, luckystack
+    global isp_wb_red, isp_wb_green, isp_wb_blue, isp_gamma, isp_black_level
+    global isp_brightness, isp_contrast, isp_saturation, isp_sharpening
+
+    session = None
+
+    # Trouver la session active
+    if livestack is not None and livestack.session is not None:
+        session = livestack.session
+    elif luckystack is not None and luckystack.session is not None:
+        session = luckystack.session
+
+    if session is None or session.isp is None:
+        return
+
+    # Appliquer les valeurs à la config ISP
+    # IMPORTANT: Utiliser les MÊMES formules que apply_isp_to_preview() pour cohérence
+    config = session.isp.config
+    config.wb_red_gain = isp_wb_red / 100.0       # 50-200 → 0.5-2.0
+    config.wb_green_gain = isp_wb_green / 100.0   # 50-200 → 0.5-2.0
+    config.wb_blue_gain = isp_wb_blue / 100.0     # 50-200 → 0.5-2.0
+    config.gamma = isp_gamma / 100.0              # 50-300 → 0.5-3.0 (100=1.0 linéaire)
+    config.black_level = isp_black_level          # 0-500 direct
+    config.brightness_offset = isp_brightness / 100.0  # -50-50 → -0.5-0.5
+    config.contrast = isp_contrast / 100.0        # 50-200 → 0.5-2.0
+    config.saturation = isp_saturation / 100.0    # 0-200 → 0.0-2.0
+    config.sharpening = isp_sharpening / 100.0    # 0-200 → 0.0-2.0
+
+
+def apply_gain_exposure_to_camera():
+    """
+    Applique les changements de gain et temps d'exposition à la caméra Picamera2.
+    Cette fonction est appelée depuis les sliders de réglage en mode stretch preview.
+
+    Utilise:
+        - gain: valeur de gain analogique (0 = AUTO)
+        - custom_sspeed: temps d'exposition en microsecondes
+    """
+    global picam2, gain, custom_sspeed, sspeed, mode
+
+    if picam2 is None:
+        return
+
+    try:
+        controls = {}
+
+        # Appliquer le gain si différent de 0 (0 = AUTO)
+        if gain > 0:
+            controls["AnalogueGain"] = float(gain)
+
+        # Appliquer le temps d'exposition en microsecondes
+        # custom_sspeed contient la valeur définie par le slider
+        exp_time = custom_sspeed if custom_sspeed > 0 else sspeed
+        if exp_time > 0:
+            controls["ExposureTime"] = int(exp_time)
+
+        # Appliquer les contrôles à la caméra
+        if controls:
+            picam2.set_controls(controls)
+            # Afficher en format lisible
+            if exp_time >= 1000000:
+                exp_label = f"{exp_time / 1000000:.1f}s"
+            elif exp_time >= 1000:
+                exp_label = f"{exp_time / 1000:.0f}ms"
+            else:
+                exp_label = f"{exp_time}µs"
+            print(f"[STRETCH] Appliqué: Gain={gain if gain > 0 else 'AUTO'}, Expo={exp_label}")
+
+    except Exception as e:
+        print(f"[STRETCH] Erreur application gain/exposition: {e}")
+
+
+def reset_isp_to_defaults():
+    """
+    Réinitialise tous les paramètres ISP à leurs valeurs par défaut.
+    """
+    global isp_wb_red, isp_wb_green, isp_wb_blue, isp_gamma, isp_black_level
+    global isp_brightness, isp_contrast, isp_saturation, isp_sharpening
+    global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP, raw_adjust_tab
+
+    if raw_adjust_tab == 0:
+        # Reset ISP
+        isp_wb_red = 100
+        isp_wb_green = 100
+        isp_wb_blue = 100
+        isp_gamma = 100
+        isp_black_level = 64
+        isp_brightness = 0
+        isp_contrast = 100
+        isp_saturation = 100
+        isp_sharpening = 0
+        apply_isp_to_session()
+    else:
+        # Reset GHS (valeurs optimisées par défaut)
+        ghs_D = 31
+        ghs_b = 1
+        ghs_SP = 19
+        ghs_LP = 0
+        ghs_HP = 0
+
+
+def save_isp_config_to_file():
+    """
+    Sauvegarde la configuration ISP actuelle dans session_isp_config.json.
+    """
+    global isp_wb_red, isp_wb_green, isp_wb_blue, isp_gamma, isp_black_level
+    global isp_brightness, isp_contrast, isp_saturation, isp_sharpening
+    global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
+
+    import json
+
+    config = {
+        "isp": {
+            "wb_red_gain": isp_wb_red / 100.0,
+            "wb_green_gain": isp_wb_green / 100.0,
+            "wb_blue_gain": isp_wb_blue / 100.0,
+            "gamma": isp_gamma / 100.0 * 2.2,
+            "black_level": isp_black_level,
+            "brightness_offset": isp_brightness / 100.0,
+            "contrast": isp_contrast / 100.0,
+            "saturation": isp_saturation / 100.0,
+            "sharpening": isp_sharpening / 100.0
+        },
+        "ghs": {
+            "D": ghs_D / 10.0,
+            "b": ghs_b / 10.0,
+            "SP": ghs_SP / 100.0,
+            "LP": ghs_LP / 100.0,
+            "HP": ghs_HP / 100.0
+        }
+    }
+
+    try:
+        config_path = os.path.join(os.path.dirname(__file__), "session_isp_config.json")
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+        print(f"[RAW] Configuration ISP sauvegardée: {config_path}")
+    except Exception as e:
+        print(f"[RAW] Erreur sauvegarde config: {e}")
+
+
+def load_isp_from_session():
+    """
+    Charge les valeurs ISP depuis la session active vers les variables GUI.
+    Appelé quand on active le panneau RAW pour synchroniser l'affichage.
+    """
+    global livestack, luckystack
+    global isp_wb_red, isp_wb_green, isp_wb_blue, isp_gamma, isp_black_level
+    global isp_brightness, isp_contrast, isp_saturation, isp_sharpening
+
+    session = None
+
+    # Trouver la session active
+    if livestack is not None and livestack.session is not None:
+        session = livestack.session
+    elif luckystack is not None and luckystack.session is not None:
+        session = luckystack.session
+
+    if session is None or session.isp is None:
+        return
+
+    # Charger les valeurs depuis la config ISP
+    config = session.isp.config
+    isp_wb_red = int(config.wb_red_gain * 100)
+    isp_wb_green = int(config.wb_green_gain * 100)
+    isp_wb_blue = int(config.wb_blue_gain * 100)
+    isp_gamma = int((config.gamma / 2.2) * 100)  # Convertir gamma en ratio
+    isp_black_level = config.black_level
+    isp_brightness = int(config.brightness_offset * 100)
+    isp_contrast = int(config.contrast * 100)
+    isp_saturation = int(config.saturation * 100)
+    isp_sharpening = int(config.sharpening * 100)
+
+
+def apply_isp_to_preview(array):
+    """
+    Applique les paramètres ISP GUI à une image de preview en temps réel.
+    Utilise les MÊMES formules que libastrostack/isp.py pour que le preview
+    corresponde exactement aux images stackées.
+
+    Args:
+        array: numpy array de l'image (H, W, 3) en RGB, uint8 ou float32
+
+    Returns:
+        numpy array traité de même dimension
+    """
+    global isp_wb_red, isp_wb_green, isp_wb_blue, isp_gamma, isp_black_level
+    global isp_brightness, isp_contrast, isp_saturation, isp_sharpening
+
+    # Convertir les paramètres GUI en valeurs réelles (IDENTIQUE au mapping ISP)
+    # IMPORTANT: Ces formules doivent être identiques à celles du mapping ISP config
+    wb_r = isp_wb_red / 100.0         # 50-200 → 0.5-2.0
+    wb_g = isp_wb_green / 100.0       # 50-200 → 0.5-2.0
+    wb_b = isp_wb_blue / 100.0        # 50-200 → 0.5-2.0
+    gamma = isp_gamma / 100.0         # 50-300 → 0.5-3.0 (100=1.0 linéaire)
+    black_level = isp_black_level     # 0-500 direct
+    brightness = isp_brightness / 100.0  # -50-50 → -0.5-0.5
+    contrast = isp_contrast / 100.0   # 50-200 → 0.5-2.0
+    saturation = isp_saturation / 100.0  # 0-200 → 0.0-2.0
+    sharpening = isp_sharpening / 100.0  # 0-200 → 0.0-2.0
+
+    # Vérifier si tous les paramètres sont à leur valeur par défaut
+    # Dans ce cas, ne pas traiter pour optimiser les performances
+    if (wb_r == 1.0 and wb_g == 1.0 and wb_b == 1.0 and
+        abs(gamma - 1.0) < 0.01 and black_level == 64 and
+        brightness == 0.0 and contrast == 1.0 and
+        saturation == 1.0 and sharpening == 0.0):
+        return array
+
+    # Convertir en float32 [0-1] (IDENTIQUE à ISP._to_float)
+    input_dtype = array.dtype
+    if input_dtype == np.uint8:
+        img = array.astype(np.float32) / 255.0
+    elif input_dtype == np.uint16:
+        img = array.astype(np.float32) / 65535.0
+    else:
+        img = array.astype(np.float32)
+        if img.max() > 1.0:
+            img = img / img.max()
+
+    # 1. Black level subtraction (IDENTIQUE à ISP._apply_black_level)
+    # Normalisation 12-bit comme dans libastrostack
+    if black_level > 0:
+        black_norm = black_level / 4095.0
+        img = np.clip(img - black_norm, 0, 1)
+        # Renormaliser
+        if img.max() > 0:
+            img = img / img.max()
+
+    # 2. White balance (IDENTIQUE à ISP._apply_white_balance)
+    # IMPORTANT: Les canaux R et B sont inversés dans le pipeline RAW
+    # (cv2.cvtColor retourne BGR, pas RGB malgré le nom COLOR_BayerRG2RGB)
+    # Donc: canal 0 = Bleu, canal 2 = Rouge
+    if wb_r != 1.0 or wb_g != 1.0 or wb_b != 1.0:
+        img[:, :, 0] = img[:, :, 0] * wb_b  # Canal 0 = Bleu
+        img[:, :, 1] = img[:, :, 1] * wb_g  # Canal 1 = Vert
+        img[:, :, 2] = img[:, :, 2] * wb_r  # Canal 2 = Rouge
+        img = np.clip(img, 0, 1)
+
+    # 3. Gamma correction (IDENTIQUE à ISP._apply_gamma)
+    if gamma != 1.0:
+        img = np.power(np.clip(img, 1e-10, 1.0), 1.0 / gamma)
+
+    # 4. Brightness offset (IDENTIQUE à ISP._apply_brightness_offset)
+    if brightness != 0.0:
+        img = np.clip(img + brightness, 0.0, 1.0)
+
+    # 5. Contrast (IDENTIQUE à ISP._apply_contrast)
+    if contrast != 1.0:
+        img = (img - 0.5) * contrast + 0.5
+        img = np.clip(img, 0, 1)
+
+    # 6. Saturation (IDENTIQUE à ISP._apply_saturation - utilise HSV)
+    if saturation != 1.0 and len(img.shape) == 3 and img.shape[2] == 3:
+        # Convertir en uint8 pour cv2
+        img_uint8 = np.clip(img * 255, 0, 255).astype(np.uint8)
+        img_hsv = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2HSV).astype(np.float32)
+        img_hsv[:, :, 1] *= saturation
+        img_hsv[:, :, 1] = np.clip(img_hsv[:, :, 1], 0, 255)
+        img_rgb = cv2.cvtColor(img_hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
+        img = img_rgb.astype(np.float32) / 255.0
+
+    # 7. Sharpening (IDENTIQUE à ISP._apply_sharpening - unsharp mask)
+    if sharpening > 0.01 and len(img.shape) == 3:
+        # Unsharp mask via cv2 (plus rapide que scipy)
+        img_uint8 = np.clip(img * 255, 0, 255).astype(np.uint8)
+        blurred = cv2.GaussianBlur(img_uint8, (0, 0), 1.0)
+        img_sharpened = cv2.addWeighted(img_uint8, 1.0 + sharpening, blurred, -sharpening, 0)
+        img = np.clip(img_sharpened.astype(np.float32) / 255.0, 0, 1)
+
+    # Reconvertir dans le type d'origine
+    if input_dtype == np.uint8:
+        return (img * 255).astype(np.uint8)
+    elif input_dtype == np.uint16:
+        return (img * 65535).astype(np.uint16)
+    else:
+        return (img * 255).astype(np.float32)
+
+
+def save_with_external_processing(stacker_obj, filename=None, raw_format_name=None):
+    """
+    Sauvegarde le résultat stacké avec ISP+stretch externe (pour mode RAW).
+
+    Cette fonction récupère le résultat brut du stacker, applique apply_isp_to_preview()
+    et astro_stretch(), puis sauvegarde en FITS et PNG.
+
+    Args:
+        stacker_obj: livestack ou luckystack object
+        filename: Nom fichier (optionnel)
+        raw_format_name: Format RAW pour le nom de fichier
+
+    Returns:
+        Path du fichier sauvegardé ou None
+    """
+    global stretch_preset
+
+    if stacker_obj is None or stacker_obj.session is None:
+        print("[SAVE] Aucune session active")
+        return None
+
+    # Récupérer le résultat brut (sans ISP/stretch de libastrostack)
+    try:
+        if hasattr(stacker_obj, 'get_final_result'):
+            raw_result = stacker_obj.get_final_result()
+        elif hasattr(stacker_obj.session, 'stacker') and stacker_obj.session.stacker:
+            raw_result = stacker_obj.session.stacker.get_stacked_image()
+        else:
+            raw_result = None
+
+        if raw_result is None:
+            print("[SAVE] Aucun résultat à sauvegarder")
+            return None
+
+    except Exception as e:
+        print(f"[SAVE] Erreur récupération résultat: {e}")
+        return None
+
+    # Appliquer ISP externe
+    processed = apply_isp_to_preview(raw_result.copy())
+
+    # Appliquer stretch externe (si activé)
+    if stretch_preset != 0:
+        processed = astro_stretch(processed)
+
+    # Générer le nom de fichier
+    if filename is None:
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        raw_format_str = raw_format_name or stacker_obj.camera_params.get('raw_format', 'RAW')
+        # Récupérer la méthode de stacking (compatible avec LegacyStackingConfig et AdvancedStackingConfig)
+        method = 'mean'
+        if stacker_obj.session:
+            if hasattr(stacker_obj.session.config, 'stacking') and hasattr(stacker_obj.session.config.stacking, 'method'):
+                method = stacker_obj.session.config.stacking.method.value
+        filename = f"stack_{raw_format_str}_ext_{method}_{timestamp}"
+
+    output_dir = stacker_obj.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Sauvegarder FITS (linéaire, 32-bit)
+    fits_path = output_dir / f"{filename}.fit"
+    try:
+        from astropy.io import fits
+
+        # Pour FITS: utiliser le résultat brut linéaire (pas de stretch)
+        fits_data = apply_isp_to_preview(raw_result.copy())
+
+        # Convertir en format FITS (channels, height, width)
+        if len(fits_data.shape) == 3:
+            fits_data = np.transpose(fits_data, (2, 0, 1))
+
+        hdu = fits.PrimaryHDU(fits_data.astype(np.float32))
+        hdu.header['NAXIS'] = 3
+        hdu.header['COMMENT'] = 'Created by RPiCamera2 with external ISP processing'
+        hdu.header['STACKCNT'] = stacker_obj.session.config.num_stacked if stacker_obj.session else 0
+        hdul = fits.HDUList([hdu])
+        hdul.writeto(str(fits_path), overwrite=True)
+        print(f"[SAVE] FITS: {fits_path}")
+    except Exception as e:
+        print(f"[SAVE] Erreur FITS: {e}")
+
+    # Sauvegarder PNG (avec stretch, 16-bit)
+    png_path = output_dir / f"{filename}.png"
+    try:
+        import cv2
+
+        # Convertir en uint16 pour PNG 16-bit
+        if processed.dtype == np.float32:
+            png_data = np.clip(processed / 255.0 * 65535, 0, 65535).astype(np.uint16)
+        elif processed.dtype == np.uint8:
+            png_data = (processed.astype(np.uint16) * 257)  # 0-255 -> 0-65535
+        else:
+            png_data = np.clip(processed, 0, 65535).astype(np.uint16)
+
+        # Convertir RGB -> BGR pour OpenCV
+        if len(png_data.shape) == 3 and png_data.shape[2] == 3:
+            png_data = cv2.cvtColor(png_data, cv2.COLOR_RGB2BGR)
+
+        cv2.imwrite(str(png_path), png_data)
+        print(f"[SAVE] PNG: {png_path} (16-bit, traitement externe)")
+    except Exception as e:
+        print(f"[SAVE] Erreur PNG: {e}")
+
+    return fits_path
+
+
+# ============================================================================
+# FIN RAW FULLSCREEN CONTROLS
+# ============================================================================
+
 def calculate_fwhm(image_surface, center_x, center_y, area_size):
     """
     Calcule le FWHM pour mesurer la netteté
@@ -4427,7 +6398,16 @@ def astro_stretch(array):
         # asinh est plus doux que sqrt et préserve mieux les détails
         # Utilise le facteur configurable (divisé par 10 car stocké x10)
         factor = stretch_factor / 10.0
-        img_stretched = np.arcsinh(img_normalized * factor) / np.arcsinh(factor)
+
+        # Protection contre division par zéro si factor est trop petit
+        if factor > 0.01:
+            arcsinh_factor = np.arcsinh(factor)
+            if arcsinh_factor > 1e-10:
+                img_stretched = np.arcsinh(img_normalized * factor) / arcsinh_factor
+            else:
+                img_stretched = img_normalized  # Pas de stretch si factor trop petit
+        else:
+            img_stretched = img_normalized  # Pas de stretch si factor <= 0.01
 
         # Reconvertir dans le type d'origine (préserve bit depth comme GHS)
         if input_is_float:
@@ -4514,6 +6494,10 @@ def preview():
 
         # Détecter si recréation nécessaire (changements majeurs de config)
         # Note: raw_format et v3_hdr nécessitent recréation car ils changent le stream RAW (SRGGB12/16) et HdrMode
+        # Note: stacking_active change nécessite recréation pour basculer entre stream 'raw' et 'main'
+        current_stacking_active = livestack_active or luckystack_active
+        prev_stacking_active = preview.prev_config.get('stacking_active', False)
+
         need_recreation = (
             picam2 is None or
             preview.prev_config.get('camera') != camera or
@@ -4524,8 +6508,13 @@ def preview():
             preview.prev_config.get('use_native_sensor_mode') != use_native_sensor_mode or
             preview.prev_config.get('awb') != awb or  # Changement AWB nécessite recréation (ColourGains persistent)
             preview.prev_config.get('raw_format') != raw_format or  # Changement RAW12/16 nécessite recréation
-            preview.prev_config.get('v3_hdr') != v3_hdr  # Changement mode HDR nécessite recréation
+            preview.prev_config.get('v3_hdr') != v3_hdr or  # Changement mode HDR nécessite recréation
+            (raw_format >= 2 and prev_stacking_active != current_stacking_active)  # Changement mode stacking avec RAW
         )
+
+        # Debug: afficher si le changement de mode stacking force la recréation
+        if raw_format >= 2 and prev_stacking_active != current_stacking_active:
+            print(f"  [STACKING MODE CHANGE] {prev_stacking_active} -> {current_stacking_active}, forcing full recreation")
 
         # Calculer speed2 et autres paramètres (avant le if/else)
         speed2 = sspeed
@@ -4611,6 +6600,18 @@ def preview():
                     actual_gains = metadata.get("ColourGains", "N/A")
                     print(f"  ✓ Controls updated instantly - ExposureTime={speed2}µs, Gain={gain}")
                     print(f"  → Camera reports: AwbMode={actual_awb}, ColourGains={actual_gains}")
+
+                # *** IMPORTANT: Mettre à jour capture_thread pour le mode stacking ***
+                # Même en fast path, on doit s'assurer que le capture_thread est configuré correctement
+                if capture_thread is not None:
+                    if (livestack_active or luckystack_active) and raw_format >= 2:
+                        capture_thread.set_capture_params({'type': 'raw'})
+                        if show_cmds == 1:
+                            print(f"  → Capture thread configuré en mode RAW (stacking actif)")
+                    else:
+                        capture_thread.set_capture_params({'type': 'main'})
+                        if show_cmds == 1:
+                            print(f"  → Capture thread configuré en mode MAIN")
 
                 # Pas besoin de mémoriser la config car elle n'a pas changé
                 restart = 0
@@ -5123,7 +7124,8 @@ def preview():
             'use_native_sensor_mode': use_native_sensor_mode,
             'awb': awb,
             'raw_format': raw_format,
-            'v3_hdr': v3_hdr
+            'v3_hdr': v3_hdr,
+            'stacking_active': livestack_active or luckystack_active
         }
 
         restart = 0
@@ -5989,6 +7991,7 @@ while max_shutter > shutters[max_speed]:
     max_speed +=1
 if speed > max_speed:
     speed = max_speed
+    custom_sspeed = 0  # Réinitialiser car speed a changé
     shutter = shutters[speed]
     if shutter < 0:
         shutter = abs(1/shutter)
@@ -6029,6 +8032,13 @@ if igw/igh > 1.5:
 else:
     image = pygame.Surface((preview_width, preview_height))
 image.fill((0, 0, 0))  # Remplir en noir
+
+# Variables pour la détection du double-clic sur les sliders
+last_click_time = 0
+last_click_row = -1
+last_click_x = -1
+last_click_y = -1
+DOUBLE_CLICK_DELAY = 2.0  # 2 secondes pour détecter un double-clic (tenir compte des time.sleep)
 
 # main loop
 while True:
@@ -6130,25 +8140,47 @@ while True:
             # Si une frame est disponible, la traiter et l'afficher
             # Sinon, on saute juste le traitement (l'interface reste réactive)
             if frame_from_thread is not None:
-                # Si livestack/luckystack actif ET format RAW Bayer sélectionné → débayériser en uint16
-                if (livestack_active or luckystack_active) and raw_format >= 2:
+                # Si (livestack/luckystack actif OU mode stretch preview) ET format RAW Bayer sélectionné → débayériser en uint16
+                # Le mode stretch_mode == 1 permet de prévisualiser les images RAW avant de lancer le stacking
+                if ((livestack_active or luckystack_active) or stretch_mode == 1) and raw_format >= 2:
                     # Utiliser la frame RAW capturée par le thread
                     raw_array = frame_from_thread
 
-                    # Validation: Vérifier que la résolution capturée correspond à celle attendue
-                    expected_height = raw_stream_size[1]
-                    actual_height = raw_array.shape[0]
+                    # *** Validation: Vérifier que la frame est bien du format RAW (2D) ***
+                    skip_raw_processing = False
+                    if len(raw_array.shape) != 2:
+                        if not hasattr(pygame, '_raw_format_mismatch_warning'):
+                            print(f"\n⚠️  [RAW VALIDATION] Frame ISP reçue au lieu de RAW - ignorée")
+                            print(f"  Array reçu: shape={raw_array.shape}, dtype={raw_array.dtype}")
+                            print(f"  → Forçage du capture_thread en mode RAW...")
+                            pygame._raw_format_mismatch_warning = True
 
-                    if actual_height != expected_height:
-                        if not hasattr(pygame, '_raw_resolution_mismatch_warning'):
-                            print(f"\n⚠️  [RAW VALIDATION] Incompatibilité de résolution détectée!")
-                            print(f"  Attendu: {raw_stream_size}")
-                            print(f"  Capturé: {raw_array.shape}")
-                            print(f"  → Cette résolution n'est pas compatible avec le mode RAW")
-                            print(f"  → Utilisez XRGB8888 ISP ou changez de résolution")
-                            pygame._raw_resolution_mismatch_warning = True
+                        # Forcer le capture_thread en mode RAW pour les prochaines captures
+                        if capture_thread is not None:
+                            capture_thread.set_capture_params({'type': 'raw'})
+
+                        # *** SKIP: Ne pas traiter cette frame ISP, attendre une vraie frame RAW ***
+                        skip_raw_processing = True
+
+                    # Validation: Vérifier que la résolution capturée correspond à celle attendue
+                    if not skip_raw_processing:
+                        expected_height = raw_stream_size[1]
+                        actual_height = raw_array.shape[0]
+
+                        if actual_height != expected_height and len(raw_array.shape) == 2:
+                            if not hasattr(pygame, '_raw_resolution_mismatch_warning'):
+                                print(f"\n⚠️  [RAW VALIDATION] Incompatibilité de résolution détectée!")
+                                print(f"  Attendu: {raw_stream_size}")
+                                print(f"  Capturé: {raw_array.shape}")
+                                print(f"  → Cette résolution n'est pas compatible avec le mode RAW")
+                                print(f"  → Utilisez XRGB8888 ISP ou changez de résolution")
+                                pygame._raw_resolution_mismatch_warning = True
 
                     # Débayériser en RGB uint16 [0-65535] (préserve dynamique 12/16-bit)
+                    if skip_raw_processing:
+                        # Frame ISP ignorée - on attend une vraie frame RAW
+                        continue  # Sauter cette itération et attendre une vraie frame RAW
+
                     # *** NOUVEAU : Passer les gains AWB pour corriger la balance des blancs en RAW ***
                     # INVERSÉS pour compenser le pattern Bayer RGGB qui inverse les canaux
                     array_uint16 = debayer_raw_array(raw_array, raw_formats[raw_format],
@@ -6157,6 +8189,17 @@ while True:
                                                       fix_bad_pixels=bool(fix_bad_pixels) and livestack_active,  # SEULEMENT LiveStack, PAS LuckyStack
                                                       sigma_threshold=fix_bad_pixels_sigma/10.0,
                                                       min_adu_threshold=fix_bad_pixels_min_adu/10.0)
+
+                    # *** DIAGNOSTIC: Vérifier que le débayerisation a retourné 3D ***
+                    if len(array_uint16.shape) != 3:
+                        print(f"[ERROR] debayer_raw_array a retourné un array {len(array_uint16.shape)}D!")
+                        print(f"  Input shape: {raw_array.shape}, dtype: {raw_array.dtype}")
+                        print(f"  Output shape: {array_uint16.shape}, dtype: {array_uint16.dtype}")
+                        # Forcer conversion en 3D pour éviter crash
+                        if len(array_uint16.shape) == 2:
+                            print(f"  → Conversion forcée en RGB grayscale")
+                            array_uint16 = np.stack([array_uint16, array_uint16, array_uint16], axis=-1)
+
                     # CORRECTION: Garder la pleine dynamique 16-bit [0-65535] pour RAW12/16
                     # Ne plus compresser à [0-255] car libastrostack gère correctement les données haute résolution
                     # Convertir juste en float32 pour compatibilité avec libastrostack
@@ -6270,27 +8313,45 @@ while True:
 
                     # Récupérer le master stack pour affichage
                     try:
-                        # NOUVEAU: Utiliser get_preview_for_display() qui applique le MÊME pipeline
-                        # que le PNG sauvegardé (ISP + stretch complet), mais converti en uint8 pour pygame
-                        # Ceci garantit que l'affichage à l'écran correspond exactement au PNG
+                        # Récupérer le résultat stacké
                         stacked_array = livestack.get_preview_for_display()
 
                         if stacked_array is not None:
-                            # Afficher les infos de traitement une fois par session
-                            if not hasattr(pygame, '_livestack_display_info_shown'):
-                                print(f"\n[LIVESTACK DISPLAY] Affichage avec pipeline PNG complet:")
-                                print(f"  ✓ ISP software (si activé et format RAW)")
-                                print(f"  ✓ Stretch configuré (méthode: {livestack.session.config.png_stretch_method if livestack.session else 'N/A'})")
-                                print(f"  ✓ Conversion uint8 pour pygame")
-                                print(f"  → L'affichage correspond maintenant au PNG sauvegardé")
-                                pygame._livestack_display_info_shown = True
+                            # === MODE RAW: Appliquer ISP + stretch EXTERNE ===
+                            # Utilise apply_isp_to_preview() + astro_stretch() pour garantir
+                            # que le résultat est IDENTIQUE au preview stretch
+                            if raw_format >= 2:
+                                # Le stacked_array est brut (pas d'ISP/stretch de libastrostack)
+                                # Appliquer le même traitement que le preview
+                                stacked_array = apply_isp_to_preview(stacked_array)
+                                if stretch_preset != 0:
+                                    stacked_array = astro_stretch(stacked_array)
+                                # Convertir en uint8 si nécessaire
+                                if stacked_array.dtype != np.uint8:
+                                    stacked_array = np.clip(stacked_array, 0, 255).astype(np.uint8)
+
+                                # Afficher les infos une fois
+                                if not hasattr(pygame, '_livestack_display_info_shown'):
+                                    print(f"\n[LIVESTACK DISPLAY RAW] Traitement externe:")
+                                    print(f"  ✓ apply_isp_to_preview() (WB, gamma, contrast, etc.)")
+                                    print(f"  ✓ astro_stretch() (GHS/Arcsinh si activé)")
+                                    print(f"  → IDENTIQUE au preview stretch")
+                                    pygame._livestack_display_info_shown = True
+                            else:
+                                # MODE RGB/YUV: libastrostack a déjà appliqué le stretch
+                                if not hasattr(pygame, '_livestack_display_info_shown'):
+                                    print(f"\n[LIVESTACK DISPLAY RGB/YUV] Pipeline libastrostack:")
+                                    print(f"  ✓ Stretch configuré (méthode: {livestack.session.config.png_stretch_method if livestack.session else 'N/A'})")
+                                    print(f"  ✓ Conversion uint8 pour pygame")
+                                    pygame._livestack_display_info_shown = True
 
                             # Convertir en surface pygame
                             if len(stacked_array.shape) == 3:
-                                # RGB: transposer et échanger R/B pour pygame
-                                image = pygame.surfarray.make_surface(
-                                    np.swapaxes(stacked_array, 0, 1)[:,:,[2,1,0]]
-                                )
+                                # Transposer (H,W,C) → (W,H,C) pour pygame
+                                transposed = np.swapaxes(stacked_array, 0, 1)
+                                # IMPORTANT: pygame attend BGR, échanger R/B pour tous les modes
+                                # Ceci aligne le livestack avec le preview stretch (ligne 8593)
+                                image = pygame.surfarray.make_surface(transposed[:,:,[2,1,0]])
                             else:
                                 # MONO
                                 image = pygame.surfarray.make_surface(stacked_array.T)
@@ -6323,7 +8384,11 @@ while True:
                                     pygame._livestack_last_saved = 0
                                 if accepted > pygame._livestack_last_saved:
                                     try:
-                                        livestack.save(filename=f"livestack_progress_{accepted:04d}")
+                                        # Mode RAW: utiliser traitement externe pour cohérence preview/stack
+                                        if raw_format >= 2:
+                                            save_with_external_processing(livestack, filename=f"livestack_progress_{accepted:04d}", raw_format_name=raw_formats[raw_format])
+                                        else:
+                                            livestack.save(filename=f"livestack_progress_{accepted:04d}")
                                         pygame._livestack_last_saved = accepted
                                         if show_cmds == 1:
                                             print(f"[LIVESTACK] PNG intermédiaire sauvegardé: {accepted} frames")
@@ -6387,23 +8452,33 @@ while True:
                     # CORRECTION: Toujours essayer de récupérer et afficher le preview Lucky
                     # (que ce soit un nouveau stack ou le dernier stack existant)
                     try:
-                        # NOUVEAU: Utiliser get_preview_for_display() qui applique le MÊME pipeline
-                        # que le PNG sauvegardé (ISP + stretch complet), mais converti en uint8 pour pygame
-                        # Ceci garantit que l'affichage à l'écran correspond exactement au PNG
+                        # Récupérer le résultat stacké
                         stacked_array = luckystack.get_preview_for_display()
 
                         if stacked_array is not None:
+                            # === MODE RAW: Appliquer ISP + stretch EXTERNE ===
+                            # Même traitement que livestack et que le preview stretch
+                            if raw_format >= 2:
+                                stacked_array = apply_isp_to_preview(stacked_array)
+                                if stretch_preset != 0:
+                                    stacked_array = astro_stretch(stacked_array)
+                                if stacked_array.dtype != np.uint8:
+                                    stacked_array = np.clip(stacked_array, 0, 255).astype(np.uint8)
+
                             # Détecter un nouveau stack seulement pour les sauvegardes PNG
                             is_new_stack = (stacks_done > pygame._lucky_last_displayed)
 
                             if is_new_stack:
                                 # Afficher les infos de traitement une fois au premier stack
                                 if not hasattr(pygame, '_luckystack_display_info_shown'):
-                                    print(f"\n[LUCKYSTACK DISPLAY] Affichage avec pipeline PNG complet:")
-                                    print(f"  ✓ ISP software (si activé et format RAW)")
-                                    print(f"  ✓ Stretch configuré (méthode: {luckystack.session.config.png_stretch_method if luckystack.session else 'N/A'})")
-                                    print(f"  ✓ Conversion uint8 pour pygame")
-                                    print(f"  → L'affichage correspond maintenant au PNG sauvegardé")
+                                    if raw_format >= 2:
+                                        print(f"\n[LUCKYSTACK DISPLAY RAW] Traitement externe:")
+                                        print(f"  ✓ apply_isp_to_preview() (WB, gamma, contrast, etc.)")
+                                        print(f"  ✓ astro_stretch() (GHS/Arcsinh si activé)")
+                                        print(f"  → IDENTIQUE au preview stretch")
+                                    else:
+                                        print(f"\n[LUCKYSTACK DISPLAY RGB/YUV] Pipeline libastrostack:")
+                                        print(f"  ✓ Stretch configuré (méthode: {luckystack.session.config.png_stretch_method if luckystack.session else 'N/A'})")
                                     pygame._luckystack_display_info_shown = True
 
                                 # Mettre à jour le compteur
@@ -6411,10 +8486,11 @@ while True:
 
                             # Convertir en surface pygame
                             if len(stacked_array.shape) == 3:
-                                # RGB: transposer et échanger R/B pour pygame
-                                image = pygame.surfarray.make_surface(
-                                    np.swapaxes(stacked_array, 0, 1)[:,:,[2,1,0]]
-                                )
+                                # Transposer (H,W,C) → (W,H,C) pour pygame
+                                transposed = np.swapaxes(stacked_array, 0, 1)
+                                # IMPORTANT: pygame attend BGR, échanger R/B pour tous les modes
+                                # Ceci aligne le luckystack avec le preview stretch
+                                image = pygame.surfarray.make_surface(transposed[:,:,[2,1,0]])
                             else:
                                 # MONO
                                 image = pygame.surfarray.make_surface(stacked_array.T)
@@ -6444,7 +8520,11 @@ while True:
                                     pygame._lucky_last_saved = 0
                                 if stacks_done > pygame._lucky_last_saved:
                                     try:
-                                        luckystack.save(filename=f"lucky_progress_{stacks_done:04d}")
+                                        # Mode RAW: utiliser traitement externe pour cohérence preview/stack
+                                        if raw_format >= 2:
+                                            save_with_external_processing(luckystack, filename=f"lucky_progress_{stacks_done:04d}", raw_format_name=raw_formats[raw_format])
+                                        else:
+                                            luckystack.save(filename=f"lucky_progress_{stacks_done:04d}")
                                         pygame._lucky_last_saved = stacks_done
                                         if show_cmds == 1:
                                             print(f"[LUCKYSTACK] PNG intermédiaire sauvegardé: stack #{stacks_done}")
@@ -6468,6 +8548,27 @@ while True:
 
                 # Traitement normal seulement si LiveStack/LuckyStack n'a pas déjà affiché
                 if not livestack_display_done:
+                    # *** VALIDATION: Vérifier que array est 3D avant affichage ***
+                    if len(array.shape) == 2:
+                        # Array 2D (RAW Bayer non débayérisé) - ne devrait pas arriver ici
+                        # Mais si c'est le cas, afficher en niveaux de gris comme fallback
+                        if not hasattr(pygame, '_raw_2d_warning'):
+                            print(f"[WARNING] Array 2D détecté dans fallback display: shape={array.shape}")
+                            print(f"  → Conversion en niveaux de gris pour affichage")
+                            pygame._raw_2d_warning = True
+                        # Convertir en grayscale displayable (normaliser si nécessaire)
+                        if array.max() > 255:
+                            array = (array.astype(np.float32) / array.max() * 255).astype(np.uint8)
+                        else:
+                            array = array.astype(np.uint8)
+                        # Dupliquer en 3 canaux pour RGB
+                        array = np.stack([array, array, array], axis=-1)
+
+                    # Appliquer les réglages ISP en temps réel si mode RAW (preview reflète le stacking)
+                    # Toujours appliquer l'ISP quand on est en mode stretch RAW, pas seulement avec le panneau ouvert
+                    if stretch_mode == 1 and raw_format >= 2:
+                        array = apply_isp_to_preview(array)
+
                     # Appliquer le stretch astro si le mode est activé ET que le preset n'est pas OFF
                     if stretch_mode == 1 and stretch_preset != 0:
                         array = astro_stretch(array)
@@ -6505,6 +8606,24 @@ while True:
 
                     # Affichage
                     windowSurfaceObj.blit(image, (0, 0))
+
+                    # Afficher les contrôles de réglage stretch si en mode stretch
+                    # Ne PAS afficher pendant le stacking (livestack ou luckystack)
+                    if stretch_mode == 1 and not livestack_active and not luckystack_active:
+                        # Icône unique: ISP en mode RAW, ADJ en mode RGB/YUV
+                        is_raw = (raw_format >= 2)
+                        draw_stretch_hand_icon(max_width, max_height, stretch_adjust_mode == 1, is_raw_mode=is_raw)
+                        # Bouton STACK pour lancer le live stacking (pas en mode lucky)
+                        draw_livestack_button(max_width, max_height, is_raw_mode=is_raw)
+
+                        # Afficher le panneau approprié selon le mode
+                        if stretch_adjust_mode == 1:
+                            if is_raw:
+                                # Mode RAW: panneau ISP complet (ISP + stretch)
+                                _raw_slider_rects = draw_raw_controls(max_width, max_height, array)
+                            else:
+                                # Mode RGB/YUV: panneau stretch uniquement
+                                _stretch_slider_rects = draw_stretch_controls(max_width, max_height, array)
 
         except Exception as e:
             # En cas d'erreur, afficher dans la console
@@ -6544,16 +8663,24 @@ while True:
                 except (pygame.error, OSError):
                     pass  # Garder l'ancienne image affichée
 
-            # Appliquer le stretch astro si le mode est activé ET que le preset n'est pas OFF
-            if stretch_mode == 1 and stretch_preset != 0:
-                # Convertir pygame surface → numpy array
+            # Convertir pygame surface → numpy array pour le stretch et/ou l'histogramme
+            img_array = None
+            if stretch_mode == 1:
                 img_array = pygame.surfarray.array3d(image)
                 # Transposer de (width, height, channels) à (height, width, channels)
                 img_array = np.transpose(img_array, (1, 0, 2))
-                # Appliquer le stretch
-                img_array = astro_stretch(img_array)
-                # Reconvertir en pygame surface
-                image = pygame.surfarray.make_surface(np.swapaxes(img_array, 0, 1))
+
+                # Appliquer les réglages ISP en temps réel si mode RAW (preview reflète le stacking)
+                # Toujours appliquer l'ISP quand on est en mode stretch RAW
+                if raw_format >= 2:
+                    img_array = apply_isp_to_preview(img_array)
+
+                # Appliquer le stretch astro si le preset n'est pas OFF
+                if stretch_preset != 0:
+                    # Appliquer le stretch
+                    img_array = astro_stretch(img_array)
+                    # Reconvertir en pygame surface
+                    image = pygame.surfarray.make_surface(np.swapaxes(img_array, 0, 1))
 
             # Scaling et affichage
             # En mode zoom, l'image arrive déjà à la bonne taille via ROI, ne pas rescaler
@@ -6575,6 +8702,25 @@ while True:
                 else:
                     image = pygame.transform.scale(image, (preview_width,preview_height))
             windowSurfaceObj.blit(image, (0,0))
+
+            # Afficher les contrôles de réglage stretch si en mode stretch (rpicam-vid)
+            # Ne PAS afficher pendant le stacking (livestack ou luckystack)
+            if stretch_mode == 1 and not livestack_active and not luckystack_active:
+                # Icône unique: ISP en mode RAW, ADJ en mode RGB/YUV
+                is_raw = (raw_format >= 2)
+                draw_stretch_hand_icon(max_width, max_height, stretch_adjust_mode == 1, is_raw_mode=is_raw)
+                # Bouton STACK pour lancer le live stacking (pas en mode lucky)
+                draw_livestack_button(max_width, max_height, is_raw_mode=is_raw)
+
+                # Afficher le panneau approprié selon le mode
+                if stretch_adjust_mode == 1 and img_array is not None:
+                    if is_raw:
+                        # Mode RAW: panneau ISP complet (ISP + stretch)
+                        _raw_slider_rects = draw_raw_controls(max_width, max_height, img_array)
+                    else:
+                        # Mode RGB/YUV: panneau stretch uniquement
+                        _stretch_slider_rects = draw_stretch_controls(max_width, max_height, img_array)
+
     # Ne pas afficher les overlays en mode stretch
     if (zoom > 0 or foc_man == 1 or focus_mode == 1 or histogram > 0) and stretch_mode == 0:
         # Utiliser array3d au lieu de pixels3d pour ne pas verrouiller la surface
@@ -6969,7 +9115,11 @@ while True:
                 # Sauvegarder le résultat final avant de stopper (si activé)
                 if ls_save_final == 1:
                     try:
-                        livestack.save(raw_format_name=raw_formats[raw_format])
+                        # Mode RAW: utiliser traitement externe pour cohérence preview/stack
+                        if raw_format >= 2:
+                            save_with_external_processing(livestack, raw_format_name=raw_formats[raw_format])
+                        else:
+                            livestack.save(raw_format_name=raw_formats[raw_format])
                         print("[LIVESTACK] Image finale sauvegardée")
                     except Exception as e:
                         print(f"[LIVESTACK] Erreur sauvegarde: {e}")
@@ -6990,6 +9140,14 @@ while True:
             # Redessiner le menu pour restaurer l'affichage normal
             Menu()
             pygame.display.update()
+
+            # *** Reconfigurer caméra pour revenir au mode ISP après le RAW ***
+            if raw_format >= 2:
+                print(f"[LIVESTACK] Retour mode ISP - reconfiguration caméra...")
+                kill_preview_process()
+                preview()
+                print(f"[LIVESTACK] Caméra reconfigurée en mode normal")
+
             continue
 
         # Si on est en mode LuckyStack actif, un clic quitte ce mode
@@ -7000,7 +9158,11 @@ while True:
                 # Sauvegarder le résultat final avant de stopper (si activé)
                 if ls_lucky_save_final == 1:
                     try:
-                        luckystack.save(raw_format_name=raw_formats[raw_format])
+                        # Mode RAW: utiliser traitement externe pour cohérence preview/stack
+                        if raw_format >= 2:
+                            save_with_external_processing(luckystack, raw_format_name=raw_formats[raw_format])
+                        else:
+                            luckystack.save(raw_format_name=raw_formats[raw_format])
                         print("[LUCKYSTACK] Image finale sauvegardée")
                     except Exception as e:
                         print(f"[LUCKYSTACK] Erreur sauvegarde: {e}")
@@ -7021,11 +9183,174 @@ while True:
             # Redessiner le menu pour restaurer l'affichage normal
             Menu()
             pygame.display.update()
+
+            # *** Reconfigurer caméra pour revenir au mode ISP après le RAW ***
+            if raw_format >= 2:
+                print(f"[LUCKYSTACK] Retour mode ISP - reconfiguration caméra...")
+                kill_preview_process()
+                preview()
+                print(f"[LUCKYSTACK] Caméra reconfigurée en mode normal")
+
             continue
 
-        # Si on est en mode stretch, un clic quitte ce mode
+        # Si on est en mode stretch, gérer les clics selon le mode d'ajustement
         if stretch_mode == 1:
+            # Obtenir les dimensions de l'écran fullscreen
+            display_modes = pygame.display.list_modes()
+            if display_modes and display_modes != -1:
+                fs_width, fs_height = display_modes[0]
+            else:
+                screen_info = pygame.display.Info()
+                fs_width, fs_height = screen_info.current_w, screen_info.current_h
+
+            # Vérifier si clic sur le bouton STACK (lance le live stacking)
+            # Ne s'applique pas si livestack ou luckystack déjà actif
+            if not livestack_active and not luckystack_active and is_click_on_livestack_button(mousex, mousey, fs_width):
+                # Activer Live Stack
+                livestack_active = True
+
+                # *** IMPORTANT: Reconfigurer caméra pour mode RAW ***
+                if raw_format >= 2:
+                    print(f"[LIVESTACK] Mode RAW - reconfiguration caméra...")
+                    kill_preview_process()
+                    preview()
+                    print(f"[LIVESTACK] Caméra reconfigurée pour capture RAW")
+
+                # Réinitialiser les compteurs de session Live Stack
+                if hasattr(pygame, '_livestack_last_saved'):
+                    delattr(pygame, '_livestack_last_saved')
+                if hasattr(pygame, '_livestack_stretch_info_shown'):
+                    delattr(pygame, '_livestack_stretch_info_shown')
+                if hasattr(pygame, '_livestack_stretch_applied_shown'):
+                    delattr(pygame, '_livestack_stretch_applied_shown')
+                if hasattr(pygame, '_livestack_no_stretch_shown'):
+                    delattr(pygame, '_livestack_no_stretch_shown')
+                if hasattr(pygame, '_raw_format_mismatch_warning'):
+                    delattr(pygame, '_raw_format_mismatch_warning')
+                if hasattr(pygame, '_raw_resolution_mismatch_warning'):
+                    delattr(pygame, '_raw_resolution_mismatch_warning')
+                if hasattr(pygame, '_stacking_mode_shown'):
+                    delattr(pygame, '_stacking_mode_shown')
+
+                # Créer l'instance livestack si nécessaire
+                if livestack is None:
+                    camera_params = {
+                        'exposure': sspeed,
+                        'gain': gain,
+                        'red': red / 10,
+                        'blue': blue / 10,
+                        'raw_format': raw_formats[raw_format]
+                    }
+                    livestack = create_advanced_livestack_session(camera_params)
+
+                    livestack.configure(
+                        stacking_method=['mean', 'median', 'kappa_sigma', 'winsorized', 'weighted'][ls_stack_method],
+                        kappa=ls_stack_kappa / 10.0,
+                        iterations=ls_stack_iterations,
+                        alignment_mode=ls_alignment_modes[ls_alignment_mode],
+                        enable_qc=bool(ls_enable_qc),
+                        max_fwhm=ls_max_fwhm / 10.0 if ls_max_fwhm > 0 else 999.0,
+                        min_sharpness=ls_min_sharpness / 1000.0 if ls_min_sharpness > 0 else 0.0,
+                        max_drift=float(ls_max_drift) if ls_max_drift > 0 else 999999.0,
+                        min_stars=int(ls_min_stars),
+                        planetary_enable=bool(ls_planetary_enable),
+                        planetary_mode=ls_planetary_mode,
+                        planetary_disk_min=ls_planetary_disk_min,
+                        planetary_disk_max=ls_planetary_disk_max,
+                        planetary_disk_threshold=ls_planetary_threshold,
+                        planetary_disk_margin=ls_planetary_margin,
+                        planetary_disk_ellipse=bool(ls_planetary_ellipse),
+                        planetary_window=planetary_windows[ls_planetary_window],
+                        planetary_upsample=ls_planetary_upsample,
+                        planetary_highpass=bool(ls_planetary_highpass),
+                        planetary_roi_center=bool(ls_planetary_roi_center),
+                        planetary_corr=ls_planetary_corr / 100.0,
+                        planetary_max_shift=float(ls_planetary_max_shift),
+                        lucky_enable=False,
+                        lucky_buffer_size=ls_lucky_buffer,
+                        lucky_keep_percent=float(ls_lucky_keep),
+                        lucky_score_method=['laplacian', 'gradient', 'sobel', 'tenengrad'][ls_lucky_score],
+                        lucky_stack_method=['mean', 'median', 'sigma_clip'][ls_lucky_stack],
+                        lucky_align_enabled=bool(ls_lucky_align),
+                        lucky_score_roi_percent=float(ls_lucky_roi),
+                        png_stretch=['off', 'ghs', 'asinh'][stretch_preset],
+                        png_factor=stretch_factor / 10.0,
+                        png_clip_low=0.0 if stretch_preset == 1 else stretch_p_low / 10.0,
+                        png_clip_high=100.0 if stretch_preset == 1 else stretch_p_high / 100.0,
+                        ghs_D=ghs_D / 10.0,
+                        ghs_b=ghs_b / 10.0,
+                        ghs_SP=ghs_SP / 100.0,
+                        ghs_LP=ghs_LP / 100.0,
+                        ghs_HP=ghs_HP / 100.0,
+                        preview_refresh=ls_preview_refresh,
+                        save_dng="none",
+                    )
+
+                is_raw_mode = (raw_format >= 2)
+                video_format_map = {0: 'yuv420', 1: 'xrgb8888', 2: 'raw12', 3: 'raw16'}
+                livestack.configure(
+                    isp_enable=False,
+                    isp_config_path=None,
+                    video_format=video_format_map.get(raw_format, 'yuv420'),
+                    png_stretch='off' if is_raw_mode else 'ghs',
+                    ghs_D=ghs_D / 10.0,
+                    ghs_b=ghs_b / 10.0,
+                    ghs_SP=ghs_SP / 100.0,
+                    ghs_LP=ghs_LP / 100.0,
+                    ghs_HP=ghs_HP / 100.0,
+                )
+
+                livestack.camera_params['raw_format'] = raw_formats[raw_format]
+                livestack.reset()
+                livestack.start()
+                pygame._livestack_last_saved = 0
+
+                qc_status = "ON" if ls_enable_qc else "OFF"
+                print(f"[LIVESTACK] Mode activé depuis STRETCH (QC: {qc_status})")
+                # Désactiver le mode ajustement
+                stretch_adjust_mode = 0
+                _stretch_slider_rects = {}
+                _raw_slider_rects = {}
+                continue
+
+            # Vérifier si clic sur l'icône unique (ISP en mode RAW, ADJ en mode RGB/YUV)
+            if is_click_on_stretch_hand_icon(mousex, mousey, fs_width):
+                stretch_adjust_mode = 1 - stretch_adjust_mode  # Toggle
+                if stretch_adjust_mode == 1:
+                    # Activation
+                    if raw_format >= 2:
+                        # Mode RAW: charger les valeurs ISP depuis la session
+                        load_isp_from_session()
+                    _stretch_slider_rects = {}
+                    _raw_slider_rects = {}
+                else:
+                    # Désactivation - effacer les slider_rects
+                    _stretch_slider_rects = {}
+                    _raw_slider_rects = {}
+                continue
+
+            # Si mode ajustement actif, vérifier si clic sur un contrôle
+            if stretch_adjust_mode == 1:
+                if raw_format >= 2:
+                    # Mode RAW: utiliser les contrôles ISP
+                    if _raw_slider_rects:
+                        if handle_raw_slider_click(mousex, mousey, _raw_slider_rects):
+                            continue  # Contrôle modifié, ne pas quitter
+                else:
+                    # Mode RGB/YUV: utiliser les contrôles stretch
+                    if _stretch_slider_rects:
+                        if handle_stretch_slider_click(mousex, mousey, _stretch_slider_rects):
+                            continue  # Slider modifié, ne pas quitter
+
+                # Clic ailleurs que sur contrôle ou icône - ignorer (rester en mode ajustement)
+                continue
+
+            # Mode ajustement inactif - un clic quitte le mode stretch
             stretch_mode = 0
+            stretch_adjust_mode = 0
+            raw_adjust_mode = 0
+            _stretch_slider_rects = {}
+            _raw_slider_rects = {}
             # Restaurer le mode d'affichage normal (avec l'interface)
             if frame == 1:
                 if fullscreen == 1:
@@ -7039,6 +9364,14 @@ while True:
             # Redessiner le menu pour restaurer l'affichage normal
             Menu()
             pygame.display.update()
+
+            # Si on était en mode RAW preview (sans stacking), revenir en mode ISP normal
+            if raw_format >= 2 and not (livestack_active or luckystack_active):
+                if capture_thread is not None:
+                    capture_thread.set_capture_params({'type': 'main'})
+                    if show_cmds == 1:
+                        print(f"[STRETCH] Sortie mode RAW preview - capture_thread reconfiguré en mode ISP")
+
             continue
 
         # Permettre le déplacement du réticule même avec menu ouvert si on est en mode focus
@@ -9070,6 +11403,14 @@ while True:
                         # Activer Live Stack
                         livestack_active = True
 
+                        # *** IMPORTANT: Reconfigurer caméra pour mode RAW ***
+                        # preview() vérifiera livestack_active et configurera le capture_thread en mode 'raw'
+                        if raw_format >= 2:
+                            print(f"[LIVESTACK] Mode RAW - reconfiguration caméra...")
+                            kill_preview_process()
+                            preview()  # Reconfigure avec stream RAW et capture_thread en mode 'raw'
+                            print(f"[LIVESTACK] Caméra reconfigurée pour capture RAW")
+
                         # Réinitialiser les compteurs de session Live Stack
                         if hasattr(pygame, '_livestack_last_saved'):
                             delattr(pygame, '_livestack_last_saved')
@@ -9079,6 +11420,13 @@ while True:
                             delattr(pygame, '_livestack_stretch_applied_shown')
                         if hasattr(pygame, '_livestack_no_stretch_shown'):
                             delattr(pygame, '_livestack_no_stretch_shown')
+                        # Réinitialiser les flags de validation RAW
+                        if hasattr(pygame, '_raw_format_mismatch_warning'):
+                            delattr(pygame, '_raw_format_mismatch_warning')
+                        if hasattr(pygame, '_raw_resolution_mismatch_warning'):
+                            delattr(pygame, '_raw_resolution_mismatch_warning')
+                        if hasattr(pygame, '_stacking_mode_shown'):
+                            delattr(pygame, '_stacking_mode_shown')
 
                         # Activer le mode stretch pour affichage fullscreen
                         stretch_mode = 1
@@ -9169,64 +11517,38 @@ while True:
                         print(f"[DEBUG AVANT CONFIGURE] isp_config_path variable = {isp_config_path}")
                         print(f"[DEBUG AVANT CONFIGURE] raw_format variable = {raw_format} ({raw_formats[raw_format]})")
 
-                        # Logique conditionnelle ISP : N'appliquer l'ISP QUE sur formats RAW (raw12/raw16)
-                        # YUV420/XRGB8888 sont déjà traités par l'ISP matériel → pas besoin d'ISP logiciel
-                        isp_should_be_enabled = (isp_enable == 1) and (raw_format >= 2)
-                        if isp_enable == 1 and raw_format < 2:
-                            print(f"[INFO] ISP logiciel ignoré pour {raw_formats[raw_format]} (déjà traité par ISP matériel)")
+                        # === NOUVELLE APPROCHE RAW: ISP/Stretch appliqué EXTERNE pour cohérence preview/stacking ===
+                        # Pour RAW (raw_format >= 2): libastrostack empile les frames BRUTES
+                        # L'ISP + stretch est appliqué dans RPiCamera2.py avec apply_isp_to_preview() + astro_stretch()
+                        # Ceci garantit que le preview et le résultat stacké sont IDENTIQUES
+                        #
+                        # Pour RGB/YUV (raw_format < 2): pas de traitement ISP (déjà fait par ISP matériel)
 
-                        # === MAPPING DYNAMIQUE GUI → ISP (mode RAW uniquement) ===
-                        # Si ISP activé en mode RAW, mapper les paramètres de l'interface vers l'ISP
-                        isp_config_to_use = isp_config_path
-                        if isp_should_be_enabled and isp_config_path:
-                            try:
-                                import json
-                                from libastrostack.isp import ISP
+                        is_raw_mode = (raw_format >= 2)
 
-                                # Charger la config ISP de base
-                                with open(isp_config_path, 'r') as f:
-                                    isp_data = json.load(f)
+                        if is_raw_mode:
+                            print(f"[LIVESTACK RAW] Mode RAW détecté - ISP/stretch seront appliqués EXTERNE")
+                            print(f"  → libastrostack: stacking brut uniquement (isp_enable=False, stretch=none)")
+                            print(f"  → RPiCamera2: appliquera apply_isp_to_preview() + astro_stretch()")
+                        else:
+                            if isp_enable == 1:
+                                print(f"[INFO] ISP logiciel ignoré pour {raw_formats[raw_format]} (déjà traité par ISP matériel)")
 
-                                # MAPPER les paramètres de l'interface GUI vers ISP
-                                # brightness (-100 à +100) → brightness_offset (-1.0 à +1.0)
-                                # Centré sur 0 : -100→-1.0, 0→0.0 (neutre), +100→+1.0
-                                isp_data['brightness_offset'] = brightness / 100.0
-
-                                # contrast (0 à 200) → contrast (0.0 à 2.0)
-                                # Centré sur 100 : 0→0.0, 100→1.0 (neutre), 200→2.0
-                                isp_data['contrast'] = contrast / 100.0
-
-                                # saturation (0 à 20) → saturation (0.0 à 2.0)
-                                # Centré sur 10 : 0→0.0 (N&B), 10→1.0 (neutre), 20→2.0
-                                isp_data['saturation'] = saturation / 10.0
-
-                                # sharpness (0 à 30) → sharpening (0.0 à 3.0, plafonné à 2.0)
-                                # 0→0.0, 10→1.0, 20→2.0 (max ISP), 30→2.0 (plafonné)
-                                isp_data['sharpening'] = min(sharpness / 10.0, 2.0)
-
-                                # Sauvegarder la config ISP temporaire (en mémoire)
-                                session_isp_path = "session_isp_config.json"
-                                with open(session_isp_path, 'w') as f:
-                                    json.dump(isp_data, f, indent=2)
-
-                                isp_config_to_use = session_isp_path
-                                print(f"[ISP MAPPING] Paramètres GUI mappés vers ISP:")
-                                print(f"  Brightness {brightness} → brightness_offset {isp_data['brightness_offset']:.3f}")
-                                print(f"  Contrast {contrast} → contrast {isp_data['contrast']:.3f}")
-                                print(f"  Saturation {saturation} → saturation {isp_data['saturation']:.3f}")
-                                print(f"  Sharpness {sharpness} → sharpening {isp_data['sharpening']:.3f}")
-                            except Exception as e:
-                                print(f"[ISP MAPPING] Erreur lors du mapping GUI→ISP: {e}")
-                                print(f"[ISP MAPPING] Utilisation de la config ISP originale")
-                                isp_config_to_use = isp_config_path
-
-                        # Passer les paramètres ISP ET video_format séparément (À CHAQUE activation)
-                        # Mapper raw_format → video_format pour que l'ISP soit appliqué correctement
+                        # Passer les paramètres à libastrostack
+                        # Pour RAW: désactiver ISP et stretch interne (traitement externe)
+                        # Pour RGB/YUV: pas d'ISP software nécessaire
                         video_format_map = {0: 'yuv420', 1: 'xrgb8888', 2: 'raw12', 3: 'raw16'}
                         livestack.configure(
-                            isp_enable=isp_should_be_enabled,
-                            isp_config_path=isp_config_to_use if isp_should_be_enabled else None,
-                            video_format=video_format_map.get(raw_format, 'yuv420')
+                            isp_enable=False,  # ISP externe pour RAW, pas nécessaire pour RGB/YUV
+                            isp_config_path=None,
+                            video_format=video_format_map.get(raw_format, 'yuv420'),
+                            png_stretch='off' if is_raw_mode else 'ghs',  # Stretch externe pour RAW
+                            # Paramètres GHS pour mode RGB/YUV (libastrostack les applique)
+                            ghs_D=ghs_D / 10.0,
+                            ghs_b=ghs_b / 10.0,
+                            ghs_SP=ghs_SP / 100.0,
+                            ghs_LP=ghs_LP / 100.0,
+                            ghs_HP=ghs_HP / 100.0,
                         )
 
                         # Mettre à jour le format RAW actuel avant de démarrer
@@ -9238,6 +11560,9 @@ while True:
                         # Démarrer la session
                         livestack.start()
 
+                        # Pour RAW mode, l'ISP/stretch sera appliqué externe (dans le code d'affichage)
+                        # Plus besoin de apply_isp_to_session() car libastrostack n'a pas d'ISP actif
+
                         # Réinitialiser compteur de sauvegarde PNG
                         pygame._livestack_last_saved = 0
 
@@ -9248,11 +11573,17 @@ while True:
                         # Désactiver Live Stack
                         livestack_active = False
                         stretch_mode = 0  # Désactiver aussi le stretch
+
                         if livestack is not None:
                             # Sauvegarder le résultat final avant de stopper (si activé)
                             if ls_save_final == 1:
                                 try:
-                                    livestack.save(raw_format_name=raw_formats[raw_format])
+                                    # Mode RAW: utiliser traitement externe pour cohérence avec preview
+                                    if raw_format >= 2:
+                                        save_with_external_processing(livestack, raw_format_name=raw_formats[raw_format])
+                                    else:
+                                        # Mode RGB/YUV: utiliser libastrostack normalement
+                                        livestack.save(raw_format_name=raw_formats[raw_format])
                                     print("[LIVESTACK] Image finale sauvegardée")
                                 except Exception as e:
                                     print(f"[LIVESTACK] Erreur sauvegarde: {e}")
@@ -9274,6 +11605,13 @@ while True:
                         Menu()
                         pygame.display.update()
                         print("[LIVESTACK] Mode désactivé")
+
+                        # *** Reconfigurer caméra pour revenir au mode ISP après le RAW ***
+                        if raw_format >= 2 and not luckystack_active:
+                            print(f"[LIVESTACK] Retour mode ISP - reconfiguration caméra...")
+                            kill_preview_process()
+                            preview()
+                            print(f"[LIVESTACK] Caméra reconfigurée en mode normal")
 
                 elif button_row == 4:
                     # LUCKY STACK - Active/désactive le mode Lucky Imaging
@@ -9300,6 +11638,14 @@ while True:
                         # Activer Lucky Stack
                         luckystack_active = True
 
+                        # *** IMPORTANT: Reconfigurer caméra pour mode RAW ***
+                        # preview() vérifiera luckystack_active et configurera le capture_thread en mode 'raw'
+                        if raw_format >= 2:
+                            print(f"[LUCKYSTACK] Mode RAW - reconfiguration caméra...")
+                            kill_preview_process()
+                            preview()  # Reconfigure avec stream RAW et capture_thread en mode 'raw'
+                            print(f"[LUCKYSTACK] Caméra reconfigurée pour capture RAW")
+
                         # Réinitialiser les compteurs de session Lucky Stack
                         if hasattr(pygame, '_lucky_last_displayed'):
                             delattr(pygame, '_lucky_last_displayed')
@@ -9311,6 +11657,13 @@ while True:
                             delattr(pygame, '_lucky_resolution_check')
                         if hasattr(pygame, '_lucky_stack_resolution_debug'):
                             delattr(pygame, '_lucky_stack_resolution_debug')
+                        # Réinitialiser les flags de validation RAW
+                        if hasattr(pygame, '_raw_format_mismatch_warning'):
+                            delattr(pygame, '_raw_format_mismatch_warning')
+                        if hasattr(pygame, '_raw_resolution_mismatch_warning'):
+                            delattr(pygame, '_raw_resolution_mismatch_warning')
+                        if hasattr(pygame, '_stacking_mode_shown'):
+                            delattr(pygame, '_stacking_mode_shown')
 
                         # Activer le mode stretch pour affichage fullscreen
                         stretch_mode = 1
@@ -9387,76 +11740,37 @@ while True:
                                 save_dng="none"
                             )
 
-                        # Debug ISP avant passage à configure (même code que LiveStack)
-                        print(f"[DEBUG AVANT CONFIGURE] isp_enable variable = {isp_enable} (type: {type(isp_enable)})")
-                        print(f"[DEBUG AVANT CONFIGURE] isp_config_path variable = {isp_config_path}")
-                        print(f"[DEBUG AVANT CONFIGURE] raw_format variable = {raw_format} ({raw_formats[raw_format]})")
+                        # === NOUVELLE APPROCHE RAW: ISP/Stretch appliqué EXTERNE (même que LiveStack) ===
+                        is_raw_mode = (raw_format >= 2)
 
-                        # Logique conditionnelle ISP : N'appliquer l'ISP QUE sur formats RAW (raw12/raw16)
-                        # YUV420/XRGB8888 sont déjà traités par l'ISP matériel → pas besoin d'ISP logiciel
-                        isp_should_be_enabled = (isp_enable == 1) and (raw_format >= 2)
-                        if isp_enable == 1 and raw_format < 2:
-                            print(f"[INFO] ISP logiciel ignoré pour {raw_formats[raw_format]} (déjà traité par ISP matériel)")
+                        if is_raw_mode:
+                            print(f"[LUCKYSTACK RAW] Mode RAW détecté - ISP/stretch seront appliqués EXTERNE")
+                            print(f"  → libastrostack: stacking brut uniquement (isp_enable=False, stretch=none)")
+                            print(f"  → RPiCamera2: appliquera apply_isp_to_preview() + astro_stretch()")
+                        else:
+                            if isp_enable == 1:
+                                print(f"[INFO] ISP logiciel ignoré pour {raw_formats[raw_format]} (déjà traité par ISP matériel)")
 
-                        # === MAPPING DYNAMIQUE GUI → ISP (mode RAW uniquement) ===
-                        # Si ISP activé en mode RAW, mapper les paramètres de l'interface vers l'ISP
-                        isp_config_to_use = isp_config_path
-                        if isp_should_be_enabled and isp_config_path:
-                            try:
-                                import json
-                                from libastrostack.isp import ISP
-
-                                # Charger la config ISP de base
-                                with open(isp_config_path, 'r') as f:
-                                    isp_data = json.load(f)
-
-                                # MAPPER les paramètres de l'interface GUI vers ISP
-                                # brightness (-100 à +100) → brightness_offset (-1.0 à +1.0)
-                                # Centré sur 0 : -100→-1.0, 0→0.0 (neutre), +100→+1.0
-                                isp_data['brightness_offset'] = brightness / 100.0
-
-                                # contrast (0 à 200) → contrast (0.0 à 2.0)
-                                # Centré sur 100 : 0→0.0, 100→1.0 (neutre), 200→2.0
-                                isp_data['contrast'] = contrast / 100.0
-
-                                # saturation (0 à 20) → saturation (0.0 à 2.0)
-                                # Centré sur 10 : 0→0.0 (N&B), 10→1.0 (neutre), 20→2.0
-                                isp_data['saturation'] = saturation / 10.0
-
-                                # sharpness (0 à 30) → sharpening (0.0 à 3.0, plafonné à 2.0)
-                                # 0→0.0, 10→1.0, 20→2.0 (max ISP), 30→2.0 (plafonné)
-                                isp_data['sharpening'] = min(sharpness / 10.0, 2.0)
-
-                                # Sauvegarder la config ISP temporaire (en mémoire)
-                                session_isp_path = "session_isp_config.json"
-                                with open(session_isp_path, 'w') as f:
-                                    json.dump(isp_data, f, indent=2)
-
-                                isp_config_to_use = session_isp_path
-                                print(f"[ISP MAPPING] Paramètres GUI mappés vers ISP:")
-                                print(f"  Brightness {brightness} → brightness_offset {isp_data['brightness_offset']:.3f}")
-                                print(f"  Contrast {contrast} → contrast {isp_data['contrast']:.3f}")
-                                print(f"  Saturation {saturation} → saturation {isp_data['saturation']:.3f}")
-                                print(f"  Sharpness {sharpness} → sharpening {isp_data['sharpening']:.3f}")
-                            except Exception as e:
-                                print(f"[ISP MAPPING] Erreur lors du mapping GUI→ISP: {e}")
-                                print(f"[ISP MAPPING] Utilisation de la config ISP originale")
-                                isp_config_to_use = isp_config_path
-
-                        # CORRECTION: Passer les paramètres ISP séparément (comme LiveStack)
-                        # Mapper raw_format → video_format pour que l'ISP soit appliqué correctement
+                        # Configuration pour mode externe ISP/stretch
                         video_format_map = {0: 'yuv420', 1: 'xrgb8888', 2: 'raw12', 3: 'raw16'}
                         luckystack.configure(
-                            isp_enable=isp_should_be_enabled,
-                            isp_config_path=isp_config_to_use if isp_should_be_enabled else None,
+                            isp_enable=False,  # ISP externe pour RAW
+                            isp_config_path=None,
                             video_format=video_format_map.get(raw_format, 'yuv420'),
+                            png_stretch='off' if is_raw_mode else 'ghs',  # Stretch externe pour RAW
                             # Mettre à jour les paramètres Lucky modifiés entre deux sessions
                             lucky_stack_method=['mean', 'median', 'sigma_clip'][ls_lucky_stack],
                             lucky_buffer_size=ls_lucky_buffer,
                             lucky_keep_percent=float(ls_lucky_keep),
                             lucky_score_method=['laplacian', 'gradient', 'sobel', 'tenengrad'][ls_lucky_score],
                             lucky_align_enabled=bool(ls_lucky_align),
-                            lucky_score_roi_percent=float(ls_lucky_roi)
+                            lucky_score_roi_percent=float(ls_lucky_roi),
+                            # Paramètres GHS pour mode RGB/YUV
+                            ghs_D=ghs_D / 10.0,
+                            ghs_b=ghs_b / 10.0,
+                            ghs_SP=ghs_SP / 100.0,
+                            ghs_LP=ghs_LP / 100.0,
+                            ghs_HP=ghs_HP / 100.0,
                         )
 
                         # Mettre à jour le format RAW actuel avant de démarrer
@@ -9467,6 +11781,9 @@ while True:
 
                         # Démarrer la session
                         luckystack.start()
+
+                        # Pour RAW mode, l'ISP/stretch sera appliqué externe (dans le code d'affichage)
+                        # Plus besoin de apply_isp_to_session() car libastrostack n'a pas d'ISP actif
 
                         # Réinitialiser les compteurs d'affichage et de sauvegarde
                         pygame._lucky_last_displayed = 0
@@ -9494,11 +11811,17 @@ while True:
                         # Désactiver Lucky Stack
                         luckystack_active = False
                         stretch_mode = 0  # Désactiver aussi le stretch
+
                         if luckystack is not None:
                             # Sauvegarder le résultat final avant de stopper (si activé)
                             if ls_lucky_save_final == 1:
                                 try:
-                                    luckystack.save(raw_format_name=raw_formats[raw_format])
+                                    # Mode RAW: utiliser traitement externe pour cohérence avec preview
+                                    if raw_format >= 2:
+                                        save_with_external_processing(luckystack, raw_format_name=raw_formats[raw_format])
+                                    else:
+                                        # Mode RGB/YUV: utiliser libastrostack normalement
+                                        luckystack.save(raw_format_name=raw_formats[raw_format])
                                     print("[LUCKYSTACK] Image finale sauvegardée")
                                 except Exception as e:
                                     print(f"[LUCKYSTACK] Erreur sauvegarde: {e}")
@@ -9521,9 +11844,22 @@ while True:
                         pygame.display.update()
                         print("[LUCKYSTACK] Mode désactivé")
 
+                        # *** Reconfigurer caméra pour revenir au mode ISP après le RAW ***
+                        if raw_format >= 2 and not livestack_active:
+                            print(f"[LUCKYSTACK] Retour mode ISP - reconfiguration caméra...")
+                            kill_preview_process()
+                            preview()
+                            print(f"[LUCKYSTACK] Caméra reconfigurée en mode normal")
+
                 elif button_row == 5:
                     # STRETCH - Active le mode stretch astro pour le preview
                     stretch_mode = 1
+                    # Si format RAW sélectionné, configurer capture_thread pour capturer en RAW
+                    # Cela permet de prévisualiser les images telles qu'elles seront stackées
+                    if raw_format >= 2 and capture_thread is not None:
+                        capture_thread.set_capture_params({'type': 'raw'})
+                        if show_cmds == 1:
+                            print(f"[STRETCH] Mode RAW preview activé - capture_thread configuré en RAW")
                     # Passer en mode fullscreen pour couvrir aussi la barre de tâches
                     display_modes = pygame.display.list_modes()
                     if display_modes and display_modes != -1:
@@ -10149,8 +12485,8 @@ while True:
                    time.sleep(1)
                    text(0,9,2,0,1,"SAVE CONFIG",fv,7)
 
-            # MENU 3    
-            elif menu == 3: 
+            # MENU 3
+            elif menu == 3:
               if button_row == 9:
                   menu = 4
                   Menu()
@@ -10203,6 +12539,7 @@ while True:
                     tduration = tinterval * tshots
                 if mode == 0 and tinterval == 0 :
                     speed = 15
+                    custom_sspeed = 0  # Réinitialiser car on passe en mode manuel
                     shutter = shutters[speed]
                     if shutter < 0:
                         shutter = abs(1/shutter)
@@ -10225,29 +12562,128 @@ while True:
                         if still_limits[f] == 'speed':
                             pmin = still_limits[f+1]
                             pmax = max_speed
+
+                    # Vérifier si c'est un clic sur le slider (zone de la barre)
+                    clicked_on_slider = False
                     if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                        speed = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                        clicked_on_slider = True
                     elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
-                        speed = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
+                        clicked_on_slider = True
                     elif (mousey > preview_height * .75 and mousey < preview_height * .75  + int(bh/3)) and alt_dis == 2:
-                        speed = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
-                    else:
-                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                            speed -=1
-                            speed  = max(speed ,pmin)
+                        clicked_on_slider = True
+
+                    # Détecter le double-clic sur le slider
+                    current_time = time.time()
+                    is_double_click = False
+                    if clicked_on_slider and last_click_row == button_row:
+                        time_diff = current_time - last_click_time
+                        print(f"[DEBUG SPEED] Double-clic détecté? time_diff={time_diff:.3f}s, DELAY={DOUBLE_CLICK_DELAY}")
+                        if time_diff < DOUBLE_CLICK_DELAY:
+                            is_double_click = True
+                            print("[DEBUG SPEED] DOUBLE-CLIC CONFIRMÉ!")
+
+                    # Mettre à jour les variables de détection du double-clic
+                    if clicked_on_slider:
+                        print(f"[DEBUG SPEED] Clic sur slider détecté, button_row={button_row}")
+                        last_click_time = current_time
+                        last_click_row = button_row
+                        last_click_x = mousex
+                        last_click_y = mousey
+
+                    # Si double-clic, afficher le dialogue de saisie PRECISE en millisecondes
+                    if is_double_click:
+                        print("[DEBUG SPEED] Ouverture du dialogue de saisie PRECISE en ms...")
+                        # Afficher la valeur actuelle (custom ou standard)
+                        if custom_sspeed > 0:
+                            current_ms = custom_sspeed / 1000.0
                         else:
-                            speed  +=1
-                            speed = min(speed ,pmax)
-                    shutter = shutters[speed]
-                    if shutter < 0:
-                        shutter = abs(1/shutter)
-                    sspeed = int(shutter * 1000000)
-                    if (shutter * 1000000) - int(shutter * 1000000) > 0.5:
-                        sspeed +=1
-                    if shutters[speed] < 0:
-                        text(0,2,3,1,1,"1/" + str(abs(shutters[speed])),fv,10)
+                            current_ms = shutter_index_to_ms(speed)
+                        # Calculer les limites en ms
+                        min_ms = shutter_index_to_ms(pmin)  # ~0.25ms pour 1/4000s
+                        max_ms = shutter_index_to_ms(pmax)  # Dépend de max_speed
+                        new_ms = numeric_input_dialog(f"Expo en ms ({min_ms:.1f}-{max_ms:.0f})", round(current_ms, 1), 0, int(max_ms) + 1)
+                        if new_ms is not None:
+                            # Stocker la valeur PRECISE en microsecondes
+                            custom_sspeed = int(float(new_ms) * 1000)
+                            # Trouver l'index le plus proche pour l'affichage du slider uniquement
+                            speed = ms_to_shutter_index(float(new_ms))
+                            speed = max(speed, pmin)
+                            speed = min(speed, pmax)
+                            print(f"[DEBUG SPEED] Nouvelle expo PRECISE: {new_ms}ms = {custom_sspeed}µs (slider index {speed})")
+                        # Réinitialiser pour éviter un triple-clic
+                        last_click_time = 0
+                        last_click_row = -1
+                    elif clicked_on_slider:
+                        # Clic simple sur le slider - réinitialiser custom_sspeed
+                        custom_sspeed = 0
+                        if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
+                            speed = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
+                        elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
+                            speed = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
+                        elif (mousey > preview_height * .75 and mousey < preview_height * .75  + int(bh/3)) and alt_dis == 2:
+                            speed = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
                     else:
-                        text(0,2,3,1,1,str(shutters[speed]),fv,10)
+                        # Clic sur les boutons +/- ou zone centrale (main)
+                        # Zone divisée en 3: gauche (0-33%) = "-", centre (33%-66%) = "main", droite (66%-100%) = "+"
+                        click_zone_x = mousex - preview_width
+                        if alt_dis == 0:
+                            if click_zone_x < bw/3:
+                                # Zone gauche: diminuer - réinitialiser custom_sspeed
+                                custom_sspeed = 0
+                                speed -= 1
+                                speed = max(speed, pmin)
+                            elif click_zone_x < 2*bw/3:
+                                # Zone centrale: ouvrir le pavé numérique pour saisie PRECISE en ms
+                                print("[DEBUG SPEED] Clic sur zone centrale (main) - ouverture du pavé numérique")
+                                # Afficher la valeur actuelle (custom ou standard)
+                                if custom_sspeed > 0:
+                                    current_ms = custom_sspeed / 1000.0
+                                else:
+                                    current_ms = shutter_index_to_ms(speed)
+                                min_ms = shutter_index_to_ms(pmin)
+                                max_ms = shutter_index_to_ms(pmax)
+                                new_ms = numeric_input_dialog(f"Expo en ms ({min_ms:.1f}-{max_ms:.0f})", round(current_ms, 1), 0, int(max_ms) + 1)
+                                if new_ms is not None:
+                                    # Stocker la valeur PRECISE en microsecondes
+                                    custom_sspeed = int(float(new_ms) * 1000)
+                                    # Trouver l'index le plus proche pour l'affichage du slider uniquement
+                                    speed = ms_to_shutter_index(float(new_ms))
+                                    speed = max(speed, pmin)
+                                    speed = min(speed, pmax)
+                                    print(f"[DEBUG SPEED] Nouvelle expo PRECISE: {new_ms}ms = {custom_sspeed}µs (slider index {speed})")
+                            else:
+                                # Zone droite: augmenter - réinitialiser custom_sspeed
+                                custom_sspeed = 0
+                                speed += 1
+                                speed = min(speed, pmax)
+                        elif alt_dis > 0 and button_pos == 0:
+                            custom_sspeed = 0
+                            speed -= 1
+                            speed = max(speed, pmin)
+                        else:
+                            custom_sspeed = 0
+                            speed += 1
+                            speed = min(speed, pmax)
+
+                    # Calculer sspeed: utiliser custom_sspeed si défini, sinon depuis shutters[speed]
+                    if custom_sspeed > 0:
+                        sspeed = custom_sspeed
+                        # Afficher la valeur en ms
+                        if sspeed >= 1000000:
+                            text(0,2,3,1,1,f"{sspeed/1000000:.1f}s",fv,10)
+                        else:
+                            text(0,2,3,1,1,f"{sspeed/1000:.1f}ms",fv,10)
+                    else:
+                        shutter = shutters[speed]
+                        if shutter < 0:
+                            shutter = abs(1/shutter)
+                        sspeed = int(shutter * 1000000)
+                        if (shutter * 1000000) - int(shutter * 1000000) > 0.5:
+                            sspeed +=1
+                        if shutters[speed] < 0:
+                            text(0,2,3,1,1,"1/" + str(abs(shutters[speed])),fv,10)
+                        else:
+                            text(0,2,3,1,1,str(shutters[speed]),fv,10)
                     draw_bar(0,2,lgrnColor,'speed',speed)
                     if tinterval > 0:
                         tinterval = int(sspeed/1000000)
@@ -10255,7 +12691,7 @@ while True:
                         td = timedelta(seconds=tinterval)
                         tduration = tinterval * tshots
                         td = timedelta(seconds=tduration)
-                        
+
                     time.sleep(.25)
                     restart = 1
                 else:
@@ -10264,48 +12700,169 @@ while True:
                         if still_limits[f] == 'ev':
                             pmin = still_limits[f+1]
                             pmax = still_limits[f+2]
+
+                    # Vérifier si c'est un clic sur le slider (zone de la barre)
+                    clicked_on_slider = False
                     if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                        ev = int(((mousex-preview_width) / bw) * (pmax+1-pmin)) + pmin 
+                        clicked_on_slider = True
                     elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
-                        ev = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin)) + pmin
+                        clicked_on_slider = True
                     elif (mousey > preview_height * .75  and mousey < preview_height * .75 + int(bh/3)) and alt_dis == 2:
-                        ev = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin)) + pmin
+                        clicked_on_slider = True
+
+                    # Détecter le double-clic sur le slider
+                    current_time = time.time()
+                    is_double_click = False
+                    if clicked_on_slider and last_click_row == button_row:
+                        time_diff = current_time - last_click_time
+                        print(f"[DEBUG EV] Double-clic détecté? time_diff={time_diff:.3f}s, DELAY={DOUBLE_CLICK_DELAY}")
+                        if time_diff < DOUBLE_CLICK_DELAY:
+                            is_double_click = True
+                            print("[DEBUG EV] DOUBLE-CLIC CONFIRMÉ!")
+
+                    # Mettre à jour les variables de détection du double-clic
+                    if clicked_on_slider:
+                        print(f"[DEBUG EV] Clic sur slider détecté, button_row={button_row}")
+                        last_click_time = current_time
+                        last_click_row = button_row
+                        last_click_x = mousex
+                        last_click_y = mousey
+
+                    # Si double-clic, afficher le dialogue de saisie
+                    if is_double_click:
+                        print("[DEBUG EV] Ouverture du dialogue de saisie...")
+                        new_ev = numeric_input_dialog("Saisir EV (" + str(pmin) + " a " + str(pmax) + ")", ev, pmin, pmax)
+                        if new_ev is not None:
+                            ev = int(new_ev)
+                            print(f"[DEBUG EV] Nouvelle valeur EV saisie: {ev}")
+                        # Réinitialiser pour éviter un triple-clic
+                        last_click_time = 0
+                        last_click_row = -1
+                    elif clicked_on_slider:
+                        # Clic simple sur le slider
+                        if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
+                            ev = int(((mousex-preview_width) / bw) * (pmax+1-pmin)) + pmin
+                        elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
+                            ev = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin)) + pmin
+                        elif (mousey > preview_height * .75  and mousey < preview_height * .75 + int(bh/3)) and alt_dis == 2:
+                            ev = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin)) + pmin
                     else:
-                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                            ev -=1
-                            ev  = max(ev ,pmin)
+                        # Clic sur les boutons +/- ou zone centrale (main)
+                        # Zone divisée en 3: gauche (0-33%) = "-", centre (33%-66%) = "main", droite (66%-100%) = "+"
+                        click_zone_x = mousex - preview_width
+                        if alt_dis == 0:
+                            # Mode normal: calculer la position relative dans la zone de bouton
+                            if click_zone_x < bw/3:
+                                # Zone gauche: diminuer
+                                ev -= 1
+                                ev = max(ev, pmin)
+                            elif click_zone_x < 2*bw/3:
+                                # Zone centrale: ouvrir le pavé numérique
+                                print("[DEBUG EV] Clic sur zone centrale (main) - ouverture du pavé numérique")
+                                new_ev = numeric_input_dialog("Saisir EV (" + str(pmin) + " a " + str(pmax) + ")", ev, pmin, pmax)
+                                if new_ev is not None:
+                                    ev = int(new_ev)
+                                    print(f"[DEBUG EV] Nouvelle valeur EV saisie: {ev}")
+                            else:
+                                # Zone droite: augmenter
+                                ev += 1
+                                ev = min(ev, pmax)
+                        elif alt_dis > 0 and button_pos == 0:
+                            ev -= 1
+                            ev = max(ev, pmin)
                         else:
-                            ev  +=1
-                            ev = min(ev ,pmax)
+                            ev += 1
+                            ev = min(ev, pmax)
                     text(0,2,3,1,1,str(ev),fv,10)
                     draw_bar(0,2,lgrnColor,'ev',ev)
                     time.sleep(0.25)
                     restart = 1
-                    
+
               elif button_row == 3:
                 # GAIN
                 for f in range(0,len(still_limits)-1,3):
                     if still_limits[f] == 'gain':
                         pmin = still_limits[f+1]
                         pmax = still_limits[f+2]
+
+                # Vérifier si c'est un clic sur le slider (zone de la barre)
+                clicked_on_slider = False
                 if (mousex > preview_width and mousex < preview_width + bw and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    slider_val = min(int(((mousex-preview_width) / bw) * (pmax+1-pmin)), pmax)
-                    gain = slider_to_gain_nonlinear(slider_val, pmax)
+                    clicked_on_slider = True
                 elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
-                    slider_val = min(int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin)), pmax)
-                    gain = slider_to_gain_nonlinear(slider_val, pmax)
+                    clicked_on_slider = True
                 elif (mousey > preview_height * .75  and mousey < preview_height * .75 + int(bh/3)) and alt_dis == 2:
-                    slider_val = min(int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin)), pmax)
-                    gain = slider_to_gain_nonlinear(slider_val, pmax)
+                    clicked_on_slider = True
+
+                # Détecter le double-clic sur le slider
+                current_time = time.time()
+                is_double_click = False
+                if clicked_on_slider and last_click_row == button_row:
+                    time_diff = current_time - last_click_time
+                    print(f"[DEBUG GAIN] Double-clic détecté? time_diff={time_diff:.3f}s, DELAY={DOUBLE_CLICK_DELAY}")
+                    if time_diff < DOUBLE_CLICK_DELAY:
+                        is_double_click = True
+                        print("[DEBUG GAIN] DOUBLE-CLIC CONFIRMÉ!")
+
+                # Mettre à jour les variables de détection du double-clic
+                if clicked_on_slider:
+                    print(f"[DEBUG GAIN] Clic sur slider détecté, button_row={button_row}")
+                    last_click_time = current_time
+                    last_click_row = button_row
+                    last_click_x = mousex
+                    last_click_y = mousey
+
+                # Si double-clic, afficher le dialogue de saisie
+                if is_double_click:
+                    print("[DEBUG GAIN] Ouverture du dialogue de saisie...")
+                    new_gain = numeric_input_dialog("Saisir le Gain (1-" + str(pmax) + ")", gain, 1, pmax)
+                    if new_gain is not None:
+                        gain = int(new_gain)
+                        print(f"[DEBUG GAIN] Nouveau gain saisi: {gain}")
+                    # Réinitialiser pour éviter un triple-clic
+                    last_click_time = 0
+                    last_click_row = -1
+                elif clicked_on_slider:
+                    # Clic simple sur le slider : ajuster la valeur
+                    if (mousex > preview_width and mousex < preview_width + bw and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
+                        slider_val = min(int(((mousex-preview_width) / bw) * (pmax+1-pmin)), pmax)
+                        gain = slider_to_gain_nonlinear(slider_val, pmax)
+                    elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
+                        slider_val = min(int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin)), pmax)
+                        gain = slider_to_gain_nonlinear(slider_val, pmax)
+                    elif (mousey > preview_height * .75  and mousey < preview_height * .75 + int(bh/3)) and alt_dis == 2:
+                        slider_val = min(int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin)), pmax)
+                        gain = slider_to_gain_nonlinear(slider_val, pmax)
                 else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        # Bouton - : décrémenter directement le gain
+                    # Clic sur les boutons +/- ou zone centrale (main)
+                    # Zone divisée en 3: gauche (0-33%) = "-", centre (33%-66%) = "main", droite (66%-100%) = "+"
+                    click_zone_x = mousex - preview_width
+                    if alt_dis == 0:
+                        if click_zone_x < bw/3:
+                            # Zone gauche: diminuer
+                            if gain <= 1000:
+                                gain = max(gain - 1, 1)
+                            else:
+                                gain = max(gain - 10, 1000)
+                        elif click_zone_x < 2*bw/3:
+                            # Zone centrale: ouvrir le pavé numérique
+                            print("[DEBUG GAIN] Clic sur zone centrale (main) - ouverture du pavé numérique")
+                            new_gain = numeric_input_dialog("Saisir le Gain (1-" + str(pmax) + ")", gain, 1, pmax)
+                            if new_gain is not None:
+                                gain = int(new_gain)
+                                print(f"[DEBUG GAIN] Nouveau gain saisi: {gain}")
+                        else:
+                            # Zone droite: augmenter
+                            if gain < 1000:
+                                gain = min(gain + 1, pmax)
+                            else:
+                                gain = min(gain + 10, pmax)
+                    elif alt_dis > 0 and button_pos == 0:
                         if gain <= 1000:
                             gain = max(gain - 1, 1)
                         else:
                             gain = max(gain - 10, 1000)
                     else:
-                        # Bouton + : incrémenter directement le gain
                         if gain < 1000:
                             gain = min(gain + 1, pmax)
                         else:
@@ -11374,6 +13931,7 @@ while True:
                         text(0,3,3,1,1," ",fv,12)
                         if mode == 0:
                             speed = 15
+                            custom_sspeed = 0  # Réinitialiser car speed a changé
                             shutter = shutters[speed]
                             if shutter < 0:
                                 shutter = abs(1/shutter)
