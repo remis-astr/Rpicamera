@@ -582,23 +582,27 @@ class ISP:
 
         Args:
             image: Image en float32
-            swap_rb: Si True, inverse les gains R/B (pour compenser l'inversion dans le débayeurisation RAW)
+            swap_rb: Si True, inverse les canaux R/B avant d'appliquer les gains
+                     (pour compenser l'inversion dans la débayeurisation RAW)
         """
         if len(image.shape) != 3 or image.shape[2] != 3:
             return image
 
         img = image.copy()
 
-        # Si swap_rb=True (pour RAW), inverser les gains R/B
-        # Car le débayeurisation inverse les canaux (lignes 4931-4932 de RPiCamera2.py)
+        # Si swap_rb=True (pour RAW), inverser les canaux R/B de l'image
+        # Car la débayeurisation peut inverser les canaux
         if swap_rb:
-            img[:, :, 0] *= self.config.wb_blue_gain   # Canal Rouge reçoit gain Bleu
-            img[:, :, 1] *= self.config.wb_green_gain
-            img[:, :, 2] *= self.config.wb_red_gain    # Canal Bleu reçoit gain Rouge
-        else:
-            img[:, :, 0] *= self.config.wb_red_gain
-            img[:, :, 1] *= self.config.wb_green_gain
-            img[:, :, 2] *= self.config.wb_blue_gain
+            # Inverser les canaux R et B de l'image, puis appliquer les gains normalement
+            img = img[:, :, ::-1].copy()  # BGR -> RGB (inverse canaux 0 et 2)
+
+        # ATTENTION: pygame fait un swap R↔B pour l'affichage ([:,:,[2,1,0]])
+        # Donc on applique wb_red sur canal 2 et wb_blue sur canal 0 pour que
+        # l'effet corresponde visuellement au label du slider
+        # INVERSÉ pour compenser le swap pygame [:,:,[2,1,0]]
+        img[:, :, 2] *= self.config.wb_red_gain   # Canal 2 natif → Rouge à l'écran
+        img[:, :, 1] *= self.config.wb_green_gain
+        img[:, :, 0] *= self.config.wb_blue_gain  # Canal 0 natif → Bleu à l'écran
 
         return np.clip(img, 0, 1)
 
