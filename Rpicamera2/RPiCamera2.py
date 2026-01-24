@@ -1176,13 +1176,17 @@ def debayer_raw_array(raw_array, raw_format_str, red_gain=1.0, blue_gain=1.0, ap
         # Convertir en float32 pour appliquer les gains sans overflow
         rgb_float = rgb_uint16.astype(np.float32)
 
-        # Inverser rouge et bleu si demandé (utile si le pattern Bayer inverse les couleurs)
+        # ATTENTION: pygame fait un swap R↔B pour l'affichage ([:,:,[2,1,0]])
+        # Donc on applique red_gain sur canal 2 et blue_gain sur canal 0 pour que
+        # l'effet corresponde visuellement au label du slider
         if swap_rb:
-            rgb_float[:, :, 0] *= blue_gain  # Canal Rouge reçoit le gain bleu
-            rgb_float[:, :, 2] *= red_gain   # Canal Bleu reçoit le gain rouge
+            # Mode swap_rb activé (rare) - inverser l'inversion
+            rgb_float[:, :, 0] *= red_gain   # Canal 0 → Rouge à l'écran (après double swap)
+            rgb_float[:, :, 2] *= blue_gain  # Canal 2 → Bleu à l'écran (après double swap)
         else:
-            rgb_float[:, :, 0] *= red_gain   # Canal Rouge
-            rgb_float[:, :, 2] *= blue_gain  # Canal Bleu
+            # Mode normal - INVERSÉ pour compenser le swap pygame [:,:,[2,1,0]]
+            rgb_float[:, :, 2] *= red_gain   # Canal 2 natif → Rouge à l'écran
+            rgb_float[:, :, 0] *= blue_gain  # Canal 0 natif → Bleu à l'écran
         # Canal Vert (index 1) : gain = 1.0, pas de modification
 
         # Cliper et reconvertir en uint16
@@ -4209,15 +4213,18 @@ def draw_stretch_histogram(screen_width, screen_height, image_array):
         bins = np.linspace(0, 256, num_bins + 1)
 
         # Calculer les histogrammes avec moins de bins
-        hist_r, _ = np.histogram(img_sampled[:,:,0].ravel(), bins=bins)
+        # ATTENTION: L'image a les canaux inversés pour compenser le swap pygame [:,:,[2,1,0]]
+        # Canal 0 = Bleu (affiché), Canal 2 = Rouge (affiché)
+        hist_r, _ = np.histogram(img_sampled[:,:,2].ravel(), bins=bins)  # Canal 2 = Rouge affiché
         hist_g, _ = np.histogram(img_sampled[:,:,1].ravel(), bins=bins)
-        hist_b, _ = np.histogram(img_sampled[:,:,2].ravel(), bins=bins)
+        hist_b, _ = np.histogram(img_sampled[:,:,0].ravel(), bins=bins)  # Canal 0 = Bleu affiché
 
         # Luminance optimisée (calcul vectorisé sur image sous-échantillonnée)
         # Utiliser une approximation rapide: (R + G + G + B) / 4
-        gray = ((img_sampled[:,:,0].astype(np.uint16) +
+        # Adapter aux canaux inversés: canal 2=R, canal 0=B
+        gray = ((img_sampled[:,:,2].astype(np.uint16) +
                  img_sampled[:,:,1].astype(np.uint16) * 2 +
-                 img_sampled[:,:,2].astype(np.uint16)) >> 2).astype(np.uint8)
+                 img_sampled[:,:,0].astype(np.uint16)) >> 2).astype(np.uint8)
         hist_l, _ = np.histogram(gray.ravel(), bins=bins)
 
         # OPTIMISATION 3: Lissage par moyenne mobile (kernel size 3)
@@ -5361,14 +5368,14 @@ def apply_isp_to_preview(array):
         if img.max() > 0:
             img = img / img.max()
 
-    # 2. White balance (IDENTIQUE à ISP._apply_white_balance)
-    # IMPORTANT: Les canaux R et B sont inversés dans le pipeline RAW
-    # (cv2.cvtColor retourne BGR, pas RGB malgré le nom COLOR_BayerRG2RGB)
-    # Donc: canal 0 = Bleu, canal 2 = Rouge
+    # 2. White balance - ATTENTION: pygame fait un swap R↔B pour l'affichage ([:,:,[2,1,0]])
+    # Donc on doit appliquer wb_r sur canal 2 et wb_b sur canal 0 pour que l'effet
+    # corresponde visuellement au label du slider
     if wb_r != 1.0 or wb_g != 1.0 or wb_b != 1.0:
-        img[:, :, 0] = img[:, :, 0] * wb_b  # Canal 0 = Bleu
-        img[:, :, 1] = img[:, :, 1] * wb_g  # Canal 1 = Vert
-        img[:, :, 2] = img[:, :, 2] * wb_r  # Canal 2 = Rouge
+        # INVERSÉ pour compenser le swap pygame [:,:,[2,1,0]]
+        img[:, :, 2] = img[:, :, 2] * wb_r  # Canal 2 natif → Rouge à l'écran
+        img[:, :, 1] = img[:, :, 1] * wb_g  # Canal 1 = Vert (inchangé)
+        img[:, :, 0] = img[:, :, 0] * wb_b  # Canal 0 natif → Bleu à l'écran
         img = np.clip(img, 0, 1)
 
     # 3. Gamma correction (IDENTIQUE à ISP._apply_gamma)
@@ -8181,11 +8188,11 @@ while True:
                         # Frame ISP ignorée - on attend une vraie frame RAW
                         continue  # Sauter cette itération et attendre une vraie frame RAW
 
-                    # *** NOUVEAU : Passer les gains AWB pour corriger la balance des blancs en RAW ***
-                    # INVERSÉS pour compenser le pattern Bayer RGGB qui inverse les canaux
+                    # *** Passer les gains AWB pour corriger la balance des blancs en RAW ***
+                    # Les gains sont appliqués correctement : rouge sur rouge, bleu sur bleu
                     array_uint16 = debayer_raw_array(raw_array, raw_formats[raw_format],
-                                                      red_gain=(blue/10),   # Le curseur BLEU contrôle le rouge
-                                                      blue_gain=(red/10),   # Le curseur ROUGE contrôle le bleu
+                                                      red_gain=(red/10),    # Curseur rouge → canal rouge
+                                                      blue_gain=(blue/10),  # Curseur bleu → canal bleu
                                                       fix_bad_pixels=bool(fix_bad_pixels) and livestack_active,  # SEULEMENT LiveStack, PAS LuckyStack
                                                       sigma_threshold=fix_bad_pixels_sigma/10.0,
                                                       min_adu_threshold=fix_bad_pixels_min_adu/10.0)
