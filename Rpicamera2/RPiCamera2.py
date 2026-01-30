@@ -4108,11 +4108,30 @@ def draw_stretch_controls(screen_width, screen_height, image_array=None):
             "Clip High %", stretch_p_high / 100.0, 99.5, 100.0, (100, 180, 140)
         )
     else:
-        # Mode OFF - pas de contrôles
+        # Mode OFF - pas de contrôles de stretch
         title = "Stretch OFF"
         title_color = (150, 150, 150)
         title_text = fontObj.render(title, True, title_color)
         windowSurfaceObj.blit(title_text, (start_x, 20))
+
+        # Message explicatif
+        cache_key_info = 18
+        if cache_key_info not in _font_cache:
+            _font_cache[cache_key_info] = pygame.font.Font(None, cache_key_info)
+        infoFont = _font_cache[cache_key_info]
+
+        info_lines = [
+            "Le stretch est desactive.",
+            "Pour activer le stretch:",
+            "  - Utilisez le menu principal",
+            "  - Selectionnez GHS ou Arcsinh",
+            "",
+            "Les images stackees seront",
+            "sauvegardees sans stretch."
+        ]
+        for i, line in enumerate(info_lines):
+            info_text = infoFont.render(line, True, (120, 120, 130))
+            windowSurfaceObj.blit(info_text, (start_x, start_y + i * 20))
 
     # =========================================================================
     # SECTION EXPOSURE (Gain + Temps d'exposition) - À droite de l'écran pour YUV/RGB
@@ -4924,7 +4943,32 @@ def draw_raw_controls(screen_width, screen_height, image_array=None):
             _font_cache[cache_key_title] = pygame.font.Font(None, cache_key_title)
         titleFont = _font_cache[cache_key_title]
 
-        if stretch_preset == 2:
+        if stretch_preset == 0:
+            # Mode OFF - Pas de sliders, juste un message
+            title = titleFont.render("Stretch OFF", True, (150, 150, 150))
+            windowSurfaceObj.blit(title, (start_x, start_y))
+            start_y += 30
+
+            # Message explicatif
+            cache_key_info = 18
+            if cache_key_info not in _font_cache:
+                _font_cache[cache_key_info] = pygame.font.Font(None, cache_key_info)
+            infoFont = _font_cache[cache_key_info]
+
+            info_lines = [
+                "Le stretch est desactive.",
+                "Pour activer le stretch:",
+                "  - Utilisez le menu principal",
+                "  - Selectionnez GHS ou Arcsinh",
+                "",
+                "Les images stackees seront",
+                "sauvegardees sans stretch."
+            ]
+            for i, line in enumerate(info_lines):
+                info_text = infoFont.render(line, True, (120, 120, 130))
+                windowSurfaceObj.blit(info_text, (start_x, start_y + i * 20))
+
+        elif stretch_preset == 2:
             # Mode Arcsinh
             title = titleFont.render("Arcsinh Stretch Parameters", True, (200, 150, 100))
             windowSurfaceObj.blit(title, (start_x, start_y))
@@ -4949,7 +4993,7 @@ def draw_raw_controls(screen_width, screen_height, image_array=None):
             control_rects['reset'] = reset_rect
             control_rects['save'] = save_rect
         else:
-            # Mode GHS (par défaut)
+            # Mode GHS (stretch_preset == 1)
             title = titleFont.render("GHS Stretch Parameters", True, (100, 200, 150))
             windowSurfaceObj.blit(title, (start_x, start_y))
             start_y += 25
@@ -5035,10 +5079,7 @@ def handle_raw_slider_click(mousex, mousey, control_rects):
         return True
     if 'tab_stretch' in control_rects and control_rects['tab_stretch'].collidepoint(mousex, mousey):
         raw_adjust_tab = 1
-        # Activer automatiquement le preset GHS quand on ouvre l'onglet STRETCH
-        if stretch_preset == 0:
-            stretch_preset = 1
-            print("[RAW PANEL] GHS stretch activé automatiquement")
+        # Ne plus activer automatiquement GHS - respecter le choix utilisateur OFF
         return True
 
     # Vérifier clic sur boutons RESET et SAVE
@@ -9299,7 +9340,7 @@ while True:
                     isp_enable=False,
                     isp_config_path=None,
                     video_format=video_format_map.get(raw_format, 'yuv420'),
-                    png_stretch='off' if is_raw_mode else 'ghs',
+                    png_stretch='off' if is_raw_mode else ['off', 'ghs', 'asinh'][stretch_preset],  # Respecter le choix utilisateur
                     ghs_D=ghs_D / 10.0,
                     ghs_b=ghs_b / 10.0,
                     ghs_SP=ghs_SP / 100.0,
@@ -11549,7 +11590,7 @@ while True:
                             isp_enable=False,  # ISP externe pour RAW, pas nécessaire pour RGB/YUV
                             isp_config_path=None,
                             video_format=video_format_map.get(raw_format, 'yuv420'),
-                            png_stretch='off' if is_raw_mode else 'ghs',  # Stretch externe pour RAW
+                            png_stretch='off' if is_raw_mode else ['off', 'ghs', 'asinh'][stretch_preset],  # Respecter le choix utilisateur
                             # Paramètres GHS pour mode RGB/YUV (libastrostack les applique)
                             ghs_D=ghs_D / 10.0,
                             ghs_b=ghs_b / 10.0,
@@ -11764,7 +11805,7 @@ while True:
                             isp_enable=False,  # ISP externe pour RAW
                             isp_config_path=None,
                             video_format=video_format_map.get(raw_format, 'yuv420'),
-                            png_stretch='off' if is_raw_mode else 'ghs',  # Stretch externe pour RAW
+                            png_stretch='off' if is_raw_mode else ['off', 'ghs', 'asinh'][stretch_preset],  # Respecter le choix utilisateur
                             # Mettre à jour les paramètres Lucky modifiés entre deux sessions
                             lucky_stack_method=['mean', 'median', 'sigma_clip'][ls_lucky_stack],
                             lucky_buffer_size=ls_lucky_buffer,
