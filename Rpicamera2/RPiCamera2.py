@@ -65,7 +65,7 @@ from libastrostack.rpicamera_livestack import create_livestack_session
 from libastrostack.rpicamera_livestack_advanced import create_advanced_livestack_session
 
 # Import Allsky module (dans libastrostack/)
-from libastrostack.allsky import AllskyMeanController
+from libastrostack.allsky import AllskyMeanController, stack_timelapse_images
 
 # ============================================================================
 # Helper pour tuer le subprocess rpicam-vid (mode non-Picamera2)
@@ -1881,6 +1881,8 @@ allsky_video_fps = 25        # FPS pour la vidéo finale assemblée (15-60)
 allsky_max_gain = 200        # Gain maximum autorisé en mode Auto-Gain (50-500)
 allsky_apply_stretch = 1     # 0=OFF, 1=ON (appliquer stretch sur chaque frame)
 allsky_cleanup_jpegs = 0     # 0=garder JPEG, 1=supprimer après assemblage vidéo
+allsky_stack_enable = 0      # 0=OFF, 1=ON (stacker N images pour chaque frame timelapse)
+allsky_stack_count = 3       # Nombre d'images à stacker (2-10)
 allsky_modes = ['OFF', 'ON', 'Auto-Gain']
 
 # Options de sauvegarde LiveStack/LuckyStack
@@ -1897,7 +1899,8 @@ video_limits = ['vlen',0,3600,'fps',1,180,'v5_focus',10,2500,'vformat',0,7,'0',0
                 'ghs_D',-10,100,'ghs_b',-300,100,'ghs_SP',0,100,'ghs_LP',0,100,'ghs_HP',0,100,'ghs_preset',0,3,'use_native_sensor_mode',0,1,
                 'raw_format',0,3,'focus_method',0,4,'star_metric',0,2,'snr_display',0,1,'metrics_interval',1,10,
                 'allsky_mode',0,2,'allsky_mean_target',10,60,'allsky_mean_threshold',2,15,'allsky_video_fps',15,60,
-                'allsky_max_gain',50,500,'allsky_apply_stretch',0,1,'allsky_cleanup_jpegs',0,1]
+                'allsky_max_gain',50,500,'allsky_apply_stretch',0,1,'allsky_cleanup_jpegs',0,1,
+                'allsky_stack_enable',0,1,'allsky_stack_count',2,10]
 
 livestack_limits = [
     # Existants
@@ -1945,6 +1948,7 @@ titles = ['mode','speed','gain','brightness','contrast','frame','red','blue','ev
           'ls_lucky_buffer','ls_lucky_keep','ls_lucky_score','ls_lucky_stack','ls_lucky_align','ls_lucky_roi','use_native_sensor_mode',
           'focus_method','star_metric','snr_display','metrics_interval','ls_lucky_save_progress','isp_enable',
           'allsky_mode','allsky_mean_target','allsky_mean_threshold','allsky_video_fps','allsky_max_gain','allsky_apply_stretch','allsky_cleanup_jpegs',
+          'allsky_stack_enable','allsky_stack_count',
           'ls_save_progress','ls_save_final','ls_lucky_save_final',
           'fix_bad_pixels','fix_bad_pixels_sigma','fix_bad_pixels_min_adu']
 points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat,codec,tinterval,tshots,extn,zx,zy,zoom,saturation,
@@ -1956,6 +1960,7 @@ points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat
           ls_lucky_buffer,ls_lucky_keep,ls_lucky_score,ls_lucky_stack,ls_lucky_align,ls_lucky_roi,use_native_sensor_mode,
           focus_method,star_metric,snr_display,metrics_interval,ls_lucky_save_progress,isp_enable,
           allsky_mode,allsky_mean_target,allsky_mean_threshold,allsky_video_fps,allsky_max_gain,allsky_apply_stretch,allsky_cleanup_jpegs,
+          allsky_stack_enable,allsky_stack_count,
           ls_save_progress,ls_save_final,ls_lucky_save_final,
           fix_bad_pixels,fix_bad_pixels_sigma,fix_bad_pixels_min_adu]
 if not os.path.exists(config_file):
@@ -2179,6 +2184,11 @@ if len(config) <= 89:
     config.append(1)     # allsky_apply_stretch par défaut (ON)
 if len(config) <= 90:
     config.append(0)     # allsky_cleanup_jpegs par défaut (keep JPEGs)
+# Ajouter les paramètres de stacking ALLSKY si le fichier de config est ancien
+if len(config) <= 97:
+    config.append(0)     # allsky_stack_enable par défaut (OFF)
+if len(config) <= 98:
+    config.append(3)     # allsky_stack_count par défaut (3 images)
 # Ajouter les paramètres de sauvegarde LiveStack/LuckyStack si le fichier de config est ancien
 if len(config) <= 91:
     config.append(1)     # ls_save_progress par défaut (ON)
@@ -2195,6 +2205,8 @@ allsky_video_fps      = config[87] if len(config) > 87 else 25
 allsky_max_gain       = config[88] if len(config) > 88 else 200
 allsky_apply_stretch  = config[89] if len(config) > 89 else 1
 allsky_cleanup_jpegs  = config[90] if len(config) > 90 else 0
+allsky_stack_enable   = config[97] if len(config) > 97 else 0
+allsky_stack_count    = config[98] if len(config) > 98 else 3
 
 # Options de sauvegarde LiveStack/LuckyStack
 ls_save_progress      = config[91] if len(config) > 91 else 1
@@ -3699,6 +3711,254 @@ def numeric_input_dialog(title, current_value, min_value, max_value):
                             input_text = str(current_value)
                     except ValueError:
                         input_text = str(current_value)
+
+                # Vérifier le bouton Annuler
+                if cancel_rect.collidepoint(mouse_pos):
+                    running = False
+                    result = None
+
+    # Restaurer l'écran
+    windowSurfaceObj.blit(screen_backup, (0, 0))
+    pygame.display.flip()
+
+    return result
+
+def duration_input_dialog(title, current_seconds, min_seconds, max_seconds):
+    """
+    Affiche une boîte de dialogue pour saisir une durée avec boutons H/M/S.
+    Permet d'ajouter des heures, minutes et secondes facilement.
+
+    Args:
+        title: Titre de la boîte de dialogue
+        current_seconds: Durée actuelle en secondes
+        min_seconds: Durée minimale autorisée
+        max_seconds: Durée maximale autorisée
+
+    Returns:
+        La nouvelle durée en secondes, ou None si annulé
+    """
+    global windowSurfaceObj, whiteColor, blackColor, greyColor, dgryColor, greenColor, redColor, blueColor, yellowColor
+
+    # Dimensions de la boîte de dialogue
+    dialog_width = 360
+    dialog_height = 480
+    dialog_x = (windowSurfaceObj.get_width() - dialog_width) // 2
+    dialog_y = (windowSurfaceObj.get_height() - dialog_height) // 2
+
+    # Sauvegarder l'écran actuel
+    screen_backup = windowSurfaceObj.copy()
+
+    # Durée en cours de saisie (en secondes)
+    total_seconds = int(current_seconds)
+
+    # Police pour l'affichage
+    try:
+        font_large = pygame.font.Font('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 32)
+        font_medium = pygame.font.Font('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 22)
+        font_small = pygame.font.Font('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 16)
+    except:
+        font_large = pygame.font.Font(None, 32)
+        font_medium = pygame.font.Font(None, 22)
+        font_small = pygame.font.Font(None, 16)
+
+    # Disposition du clavier numérique
+    keys = [
+        ['7', '8', '9'],
+        ['4', '5', '6'],
+        ['1', '2', '3'],
+        ['0', 'C', 'Del']
+    ]
+
+    key_width = 65
+    key_height = 42
+    key_margin = 6
+    keyboard_y = dialog_y + 170
+
+    # Boutons H/M/S
+    hms_button_width = 100
+    hms_button_height = 40
+    hms_y = dialog_y + 100
+
+    running = True
+    result = None
+    input_buffer = ""  # Buffer pour la saisie numérique directe
+
+    while running:
+        # Calculer H:M:S depuis total_seconds
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        display_time = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+        # Fond semi-transparent
+        s = pygame.Surface((windowSurfaceObj.get_width(), windowSurfaceObj.get_height()))
+        s.set_alpha(180)
+        s.fill((0, 0, 0))
+        windowSurfaceObj.blit(screen_backup, (0, 0))
+        windowSurfaceObj.blit(s, (0, 0))
+
+        # Boîte de dialogue principale
+        pygame.draw.rect(windowSurfaceObj, dgryColor, (dialog_x, dialog_y, dialog_width, dialog_height))
+        pygame.draw.rect(windowSurfaceObj, whiteColor, (dialog_x, dialog_y, dialog_width, dialog_height), 2)
+
+        # Titre
+        title_surface = font_medium.render(title, True, whiteColor)
+        title_rect = title_surface.get_rect(center=(dialog_x + dialog_width // 2, dialog_y + 22))
+        windowSurfaceObj.blit(title_surface, title_rect)
+
+        # Affichage de la durée HH:MM:SS
+        time_bg_rect = pygame.Rect(dialog_x + 30, dialog_y + 45, dialog_width - 60, 45)
+        pygame.draw.rect(windowSurfaceObj, blackColor, time_bg_rect)
+        pygame.draw.rect(windowSurfaceObj, greenColor, time_bg_rect, 2)
+
+        time_surface = font_large.render(display_time, True, whiteColor)
+        time_rect = time_surface.get_rect(center=time_bg_rect.center)
+        windowSurfaceObj.blit(time_surface, time_rect)
+
+        # Affichage du buffer de saisie (si actif)
+        if input_buffer:
+            buffer_surface = font_small.render(f"Saisie: {input_buffer}s", True, yellowColor)
+            buffer_rect = buffer_surface.get_rect(center=(dialog_x + dialog_width // 2, dialog_y + 95))
+            windowSurfaceObj.blit(buffer_surface, buffer_rect)
+
+        # Boutons H / M / S pour ajouter du temps
+        hms_buttons = []
+        hms_labels = ['+1H', '+1M', '+1S']
+        hms_values = [3600, 60, 1]
+        hms_colors = [blueColor, greenColor, yellowColor]
+
+        for i, (label, value, color) in enumerate(zip(hms_labels, hms_values, hms_colors)):
+            x = dialog_x + 20 + i * (hms_button_width + 10)
+            btn_rect = pygame.Rect(x, hms_y, hms_button_width, hms_button_height)
+            hms_buttons.append((btn_rect, value))
+            pygame.draw.rect(windowSurfaceObj, color, btn_rect)
+            pygame.draw.rect(windowSurfaceObj, whiteColor, btn_rect, 2)
+            btn_surface = font_medium.render(label, True, whiteColor)
+            btn_text_rect = btn_surface.get_rect(center=btn_rect.center)
+            windowSurfaceObj.blit(btn_surface, btn_text_rect)
+
+        # Boutons -H / -M / -S pour retirer du temps
+        hms_minus_buttons = []
+        hms_minus_labels = ['-1H', '-1M', '-1S']
+
+        for i, (label, value, color) in enumerate(zip(hms_minus_labels, hms_values, hms_colors)):
+            x = dialog_x + 20 + i * (hms_button_width + 10)
+            btn_rect = pygame.Rect(x, hms_y + hms_button_height + 5, hms_button_width, hms_button_height)
+            hms_minus_buttons.append((btn_rect, value))
+            # Couleur plus sombre pour les boutons -
+            darker_color = tuple(max(0, c - 80) for c in color[:3])
+            pygame.draw.rect(windowSurfaceObj, darker_color, btn_rect)
+            pygame.draw.rect(windowSurfaceObj, whiteColor, btn_rect, 2)
+            btn_surface = font_medium.render(label, True, whiteColor)
+            btn_text_rect = btn_surface.get_rect(center=btn_rect.center)
+            windowSurfaceObj.blit(btn_surface, btn_text_rect)
+
+        # Dessiner le clavier numérique
+        key_buttons = []
+        for row_idx, row in enumerate(keys):
+            for col_idx, key in enumerate(row):
+                x = dialog_x + (dialog_width - (len(row) * key_width + (len(row) - 1) * key_margin)) // 2 + col_idx * (key_width + key_margin)
+                y = keyboard_y + row_idx * (key_height + key_margin)
+
+                key_rect = pygame.Rect(x, y, key_width, key_height)
+                key_buttons.append((key_rect, key))
+
+                # Couleur du bouton
+                if key == 'Del':
+                    color = redColor
+                elif key == 'C':
+                    color = (180, 100, 0)  # Orange pour Clear
+                else:
+                    color = greyColor
+
+                pygame.draw.rect(windowSurfaceObj, color, key_rect)
+                pygame.draw.rect(windowSurfaceObj, whiteColor, key_rect, 2)
+
+                key_surface = font_medium.render(key, True, whiteColor)
+                key_text_rect = key_surface.get_rect(center=key_rect.center)
+                windowSurfaceObj.blit(key_surface, key_text_rect)
+
+        # Bouton "Valider saisie" (pour convertir le buffer en secondes)
+        validate_y = keyboard_y + 4 * (key_height + key_margin) + 5
+        validate_rect = pygame.Rect(dialog_x + 20, validate_y, dialog_width - 40, 38)
+        pygame.draw.rect(windowSurfaceObj, (0, 100, 150), validate_rect)
+        pygame.draw.rect(windowSurfaceObj, whiteColor, validate_rect, 2)
+        validate_text = "Valider secondes" if input_buffer else "Saisir en secondes"
+        validate_surface = font_small.render(validate_text, True, whiteColor)
+        validate_text_rect = validate_surface.get_rect(center=validate_rect.center)
+        windowSurfaceObj.blit(validate_surface, validate_text_rect)
+
+        # Boutons OK et Annuler
+        button_y = dialog_y + dialog_height - 55
+        button_width = 130
+        button_spacing = 20
+        ok_rect = pygame.Rect(dialog_x + (dialog_width // 2) - button_width - (button_spacing // 2), button_y, button_width, 42)
+        cancel_rect = pygame.Rect(dialog_x + (dialog_width // 2) + (button_spacing // 2), button_y, button_width, 42)
+
+        pygame.draw.rect(windowSurfaceObj, greenColor, ok_rect)
+        pygame.draw.rect(windowSurfaceObj, whiteColor, ok_rect, 2)
+        ok_surface = font_medium.render("OK", True, whiteColor)
+        ok_text_rect = ok_surface.get_rect(center=ok_rect.center)
+        windowSurfaceObj.blit(ok_surface, ok_text_rect)
+
+        pygame.draw.rect(windowSurfaceObj, redColor, cancel_rect)
+        pygame.draw.rect(windowSurfaceObj, whiteColor, cancel_rect, 2)
+        cancel_surface = font_medium.render("Annuler", True, whiteColor)
+        cancel_text_rect = cancel_surface.get_rect(center=cancel_rect.center)
+        windowSurfaceObj.blit(cancel_surface, cancel_text_rect)
+
+        pygame.display.flip()
+
+        # Gestion des événements
+        for event in pygame.event.get():
+            if event.type == QUIT:
+                running = False
+                result = None
+            elif event.type == MOUSEBUTTONUP:
+                mouse_pos = event.pos
+
+                # Vérifier les boutons +H/+M/+S
+                for btn_rect, value in hms_buttons:
+                    if btn_rect.collidepoint(mouse_pos):
+                        total_seconds = min(total_seconds + value, max_seconds)
+                        input_buffer = ""
+                        break
+
+                # Vérifier les boutons -H/-M/-S
+                for btn_rect, value in hms_minus_buttons:
+                    if btn_rect.collidepoint(mouse_pos):
+                        total_seconds = max(total_seconds - value, min_seconds)
+                        input_buffer = ""
+                        break
+
+                # Vérifier les touches du clavier
+                for key_rect, key in key_buttons:
+                    if key_rect.collidepoint(mouse_pos):
+                        if key == 'Del':
+                            input_buffer = input_buffer[:-1] if input_buffer else ""
+                        elif key == 'C':
+                            total_seconds = 0
+                            input_buffer = ""
+                        else:
+                            input_buffer += key
+                        break
+
+                # Vérifier le bouton Valider secondes
+                if validate_rect.collidepoint(mouse_pos):
+                    if input_buffer:
+                        try:
+                            new_seconds = int(input_buffer)
+                            if min_seconds <= new_seconds <= max_seconds:
+                                total_seconds = new_seconds
+                            input_buffer = ""
+                        except ValueError:
+                            input_buffer = ""
+
+                # Vérifier le bouton OK
+                if ok_rect.collidepoint(mouse_pos):
+                    if min_seconds <= total_seconds <= max_seconds:
+                        result = total_seconds
+                        running = False
 
                 # Vérifier le bouton Annuler
                 if cancel_rect.collidepoint(mouse_pos):
@@ -7344,7 +7604,7 @@ def preview():
 
 def Menu():
     global vwidths2,vheights2,Pi_Cam,scientif,mode,v3_hdr,scientific,tinterval,zoom,vwidth,vheight,preview_width,preview_height,ft,fv,focus,fxz,v3_hdr,v3_hdrs,bw,bh,ft,fv,cam1,v3_f_mode,v3_af,button_row,xx,xy,use_native_sensor_mode
-    global allsky_mode,allsky_mean_target,allsky_mean_threshold,allsky_video_fps,allsky_max_gain,allsky_apply_stretch,allsky_cleanup_jpegs,allsky_modes
+    global allsky_mode,allsky_mean_target,allsky_mean_threshold,allsky_video_fps,allsky_max_gain,allsky_apply_stretch,allsky_cleanup_jpegs,allsky_modes,allsky_stack_enable,allsky_stack_count
     pygame.draw.rect(windowSurfaceObj,(0,0,0),Rect(preview_width,0,bw,preview_height))
     if menu > 0: 
         # set button sizes
@@ -7680,6 +7940,23 @@ def Menu():
             else:
                 text(0,3,3,1,1," ",fv,12)
             draw_Vbar(0,3,lyelColor,'tshots',tshots)
+
+            # Ligne 6 - Stack Frames (only if Allsky ON)
+            text(0,6,5,0,1,"Stack Frames",ft,12)
+            if allsky_mode > 0:
+                stack_text = "ON" if allsky_stack_enable == 1 else "OFF"
+                text(0,6,3,1,1,stack_text,fv,12)
+                draw_Vbar(0,6,greyColor,'allsky_stack_enable',allsky_stack_enable)
+            else:
+                text(0,6,3,1,1,"N/A",fv,12)
+
+            # Ligne 7 - Stack Count (only if Stack ON and Allsky ON)
+            text(0,7,5,0,1,"Stack Count",ft,12)
+            if allsky_mode > 0 and allsky_stack_enable == 1:
+                text(0,7,3,1,1,str(allsky_stack_count),fv,12)
+                draw_Vbar(0,7,greyColor,'allsky_stack_count',allsky_stack_count)
+            else:
+                text(0,7,3,1,1,"N/A",fv,12)
 
             # Ligne 8 - SAVE CONFIG
             button(0,8,8,4)
@@ -10831,11 +11108,15 @@ while True:
                             datastr = "libcamera-still"
                         else:
                             datastr = "rpicam-still"
-                        if extns[extn] != 'raw':
+                        # Forcer encodage JPEG pour Allsky (éviter raw/dng inutiles)
+                        if allsky_mode > 0:
+                            datastr += " --camera " + str(camera) + " -e jpg -s -t 0 -o " + fname
+                            datastr += " -n"
+                        elif extns[extn] != 'raw':
                             datastr += " --camera " + str(camera) + " -e " + extns[extn] + " -s -t 0 -o " + fname
                             datastr += " -n"
                         else:
-                            datastr += " --camera " + str(camera) + " -r -s -t 0 -o " + fname 
+                            datastr += " --camera " + str(camera) + " -r -s -t 0 -o " + fname
                             datastr += " -n"
                         datastr += " --brightness " + str(brightness/100) + " --contrast " + str(contrast/100)
                         if mode == 0:
@@ -11035,10 +11316,33 @@ while True:
                         # ALLSKY: Assembler vidéo si mode activé
                         if allsky_mode > 0 and stop == 0:
                             video_filename = pic_dir + timestamp + "_allsky.mp4"
+
+                            # ALLSKY STACKING: Stacker les images si activé
+                            stacked_images = []
+                            original_images_to_delete = []
+                            use_stacked_timestamp = timestamp
+
+                            if allsky_stack_enable == 1 and allsky_stack_count > 1:
+                                text(0,0,6,2,1,f"Stacking images ({allsky_stack_count} par groupe)...", int(fv*1.7), 1)
+                                pygame.display.update()
+
+                                stacked_images, original_images_to_delete = stack_timelapse_images(
+                                    pic_dir, timestamp, allsky_stack_count, quality
+                                )
+
+                                if stacked_images:
+                                    # Utiliser le timestamp modifié pour les images stackées
+                                    use_stacked_timestamp = timestamp + "_stacked"
+                                    print(f"[Allsky] Stacking terminé: {len(stacked_images)} images stackées")
+
                             text(0,0,6,2,1,"Assemblage vidéo Allsky...", int(fv*1.7), 1)
                             pygame.display.update()
 
-                            success = assemble_allsky_video(pic_dir, timestamp, allsky_video_fps, video_filename)
+                            # Utiliser les images stackées si disponibles, sinon les originales
+                            if stacked_images:
+                                success = assemble_allsky_video(pic_dir, use_stacked_timestamp, allsky_video_fps, video_filename)
+                            else:
+                                success = assemble_allsky_video(pic_dir, timestamp, allsky_video_fps, video_filename)
 
                             if success:
                                 print(f"[Allsky] Vidéo créée : {video_filename}")
@@ -11046,16 +11350,36 @@ while True:
                                 pygame.display.update()
                                 time.sleep(2)
 
-                                # Nettoyer JPEGs si activé
+                                # Nettoyer les images si activé
                                 if allsky_cleanup_jpegs == 1:
                                     text(0,0,6,2,1,"Nettoyage JPEGs...", int(fv*1.7), 1)
                                     pygame.display.update()
-                                    for jpeg_path in counts:
-                                        try:
-                                            os.remove(jpeg_path)
-                                        except Exception as e:
-                                            print(f"[Allsky] Erreur suppression {jpeg_path}: {e}")
-                                    print(f"[Allsky] {len(counts)} JPEGs supprimés")
+
+                                    # Supprimer les images originales (si stacking a été fait)
+                                    if original_images_to_delete:
+                                        for jpeg_path in original_images_to_delete:
+                                            try:
+                                                os.remove(jpeg_path)
+                                            except Exception as e:
+                                                print(f"[Allsky] Erreur suppression {jpeg_path}: {e}")
+                                        print(f"[Allsky] {len(original_images_to_delete)} JPEGs originaux supprimés")
+
+                                    # Supprimer les images stackées
+                                    if stacked_images:
+                                        for jpeg_path in stacked_images:
+                                            try:
+                                                os.remove(jpeg_path)
+                                            except Exception as e:
+                                                print(f"[Allsky] Erreur suppression {jpeg_path}: {e}")
+                                        print(f"[Allsky] {len(stacked_images)} JPEGs stackés supprimés")
+                                    else:
+                                        # Pas de stacking, supprimer les images originales
+                                        for jpeg_path in counts:
+                                            try:
+                                                os.remove(jpeg_path)
+                                            except Exception as e:
+                                                print(f"[Allsky] Erreur suppression {jpeg_path}: {e}")
+                                        print(f"[Allsky] {len(counts)} JPEGs supprimés")
                             else:
                                 print("[Allsky] Échec assemblage - JPEGs conservés")
                                 text(0,0,6,2,1,"Échec assemblage vidéo", int(fv*1.5), 1)
@@ -11107,10 +11431,13 @@ while True:
                                     datastr = "libcamera-still"
                                 else:
                                     datastr = "rpicam-still"
-                                if extns[extn] != 'raw':
+                                # Forcer encodage JPEG pour Allsky (éviter raw/dng inutiles)
+                                if allsky_mode > 0:
+                                    datastr += " --camera " + str(camera) + " -e jpg -t " + str(timet) + " -o " + fname + " -n"
+                                elif extns[extn] != 'raw':
                                     datastr += " --camera " + str(camera) + " -e " + extns[extn] + " -t " + str(timet) + " -o " + fname + " -n"
                                 else:
-                                    datastr += " --camera " + str(camera) + " -r -t 1000 -o " + fname + " -n " 
+                                    datastr += " --camera " + str(camera) + " -r -t 1000 -o " + fname + " -n "
                                 datastr += " --brightness " + str(brightness/100) + " --contrast " + str(contrast/100)
                                 datastr += " --shutter " + str(sspeed)
                                 if ev != 0:
@@ -11267,10 +11594,33 @@ while True:
                         # ALLSKY: Assembler vidéo si mode activé
                         if allsky_mode > 0 and stop == 0:
                             video_filename = pic_dir + timestamp + "_allsky.mp4"
+
+                            # ALLSKY STACKING: Stacker les images si activé
+                            stacked_images = []
+                            original_images_to_delete = []
+                            use_stacked_timestamp = timestamp
+
+                            if allsky_stack_enable == 1 and allsky_stack_count > 1:
+                                text(0,0,6,2,1,f"Stacking images ({allsky_stack_count} par groupe)...", int(fv*1.7), 1)
+                                pygame.display.update()
+
+                                stacked_images, original_images_to_delete = stack_timelapse_images(
+                                    pic_dir, timestamp, allsky_stack_count, quality
+                                )
+
+                                if stacked_images:
+                                    # Utiliser le timestamp modifié pour les images stackées
+                                    use_stacked_timestamp = timestamp + "_stacked"
+                                    print(f"[Allsky] Stacking terminé: {len(stacked_images)} images stackées")
+
                             text(0,0,6,2,1,"Assemblage vidéo Allsky...", int(fv*1.7), 1)
                             pygame.display.update()
 
-                            success = assemble_allsky_video(pic_dir, timestamp, allsky_video_fps, video_filename)
+                            # Utiliser les images stackées si disponibles, sinon les originales
+                            if stacked_images:
+                                success = assemble_allsky_video(pic_dir, use_stacked_timestamp, allsky_video_fps, video_filename)
+                            else:
+                                success = assemble_allsky_video(pic_dir, timestamp, allsky_video_fps, video_filename)
 
                             if success:
                                 print(f"[Allsky] Vidéo créée : {video_filename}")
@@ -11278,16 +11628,36 @@ while True:
                                 pygame.display.update()
                                 time.sleep(2)
 
-                                # Nettoyer JPEGs si activé
+                                # Nettoyer les images si activé
                                 if allsky_cleanup_jpegs == 1:
                                     text(0,0,6,2,1,"Nettoyage JPEGs...", int(fv*1.7), 1)
                                     pygame.display.update()
-                                    for jpeg_path in counts:
-                                        try:
-                                            os.remove(jpeg_path)
-                                        except Exception as e:
-                                            print(f"[Allsky] Erreur suppression {jpeg_path}: {e}")
-                                    print(f"[Allsky] {len(counts)} JPEGs supprimés")
+
+                                    # Supprimer les images originales (si stacking a été fait)
+                                    if original_images_to_delete:
+                                        for jpeg_path in original_images_to_delete:
+                                            try:
+                                                os.remove(jpeg_path)
+                                            except Exception as e:
+                                                print(f"[Allsky] Erreur suppression {jpeg_path}: {e}")
+                                        print(f"[Allsky] {len(original_images_to_delete)} JPEGs originaux supprimés")
+
+                                    # Supprimer les images stackées
+                                    if stacked_images:
+                                        for jpeg_path in stacked_images:
+                                            try:
+                                                os.remove(jpeg_path)
+                                            except Exception as e:
+                                                print(f"[Allsky] Erreur suppression {jpeg_path}: {e}")
+                                        print(f"[Allsky] {len(stacked_images)} JPEGs stackés supprimés")
+                                    else:
+                                        # Pas de stacking, supprimer les images originales
+                                        for jpeg_path in counts:
+                                            try:
+                                                os.remove(jpeg_path)
+                                            except Exception as e:
+                                                print(f"[Allsky] Erreur suppression {jpeg_path}: {e}")
+                                        print(f"[Allsky] {len(counts)} JPEGs supprimés")
                             else:
                                 print("[Allsky] Échec assemblage - JPEGs conservés")
                                 text(0,0,6,2,1,"Échec assemblage vidéo", int(fv*1.5), 1)
@@ -12521,6 +12891,8 @@ while True:
                    config[88] = allsky_max_gain
                    config[89] = allsky_apply_stretch
                    config[90] = allsky_cleanup_jpegs
+                   config[97] = allsky_stack_enable
+                   config[98] = allsky_stack_count
                    config[91] = ls_save_progress
                    config[92] = ls_save_final
                    config[93] = ls_lucky_save_final
@@ -13363,6 +13735,8 @@ while True:
                    config[88] = allsky_max_gain
                    config[89] = allsky_apply_stretch
                    config[90] = allsky_cleanup_jpegs
+                   config[97] = allsky_stack_enable
+                   config[98] = allsky_stack_count
                    config[91] = ls_save_progress
                    config[92] = ls_save_final
                    config[93] = ls_lucky_save_final
@@ -13783,6 +14157,8 @@ while True:
                    config[88] = allsky_max_gain
                    config[89] = allsky_apply_stretch
                    config[90] = allsky_cleanup_jpegs
+                   config[97] = allsky_stack_enable
+                   config[98] = allsky_stack_count
                    config[91] = ls_save_progress
                    config[92] = ls_save_final
                    config[93] = ls_lucky_save_final
@@ -13901,6 +14277,8 @@ while True:
                       config[88] = allsky_max_gain
                       config[89] = allsky_apply_stretch
                       config[90] = allsky_cleanup_jpegs
+                      config[97] = allsky_stack_enable
+                      config[98] = allsky_stack_count
                       config[91] = ls_save_progress
                       config[92] = ls_save_final
                       config[93] = ls_lucky_save_final
@@ -13922,19 +14300,38 @@ while True:
                         if video_limits[f] == 'tduration':
                             pmin = video_limits[f+1]
                             pmax = video_limits[f+2]
-                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
+                    # Détection du clic sur slider ou zone centrale
+                    clicked_on_slider = (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3))
+                    click_zone_x = mousex - preview_width
+
+                    if clicked_on_slider:
                         tduration = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                     elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
                         tduration = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
                     elif (mousey > preview_height * .75 + (bh*3)  and mousey < preview_height * .75 + (bh*3) + int(bh/3)) and alt_dis == 2:
                         tduration = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
                     else:
-                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                            tduration -=1
-                            tduration = max(tduration,pmin)
+                        # Zone divisée en 3: gauche="-", centre="saisie", droite="+"
+                        if alt_dis == 0:
+                            if click_zone_x < bw/3:
+                                # Zone gauche: diminuer
+                                tduration -= 1
+                                tduration = max(tduration, pmin)
+                            elif click_zone_x < 2*bw/3:
+                                # Zone centrale: ouvrir le dialogue de saisie durée
+                                new_duration = duration_input_dialog("Durée Timelapse", tduration, pmin, pmax)
+                                if new_duration is not None:
+                                    tduration = int(new_duration)
+                            else:
+                                # Zone droite: augmenter
+                                tduration += 1
+                                tduration = min(tduration, pmax)
+                        elif button_pos == 0:
+                            tduration -= 1
+                            tduration = max(tduration, pmin)
                         else:
-                            tduration +=1
-                            tduration = min(tduration,pmax)
+                            tduration += 1
+                            tduration = min(tduration, pmax)
                     td = timedelta(seconds=tduration)
                     text(0,1,3,1,1,str(td),fv,12)
                     draw_Vbar(0,1,lyelColor,'tduration',tduration)
@@ -13952,19 +14349,40 @@ while True:
                         if video_limits[f] == 'tinterval':
                             pmin = video_limits[f+1]
                             pmax = video_limits[f+2]
-                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
+                    # Détection du clic sur slider ou zone centrale
+                    clicked_on_slider = (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3))
+                    click_zone_x = mousex - preview_width
+
+                    if clicked_on_slider:
                         tinterval = round(((mousex-preview_width) / bw) * (pmax-pmin) + pmin, 2)
                     elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
                         tinterval = round(((mousex-((button_row - 9)*bw)) / bw) * (pmax-pmin) + pmin, 2)
                     elif (mousey > preview_height * .75 + (bh*3)  and mousey < preview_height * .75 + (bh*3) + int(bh/3)) and alt_dis == 2:
                         tinterval = round(((mousex-((button_row - 9)*bw)) / bw) * (pmax-pmin) + pmin, 2)
                     else:
-                        # Pas intelligent: 0.01s si < 1s, sinon 0.1s
-                        step = 0.01 if tinterval < 1 else 0.1
-                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                        # Zone divisée en 3: gauche="-", centre="saisie", droite="+"
+                        if alt_dis == 0:
+                            if click_zone_x < bw/3:
+                                # Zone gauche: diminuer
+                                step = 0.01 if tinterval < 1 else 0.1
+                                tinterval = round(tinterval - step, 2)
+                                tinterval = max(tinterval, pmin)
+                            elif click_zone_x < 2*bw/3:
+                                # Zone centrale: ouvrir le dialogue de saisie intervalle
+                                new_interval = numeric_input_dialog(f"Intervalle (s) [{pmin}-{pmax}]", tinterval, pmin, pmax)
+                                if new_interval is not None:
+                                    tinterval = round(float(new_interval), 2)
+                            else:
+                                # Zone droite: augmenter
+                                step = 0.01 if tinterval < 1 else 0.1
+                                tinterval = round(tinterval + step, 2)
+                                tinterval = min(tinterval, pmax)
+                        elif button_pos == 0:
+                            step = 0.01 if tinterval < 1 else 0.1
                             tinterval = round(tinterval - step, 2)
                             tinterval = max(tinterval, pmin)
                         else:
+                            step = 0.01 if tinterval < 1 else 0.1
                             tinterval = round(tinterval + step, 2)
                             tinterval = min(tinterval, pmax)
                     td = timedelta(seconds=tinterval)
@@ -13997,19 +14415,38 @@ while True:
                         if video_limits[f] == 'tshots':
                             pmin = video_limits[f+1]
                             pmax = video_limits[f+2]
-                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
+                    # Détection du clic sur slider ou zone centrale
+                    clicked_on_slider = (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3))
+                    click_zone_x = mousex - preview_width
+
+                    if clicked_on_slider:
                         tshots = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
                     elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
                         tshots = int(((mousex-((button_row -9)*bw)) / bw) * (pmax+1-pmin))
                     elif (mousey > preview_height * .75 + (bh*3)  and mousey < preview_height * .75 + (bh*3) + int(bh/3)) and alt_dis == 2:
                         tshots = int(((mousex-((button_row -9)*bw)) / bw) * (pmax+1-pmin))
                     else:
-                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                            tshots -=1
-                            tshots = max(tshots,pmin)
+                        # Zone divisée en 3: gauche="-", centre="saisie", droite="+"
+                        if alt_dis == 0:
+                            if click_zone_x < bw/3:
+                                # Zone gauche: diminuer
+                                tshots -= 1
+                                tshots = max(tshots, pmin)
+                            elif click_zone_x < 2*bw/3:
+                                # Zone centrale: ouvrir le dialogue de saisie nombre de prises
+                                new_shots = numeric_input_dialog(f"Nombre de prises [{pmin}-{pmax}]", tshots, pmin, pmax)
+                                if new_shots is not None:
+                                    tshots = int(new_shots)
+                            else:
+                                # Zone droite: augmenter
+                                tshots += 1
+                                tshots = min(tshots, pmax)
+                        elif button_pos == 0:
+                            tshots -= 1
+                            tshots = max(tshots, pmin)
                         else:
-                            tshots +=1
-                            tshots = min(tshots,pmax)
+                            tshots += 1
+                            tshots = min(tshots, pmax)
                     text(0,3,3,1,1,str(tshots),fv,12)
                     draw_Vbar(0,3,lyelColor,'tshots',tshots)
                     if tduration > 0:
@@ -14020,7 +14457,38 @@ while True:
                     text(0,1,3,1,1,str(td),fv,12)
                     draw_Vbar(0,1,lyelColor,'tduration',tduration)
                     time.sleep(.25)
-              
+
+                  elif button_row == 6 and allsky_mode > 0:
+                      # ALLSKY STACK ENABLE (0=OFF, 1=ON)
+                      allsky_stack_enable = 1 - allsky_stack_enable
+                      stack_text = "ON" if allsky_stack_enable == 1 else "OFF"
+                      text(0,6,3,1,1,stack_text,fv,12)
+                      draw_Vbar(0,6,greyColor,'allsky_stack_enable',allsky_stack_enable)
+                      # Rafraîchir ligne 7 (Stack Count) car sa visibilité dépend de stack_enable
+                      if allsky_stack_enable == 1:
+                          text(0,7,3,1,1,str(allsky_stack_count),fv,12)
+                          draw_Vbar(0,7,greyColor,'allsky_stack_count',allsky_stack_count)
+                      else:
+                          text(0,7,3,1,1,"N/A",fv,12)
+                      time.sleep(.25)
+
+                  elif button_row == 7 and allsky_mode > 0 and allsky_stack_enable == 1:
+                      # ALLSKY STACK COUNT (2-10)
+                      for f in range(0,len(video_limits)-1,3):
+                          if video_limits[f] == 'allsky_stack_count':
+                              pmin = video_limits[f+1]
+                              pmax = video_limits[f+2]
+                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
+                          allsky_stack_count = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
+                      else:
+                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
+                              allsky_stack_count = max(pmin, allsky_stack_count - 1)
+                          else:
+                              allsky_stack_count = min(pmax, allsky_stack_count + 1)
+                      text(0,7,3,1,1,str(allsky_stack_count),fv,12)
+                      draw_Vbar(0,7,greyColor,'allsky_stack_count',allsky_stack_count)
+                      time.sleep(.25)
+
                   elif button_row == 8:
                       # SAVE CONFIG (Page 1)
                       text(0,8,3,0,1,"SAVE Config",fv,12)
@@ -14116,6 +14584,8 @@ while True:
                       config[88] = allsky_max_gain
                       config[89] = allsky_apply_stretch
                       config[90] = allsky_cleanup_jpegs
+                      config[97] = allsky_stack_enable
+                      config[98] = allsky_stack_count
                       config[91] = ls_save_progress
                       config[92] = ls_save_final
                       config[93] = ls_lucky_save_final
@@ -14702,6 +15172,8 @@ while True:
                    config[88] = allsky_max_gain
                    config[89] = allsky_apply_stretch
                    config[90] = allsky_cleanup_jpegs
+                   config[97] = allsky_stack_enable
+                   config[98] = allsky_stack_count
                    config[91] = ls_save_progress
                    config[92] = ls_save_final
                    config[93] = ls_lucky_save_final
@@ -14960,6 +15432,8 @@ while True:
                       config[88] = allsky_max_gain
                       config[89] = allsky_apply_stretch
                       config[90] = allsky_cleanup_jpegs
+                      config[97] = allsky_stack_enable
+                      config[98] = allsky_stack_count
                       config[91] = ls_save_progress
                       config[92] = ls_save_final
                       config[93] = ls_lucky_save_final
@@ -15232,6 +15706,8 @@ while True:
                    config[88] = allsky_max_gain
                    config[89] = allsky_apply_stretch
                    config[90] = allsky_cleanup_jpegs
+                   config[97] = allsky_stack_enable
+                   config[98] = allsky_stack_count
                    config[91] = ls_save_progress
                    config[92] = ls_save_final
                    config[93] = ls_lucky_save_final
@@ -15422,6 +15898,8 @@ while True:
                 config[88] = allsky_max_gain
                 config[89] = allsky_apply_stretch
                 config[90] = allsky_cleanup_jpegs
+                config[97] = allsky_stack_enable
+                config[98] = allsky_stack_count
                 config[91] = ls_save_progress
                 config[92] = ls_save_final
                 config[93] = ls_lucky_save_final
@@ -15680,6 +16158,8 @@ while True:
                    config[88] = allsky_max_gain
                    config[89] = allsky_apply_stretch
                    config[90] = allsky_cleanup_jpegs
+                   config[97] = allsky_stack_enable
+                   config[98] = allsky_stack_count
                    config[91] = ls_save_progress
                    config[92] = ls_save_final
                    config[93] = ls_lucky_save_final
