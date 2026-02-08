@@ -141,3 +141,124 @@ class AllskyMeanController:
     def reset_history(self):
         """Reset the mean history (useful when starting a new timelapse)"""
         self.mean_history = []
+
+
+def stack_images_simple(image_paths, output_path, quality=95):
+    """
+    Stack multiple images using simple mean averaging (no alignment).
+    Suitable for Allsky timelapse where camera is fixed.
+
+    Args:
+        image_paths (list): List of paths to JPEG images to stack
+        output_path (str): Path for the output stacked JPEG
+        quality (int): JPEG quality (1-100)
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if not image_paths:
+        print("[AllskyStack] No images to stack")
+        return False
+
+    if len(image_paths) == 1:
+        # Only one image, just copy it
+        try:
+            import shutil
+            shutil.copy2(image_paths[0], output_path)
+            return True
+        except Exception as e:
+            print(f"[AllskyStack] Error copying single image: {e}")
+            return False
+
+    try:
+        # Load first image to get dimensions
+        first_img = cv2.imread(image_paths[0])
+        if first_img is None:
+            print(f"[AllskyStack] Failed to load first image: {image_paths[0]}")
+            return False
+
+        # Initialize accumulator as float32 for precision
+        accumulator = first_img.astype(np.float32)
+        valid_count = 1
+
+        # Add remaining images
+        for path in image_paths[1:]:
+            img = cv2.imread(path)
+            if img is not None and img.shape == first_img.shape:
+                accumulator += img.astype(np.float32)
+                valid_count += 1
+            else:
+                print(f"[AllskyStack] Skipping invalid/incompatible image: {path}")
+
+        if valid_count == 0:
+            print("[AllskyStack] No valid images to stack")
+            return False
+
+        # Calculate mean
+        stacked = (accumulator / valid_count).astype(np.uint8)
+
+        # Save result
+        cv2.imwrite(output_path, stacked, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        print(f"[AllskyStack] Stacked {valid_count} images -> {output_path}")
+        return True
+
+    except Exception as e:
+        print(f"[AllskyStack] Error stacking images: {e}")
+        return False
+
+
+def stack_timelapse_images(pic_dir, timestamp, stack_count, quality=95):
+    """
+    Stack timelapse images in groups of stack_count.
+    Creates new stacked images and returns the list of stacked image paths.
+
+    Args:
+        pic_dir (str): Directory containing the images
+        timestamp (str): Timestamp prefix for the timelapse images
+        stack_count (int): Number of images per stack
+        quality (int): JPEG quality for output images
+
+    Returns:
+        tuple: (list of stacked image paths, list of original images to delete)
+    """
+    import glob
+    import os
+
+    # Find all timelapse images with this timestamp
+    pattern = os.path.join(pic_dir, f"{timestamp}_*.jpg")
+    all_images = sorted(glob.glob(pattern))
+
+    if not all_images:
+        print(f"[AllskyStack] No images found matching {pattern}")
+        return [], []
+
+    print(f"[AllskyStack] Found {len(all_images)} images to process with stack_count={stack_count}")
+
+    stacked_images = []
+    original_images = []
+    stack_index = 0
+
+    # Process images in groups of stack_count
+    for i in range(0, len(all_images), stack_count):
+        group = all_images[i:i + stack_count]
+
+        if len(group) < stack_count:
+            # Last group is incomplete - still stack what we have
+            if len(group) == 0:
+                continue
+            print(f"[AllskyStack] Last group has only {len(group)} images (expected {stack_count})")
+
+        # Create output filename for this stacked image
+        output_path = os.path.join(pic_dir, f"{timestamp}_stacked_{stack_index:04d}.jpg")
+
+        if stack_images_simple(group, output_path, quality):
+            stacked_images.append(output_path)
+            original_images.extend(group)
+            stack_index += 1
+        else:
+            print(f"[AllskyStack] Failed to stack group {stack_index}")
+            # Keep original images in case of failure
+            stacked_images.extend(group)
+
+    print(f"[AllskyStack] Created {len(stacked_images)} stacked images from {len(original_images)} originals")
+    return stacked_images, original_images
