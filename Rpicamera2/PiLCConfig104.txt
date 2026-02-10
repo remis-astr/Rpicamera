@@ -1,6 +1,6 @@
 mode : 0
 speed : 4
-gain : 35
+gain : 360
 brightness : 0
 contrast : 102
 frame : 0
@@ -11,7 +11,7 @@ vlen : 5
 fps : 178
 vformat : 2
 codec : 4
-tinterval : 1
+tinterval : 1.0
 tshots : 264
 extn : 0
 zx : 440
@@ -34,8 +34,8 @@ IRF : 0
 str_cap : 0
 v3_hdr : 0
 raw_format : 2
-vflip : 0
-hflip : 0
+vflip : 1
+hflip : 1
 stretch_p_low : 0
 stretch_p_high : 9998
 stretch_factor : 25
@@ -89,11 +89,11 @@ allsky_video_fps : 13
 allsky_max_gain : 0
 allsky_apply_stretch : 0
 allsky_cleanup_jpegs : 0
+ls_save_progress : 0
+ls_save_final : 1
+ls_lucky_save_final : 1
+fix_bad_pixels : 0
+fix_bad_pixels_sigma : 40
+fix_bad_pixels_min_adu : 100
 allsky_stack_enable : 0
-allsky_stack_count : 1
-ls_save_progress : 1
-ls_save_final : 0
-ls_lucky_save_final : 40
-fix_bad_pixels : 100
-fix_bad_pixels_sigma : 0
-fix_bad_pixels_min_adu : 3
+allsky_stack_count : 3

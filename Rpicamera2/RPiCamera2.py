@@ -67,6 +67,9 @@ from libastrostack.rpicamera_livestack_advanced import create_advanced_livestack
 # Import Allsky module (dans libastrostack/)
 from libastrostack.allsky import AllskyMeanController, stack_timelapse_images
 
+# Import JSK LIVE module (dans libastrostack/)
+from libastrostack.jsk_live import JSKLiveProcessor, JSKVideoRecorder
+
 # ============================================================================
 # Helper pour tuer le subprocess rpicam-vid (mode non-Picamera2)
 # ============================================================================
@@ -1501,6 +1504,27 @@ ghs_LP = 0     # Protect shadows: 0-100 -> 0.0-1.0 (défaut 0.0)
 ghs_HP = 0     # Protect highlights: 0-100 -> 0.0-1.0 (défaut 0.0 optimisé tests)
 ghs_preset = 1 # 0=Manual, 1=Galaxies, 2=Nébuleuses, 3=Étirement initial
 ghs_presets = ['Manual', 'Galaxies', 'Nebulae', 'Initial']
+
+# JSK LIVE Settings
+jsk_live_mode = 0           # 0=OFF, 1=Active
+jsk_settings_visible = 0    # 0=Masqué, 1=Affiché
+jsk_stack_count = 1         # 1-4 images à empiler (après HDR)
+jsk_hdr_bits_clip = 2       # 1-3 bits de poids fort à enlever
+jsk_hdr_method = 1          # 0=OFF, 1=Median, 2=Mean, 3=Mertens
+jsk_denoise_type = 0        # 0=OFF, 1=Bilateral, 2=FastNLM, 3=Gaussian, 4=Median
+jsk_denoise_strength = 5    # 1-10
+jsk_hdr_methods = ['OFF', 'Median', 'Mean', 'Mertens']
+jsk_denoise_types = ['OFF', 'Bilateral', 'FastNLM', 'Gaussian', 'Median']
+jsk_processor = None        # Instance JSKLiveProcessor
+jsk_recorder = None         # Instance JSKVideoRecorder
+jsk_rec_blink = 0           # État clignotement point rouge REC
+_jsk_slider_rects = {}      # Rectangles des sliders JSK pour détection clics
+# Variables de sauvegarde pour restauration à la sortie de JSK LIVE
+jsk_saved_vwidth = 1920
+jsk_saved_vheight = 1080
+jsk_saved_zoom = 0
+jsk_saved_use_native = 0
+
 # METRICS Settings - Phase 2 Demande 5 et 6
 focus_method = 1        # 0=OFF, 1=Laplacian, 2=Gradient, 3=Sobel, 4=Tenengrad
 star_metric = 1         # 0=OFF, 1=HFR, 2=FWHM
@@ -1948,9 +1972,9 @@ titles = ['mode','speed','gain','brightness','contrast','frame','red','blue','ev
           'ls_lucky_buffer','ls_lucky_keep','ls_lucky_score','ls_lucky_stack','ls_lucky_align','ls_lucky_roi','use_native_sensor_mode',
           'focus_method','star_metric','snr_display','metrics_interval','ls_lucky_save_progress','isp_enable',
           'allsky_mode','allsky_mean_target','allsky_mean_threshold','allsky_video_fps','allsky_max_gain','allsky_apply_stretch','allsky_cleanup_jpegs',
-          'allsky_stack_enable','allsky_stack_count',
           'ls_save_progress','ls_save_final','ls_lucky_save_final',
-          'fix_bad_pixels','fix_bad_pixels_sigma','fix_bad_pixels_min_adu']
+          'fix_bad_pixels','fix_bad_pixels_sigma','fix_bad_pixels_min_adu',
+          'allsky_stack_enable','allsky_stack_count']
 points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat,codec,tinterval,tshots,extn,zx,zy,zoom,saturation,
           meter,awb,sharpness,denoise,quality,profile,level,histogram,histarea,v3_f_speed,v3_f_range,rotate,IRF,str_cap,v3_hdr,raw_format,vflip,hflip,
           stretch_p_low,stretch_p_high,stretch_factor,stretch_preset,ghs_D,ghs_b,ghs_SP,ghs_LP,ghs_HP,ghs_preset,
@@ -1960,9 +1984,9 @@ points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat
           ls_lucky_buffer,ls_lucky_keep,ls_lucky_score,ls_lucky_stack,ls_lucky_align,ls_lucky_roi,use_native_sensor_mode,
           focus_method,star_metric,snr_display,metrics_interval,ls_lucky_save_progress,isp_enable,
           allsky_mode,allsky_mean_target,allsky_mean_threshold,allsky_video_fps,allsky_max_gain,allsky_apply_stretch,allsky_cleanup_jpegs,
-          allsky_stack_enable,allsky_stack_count,
           ls_save_progress,ls_save_final,ls_lucky_save_final,
-          fix_bad_pixels,fix_bad_pixels_sigma,fix_bad_pixels_min_adu]
+          fix_bad_pixels,fix_bad_pixels_sigma,fix_bad_pixels_min_adu,
+          allsky_stack_enable,allsky_stack_count]
 if not os.path.exists(config_file):
     with open(config_file, 'w') as f:
         for item in range(0,len(titles)):
@@ -2184,11 +2208,6 @@ if len(config) <= 89:
     config.append(1)     # allsky_apply_stretch par défaut (ON)
 if len(config) <= 90:
     config.append(0)     # allsky_cleanup_jpegs par défaut (keep JPEGs)
-# Ajouter les paramètres de stacking ALLSKY si le fichier de config est ancien
-if len(config) <= 97:
-    config.append(0)     # allsky_stack_enable par défaut (OFF)
-if len(config) <= 98:
-    config.append(3)     # allsky_stack_count par défaut (3 images)
 # Ajouter les paramètres de sauvegarde LiveStack/LuckyStack si le fichier de config est ancien
 if len(config) <= 91:
     config.append(1)     # ls_save_progress par défaut (ON)
@@ -2196,6 +2215,18 @@ if len(config) <= 92:
     config.append(1)     # ls_save_final par défaut (ON)
 if len(config) <= 93:
     config.append(1)     # ls_lucky_save_final par défaut (ON)
+# Ajouter les paramètres de suppression des pixels chauds
+if len(config) <= 94:
+    config.append(1)     # fix_bad_pixels par défaut (ON)
+if len(config) <= 95:
+    config.append(40)    # fix_bad_pixels_sigma par défaut
+if len(config) <= 96:
+    config.append(100)   # fix_bad_pixels_min_adu par défaut
+# Ajouter les paramètres de stacking ALLSKY si le fichier de config est ancien
+if len(config) <= 97:
+    config.append(0)     # allsky_stack_enable par défaut (OFF)
+if len(config) <= 98:
+    config.append(3)     # allsky_stack_count par défaut (3 images)
 
 # Charger les paramètres ALLSKY
 allsky_mode           = config[84] if len(config) > 84 else 0
@@ -5830,6 +5861,420 @@ def save_with_external_processing(stacker_obj, filename=None, raw_format_name=No
 # FIN RAW FULLSCREEN CONTROLS
 # ============================================================================
 
+
+# ============================================================================
+# JSK LIVE FULLSCREEN CONTROLS
+# ============================================================================
+
+def draw_jsk_settings_icon(screen_width, screen_height, active=False):
+    """
+    Dessine l'icône Settings en haut à gauche pour JSK LIVE.
+
+    Args:
+        screen_width: Largeur de l'écran
+        screen_height: Hauteur de l'écran
+        active: True si le panneau settings est visible
+
+    Returns:
+        Rect de l'icône pour détecter les clics
+    """
+    global windowSurfaceObj, _font_cache
+
+    icon_size = 50
+    margin = 15
+    icon_x = margin
+    icon_y = margin
+
+    # Couleur selon l'état
+    if active:
+        bg_color = (80, 120, 80)
+        border_color = (120, 180, 120)
+        text_color = (220, 220, 100)
+    else:
+        bg_color = (60, 60, 70)
+        border_color = (100, 100, 110)
+        text_color = (180, 180, 180)
+
+    icon_rect = pygame.Rect(icon_x, icon_y, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg_color, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border_color, icon_rect, 2, border_radius=8)
+
+    cache_key = 24
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    settings_text = fontObj.render("SET", True, text_color)
+    settings_rect = settings_text.get_rect(center=icon_rect.center)
+    windowSurfaceObj.blit(settings_text, settings_rect)
+
+    return icon_rect
+
+
+def draw_jsk_rec_button(screen_width, screen_height, is_recording=False, elapsed_str="00:00"):
+    """
+    Dessine le bouton REC en haut à droite pour JSK LIVE.
+
+    Args:
+        screen_width: Largeur de l'écran
+        screen_height: Hauteur de l'écran
+        is_recording: True si enregistrement en cours
+        elapsed_str: Temps écoulé formaté (MM:SS)
+
+    Returns:
+        Rect du bouton pour détecter les clics
+    """
+    global windowSurfaceObj, _font_cache, jsk_rec_blink
+
+    icon_size = 50
+    margin = 15
+    icon_x = screen_width - icon_size - margin
+    icon_y = margin
+
+    if is_recording:
+        # Alterner le clignotement
+        jsk_rec_blink = 1 - jsk_rec_blink
+        if jsk_rec_blink:
+            bg_color = (180, 40, 40)
+        else:
+            bg_color = (120, 30, 30)
+        border_color = (220, 80, 80)
+        text_color = (255, 255, 255)
+    else:
+        bg_color = (60, 60, 70)
+        border_color = (100, 100, 110)
+        text_color = (180, 180, 180)
+
+    icon_rect = pygame.Rect(icon_x, icon_y, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg_color, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border_color, icon_rect, 2, border_radius=8)
+
+    cache_key = 20
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    # Point rouge si enregistrement
+    if is_recording:
+        pygame.draw.circle(windowSurfaceObj, (255, 50, 50),
+                          (icon_x + 15, icon_y + icon_size // 2), 6)
+        rec_text = fontObj.render("REC", True, text_color)
+        windowSurfaceObj.blit(rec_text, (icon_x + 25, icon_y + icon_size // 2 - 8))
+    else:
+        rec_text = fontObj.render("REC", True, text_color)
+        rec_rect = rec_text.get_rect(center=icon_rect.center)
+        windowSurfaceObj.blit(rec_text, rec_rect)
+
+    # Afficher le temps écoulé si enregistrement
+    if is_recording:
+        cache_key_time = 18
+        if cache_key_time not in _font_cache:
+            _font_cache[cache_key_time] = pygame.font.Font(None, cache_key_time)
+        timeFont = _font_cache[cache_key_time]
+        time_text = timeFont.render(elapsed_str, True, (255, 200, 200))
+        windowSurfaceObj.blit(time_text, (icon_x, icon_y + icon_size + 5))
+
+    return icon_rect
+
+
+def draw_jsk_exit_button(screen_width, screen_height):
+    """
+    Dessine le bouton EXIT en bas à gauche pour JSK LIVE.
+
+    Returns:
+        Rect du bouton pour détecter les clics
+    """
+    global windowSurfaceObj, _font_cache
+
+    icon_size = 50
+    margin = 15
+    icon_x = margin
+    icon_y = screen_height - icon_size - margin
+
+    bg_color = (70, 60, 60)
+    border_color = (120, 100, 100)
+    text_color = (200, 180, 180)
+
+    icon_rect = pygame.Rect(icon_x, icon_y, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg_color, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border_color, icon_rect, 2, border_radius=8)
+
+    cache_key = 22
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    exit_text = fontObj.render("EXIT", True, text_color)
+    exit_rect = exit_text.get_rect(center=icon_rect.center)
+    windowSurfaceObj.blit(exit_text, exit_rect)
+
+    return icon_rect
+
+
+def draw_jsk_controls(screen_width, screen_height, image_array=None):
+    """
+    Dessine le panneau de contrôle JSK LIVE sur le côté droit.
+
+    Args:
+        screen_width: Largeur de l'écran
+        screen_height: Hauteur de l'écran
+        image_array: Image pour histogramme (optionnel)
+
+    Returns:
+        Dict avec les rects des contrôles pour détection clics
+    """
+    global windowSurfaceObj, _font_cache
+    global jsk_stack_count, jsk_hdr_bits_clip, jsk_hdr_method
+    global jsk_denoise_type, jsk_denoise_strength
+    global jsk_hdr_methods, jsk_denoise_types
+    global stretch_preset, ghs_D, ghs_b, ghs_SP
+
+    control_rects = {}
+
+    # Panneau latéral droit
+    panel_width = 280
+    panel_margin = 20
+    panel_x = screen_width - panel_width - panel_margin
+    start_y = 90
+
+    # Fond semi-transparent du panneau
+    panel_height = screen_height - 120
+    s = pygame.Surface((panel_width + 20, panel_height), pygame.SRCALPHA)
+    s.fill((20, 20, 30, 180))
+    windowSurfaceObj.blit(s, (panel_x - 10, start_y - 20))
+
+    # Titre
+    cache_key = 24
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    titleFont = _font_cache[cache_key]
+
+    title = titleFont.render("JSK LIVE Settings", True, (200, 180, 100))
+    windowSurfaceObj.blit(title, (panel_x, start_y - 15))
+    start_y += 25
+
+    slider_width = 250
+    slider_height = 40
+    margin = 8
+
+    # Section HDR
+    cache_key_section = 18
+    if cache_key_section not in _font_cache:
+        _font_cache[cache_key_section] = pygame.font.Font(None, cache_key_section)
+    sectionFont = _font_cache[cache_key_section]
+
+    section = sectionFont.render("HDR Processing:", True, (150, 180, 200))
+    windowSurfaceObj.blit(section, (panel_x, start_y))
+    start_y += 20
+
+    # Stack Count (1-4)
+    control_rects['jsk_stack'] = draw_jsk_slider(
+        panel_x, start_y, slider_width, slider_height,
+        f"Stack: {jsk_stack_count}", jsk_stack_count, 1, 4, (100, 180, 140)
+    )
+    start_y += slider_height + margin
+
+    # HDR Bits Clip (1-3)
+    control_rects['jsk_hdr_clip'] = draw_jsk_slider(
+        panel_x, start_y, slider_width, slider_height,
+        f"HDR Clip: {jsk_hdr_bits_clip} bits", jsk_hdr_bits_clip, 1, 3, (180, 140, 100)
+    )
+    start_y += slider_height + margin
+
+    # HDR Method (0-3)
+    control_rects['jsk_hdr_method'] = draw_jsk_slider(
+        panel_x, start_y, slider_width, slider_height,
+        f"HDR: {jsk_hdr_methods[jsk_hdr_method]}", jsk_hdr_method, 0, 3, (140, 100, 180)
+    )
+    start_y += slider_height + margin + 10
+
+    # Section Denoise
+    section = sectionFont.render("Denoise:", True, (150, 180, 200))
+    windowSurfaceObj.blit(section, (panel_x, start_y))
+    start_y += 20
+
+    # Denoise Type (0-4)
+    control_rects['jsk_denoise_type'] = draw_jsk_slider(
+        panel_x, start_y, slider_width, slider_height,
+        f"Type: {jsk_denoise_types[jsk_denoise_type]}", jsk_denoise_type, 0, 4, (100, 140, 180)
+    )
+    start_y += slider_height + margin
+
+    # Denoise Strength (1-10)
+    control_rects['jsk_denoise_strength'] = draw_jsk_slider(
+        panel_x, start_y, slider_width, slider_height,
+        f"Strength: {jsk_denoise_strength}", jsk_denoise_strength, 1, 10, (180, 160, 100)
+    )
+    start_y += slider_height + margin + 10
+
+    # Section Stretch (réutilise les paramètres existants)
+    section = sectionFont.render("Stretch:", True, (150, 180, 200))
+    windowSurfaceObj.blit(section, (panel_x, start_y))
+    start_y += 20
+
+    # Stretch Preset
+    stretch_names = ['OFF', 'GHS', 'Arcsinh']
+    control_rects['jsk_stretch_preset'] = draw_jsk_slider(
+        panel_x, start_y, slider_width, slider_height,
+        f"Preset: {stretch_names[stretch_preset]}", stretch_preset, 0, 2, (160, 140, 180)
+    )
+    start_y += slider_height + margin
+
+    # Si GHS actif, afficher les paramètres principaux
+    if stretch_preset == 1:
+        control_rects['jsk_ghs_D'] = draw_jsk_slider(
+            panel_x, start_y, slider_width, slider_height,
+            f"GHS D: {ghs_D/10:.1f}", ghs_D, -10, 100, (100, 180, 140)
+        )
+        start_y += slider_height + margin
+
+        control_rects['jsk_ghs_SP'] = draw_jsk_slider(
+            panel_x, start_y, slider_width, slider_height,
+            f"GHS SP: {ghs_SP/100:.2f}", ghs_SP, 0, 100, (180, 140, 100)
+        )
+
+    return control_rects
+
+
+def draw_jsk_slider(x, y, width, height, label, value, vmin, vmax, color=(100, 140, 180)):
+    """
+    Dessine un slider pour JSK LIVE.
+
+    Returns:
+        Rect du slider pour détection clics
+    """
+    global windowSurfaceObj, _font_cache
+
+    slider_rect = pygame.Rect(x, y, width, height)
+
+    # Fond
+    s = pygame.Surface((width, height), pygame.SRCALPHA)
+    s.fill((30, 30, 40, 200))
+    windowSurfaceObj.blit(s, (x, y))
+
+    # Label
+    cache_key = 18
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    label_text = fontObj.render(label, True, (220, 220, 220))
+    windowSurfaceObj.blit(label_text, (x + 5, y + 2))
+
+    # Barre
+    bar_y = y + 22
+    bar_height = height - 27
+    pygame.draw.rect(windowSurfaceObj, (50, 50, 60), (x + 5, bar_y, width - 10, bar_height))
+
+    # Position curseur
+    if vmax > vmin:
+        ratio = (value - vmin) / (vmax - vmin)
+    else:
+        ratio = 0
+    cursor_x = x + 5 + int(ratio * (width - 15))
+
+    # Barre remplie
+    pygame.draw.rect(windowSurfaceObj, color, (x + 5, bar_y, cursor_x - x - 5, bar_height))
+
+    # Curseur
+    pygame.draw.rect(windowSurfaceObj, (200, 200, 220), (cursor_x, bar_y - 2, 5, bar_height + 4))
+
+    # Bordure
+    pygame.draw.rect(windowSurfaceObj, (80, 80, 90), slider_rect, 1)
+
+    return slider_rect
+
+
+def handle_jsk_slider_click(mousex, mousey, control_rects):
+    """
+    Gère le clic sur un slider JSK LIVE.
+
+    Returns:
+        True si un contrôle a été modifié, False sinon
+    """
+    global jsk_stack_count, jsk_hdr_bits_clip, jsk_hdr_method
+    global jsk_denoise_type, jsk_denoise_strength
+    global stretch_preset, ghs_D, ghs_SP
+    global jsk_processor
+
+    for name, rect in control_rects.items():
+        if rect.collidepoint(mousex, mousey):
+            # Position relative dans le slider
+            rel_x = mousex - rect.x - 5
+            slider_width = rect.width - 15
+            ratio = max(0, min(1, rel_x / slider_width))
+
+            if name == 'jsk_stack':
+                jsk_stack_count = int(1 + ratio * 3)
+                jsk_stack_count = max(1, min(4, jsk_stack_count))
+            elif name == 'jsk_hdr_clip':
+                jsk_hdr_bits_clip = int(1 + ratio * 2)
+                jsk_hdr_bits_clip = max(1, min(3, jsk_hdr_bits_clip))
+            elif name == 'jsk_hdr_method':
+                jsk_hdr_method = int(ratio * 3)
+                jsk_hdr_method = max(0, min(3, jsk_hdr_method))
+            elif name == 'jsk_denoise_type':
+                jsk_denoise_type = int(ratio * 4)
+                jsk_denoise_type = max(0, min(4, jsk_denoise_type))
+            elif name == 'jsk_denoise_strength':
+                jsk_denoise_strength = int(1 + ratio * 9)
+                jsk_denoise_strength = max(1, min(10, jsk_denoise_strength))
+            elif name == 'jsk_stretch_preset':
+                stretch_preset = int(ratio * 2)
+                stretch_preset = max(0, min(2, stretch_preset))
+            elif name == 'jsk_ghs_D':
+                ghs_D = int(-10 + ratio * 110)
+                ghs_D = max(-10, min(100, ghs_D))
+            elif name == 'jsk_ghs_SP':
+                ghs_SP = int(ratio * 100)
+                ghs_SP = max(0, min(100, ghs_SP))
+
+            # Mettre à jour le processeur JSK
+            if jsk_processor is not None:
+                jsk_processor.configure(
+                    stack_count=jsk_stack_count,
+                    hdr_bits_clip=jsk_hdr_bits_clip,
+                    hdr_method=jsk_hdr_method,
+                    denoise_type=jsk_denoise_type,
+                    denoise_strength=jsk_denoise_strength
+                )
+
+            return True
+
+    return False
+
+
+def is_click_on_jsk_settings(mousex, mousey):
+    """Vérifie si clic sur bouton Settings JSK."""
+    icon_size = 50
+    margin = 15
+    return (margin <= mousex <= margin + icon_size and
+            margin <= mousey <= margin + icon_size)
+
+
+def is_click_on_jsk_rec(mousex, mousey, screen_width):
+    """Vérifie si clic sur bouton REC JSK."""
+    icon_size = 50
+    margin = 15
+    icon_x = screen_width - icon_size - margin
+    return (icon_x <= mousex <= icon_x + icon_size and
+            margin <= mousey <= margin + icon_size)
+
+
+def is_click_on_jsk_exit(mousex, mousey, screen_height):
+    """Vérifie si clic sur bouton EXIT JSK."""
+    icon_size = 50
+    margin = 15
+    icon_y = screen_height - icon_size - margin
+    return (margin <= mousex <= margin + icon_size and
+            icon_y <= mousey <= icon_y + icon_size)
+
+
+# ============================================================================
+# FIN JSK LIVE FULLSCREEN CONTROLS
+# ============================================================================
+
+
 def calculate_fwhm(image_surface, center_x, center_y, area_size):
     """
     Calcule le FWHM pour mesurer la netteté
@@ -6735,7 +7180,7 @@ def preview():
     global count,p, brightness,contrast,modes,mode,red,blue,gain,sspeed,ev,preview_width,preview_height,zoom,igw,igh,zx,zy,awbs,awb,saturations
     global saturation,meters,meter,flickers,flicker,sharpnesss,sharpness,rotate,v3_hdrs,mjpeg_extractor
     global picam2, capture_thread, use_picamera2, Pi_Cam, camera, v3_af, v5_af, vflip, hflip, denoise, denoises, quality, use_native_sensor_mode, zfs
-    global livestack_active, luckystack_active, raw_format, raw_stream_size, capture_size
+    global livestack_active, luckystack_active, raw_format, raw_stream_size, capture_size, jsk_live_mode
 
     # Variables statiques pour mémoriser la configuration précédente
     if not hasattr(preview, 'prev_config'):
@@ -6912,10 +7357,10 @@ def preview():
                 # *** IMPORTANT: Mettre à jour capture_thread pour le mode stacking ***
                 # Même en fast path, on doit s'assurer que le capture_thread est configuré correctement
                 if capture_thread is not None:
-                    if (livestack_active or luckystack_active) and raw_format >= 2:
+                    if (livestack_active or luckystack_active or jsk_live_mode == 1) and raw_format >= 2:
                         capture_thread.set_capture_params({'type': 'raw'})
                         if show_cmds == 1:
-                            print(f"  → Capture thread configuré en mode RAW (stacking actif)")
+                            print(f"  → Capture thread configuré en mode RAW (stacking/JSK actif)")
                     else:
                         capture_thread.set_capture_params({'type': 'main'})
                         if show_cmds == 1:
@@ -7416,7 +7861,7 @@ def preview():
 
         capture_thread = AsyncCaptureThread(picam2)
         # Définir les paramètres de capture selon le format RAW
-        if (livestack_active or luckystack_active) and raw_format >= 2:
+        if (livestack_active or luckystack_active or jsk_live_mode == 1) and raw_format >= 2:
             capture_thread.set_capture_params({'type': 'raw'})
         else:
             capture_thread.set_capture_params({'type': 'main'})
@@ -7632,6 +8077,8 @@ def Menu():
                 button(0,d,0,4)
             elif menu == 10:
                 button(0,d,0,4)
+            elif menu == 11:
+                button(0,d,0,4)
         text(0,0,1,0,1,"MAIN MENU ",ft,7)
       
     # ========== MENU 0 - MAIN MENU ==========
@@ -7651,7 +8098,25 @@ def Menu():
         button(0,5,5,4)  # STRETCH
         button(0,6,0,4)  # CAMERA Settings
         button(0,7,0,4)  # OTHER Settings
-        button(0,8,0,4)  # EXIT
+        # Bouton row 8 divisé en deux: EXIT (gauche) et PAGE2 (droite)
+        # Dessiner les deux demi-boutons manuellement
+        bx = preview_width
+        by = 8 * bh
+        half_bw = int(bw / 2)
+        # Demi-bouton gauche - EXIT (gris)
+        pygame.draw.rect(windowSurfaceObj, greyColor, Rect(bx+1, by, half_bw-2, bh))
+        pygame.draw.line(windowSurfaceObj, whiteColor, (bx, by), (bx, by+bh-1), 2)
+        pygame.draw.line(windowSurfaceObj, whiteColor, (bx, by), (bx+half_bw-1, by), 1)
+        pygame.draw.line(windowSurfaceObj, dgryColor, (bx, by+bh-1), (bx+half_bw-1, by+bh-1), 1)
+        pygame.draw.line(windowSurfaceObj, dgryColor, (bx+half_bw-2, by), (bx+half_bw-2, by+bh), 2)
+        # Demi-bouton droit - PAGE2 (bleu)
+        pygame.draw.rect(windowSurfaceObj, blueColor, Rect(bx+half_bw+1, by, half_bw-2, bh))
+        pygame.draw.line(windowSurfaceObj, whiteColor, (bx+half_bw, by), (bx+half_bw, by+bh-1), 2)
+        pygame.draw.line(windowSurfaceObj, whiteColor, (bx+half_bw, by), (bx+bw-1, by), 1)
+        pygame.draw.line(windowSurfaceObj, dgryColor, (bx+half_bw, by+bh-1), (bx+bw-1, by+bh-1), 1)
+        pygame.draw.line(windowSurfaceObj, dgryColor, (bx+bw-2, by), (bx+bw-2, by+bh), 2)
+        pygame.display.update()
+
         text(0,0,8,0,1,"         STILL ",ft,1)
         text(0,1,8,0,1,"         VIDEO",ft,2)
         text(0,2,8,0,1,"       TIMELAPSE",ft-1,4)
@@ -7662,7 +8127,19 @@ def Menu():
         text(0,6,1,1,1,"    Settings",ft,7)
         text(0,7,1,0,1,"       OTHER",ft,7)
         text(0,7,1,1,1,"    Settings",ft,7)
-        text(0,8,2,0,1,"     EXIT",fv+10,7)
+        # Textes pour les demi-boutons EXIT et PAGE2
+        # EXIT sur la moitié gauche
+        fontObj = pygame.font.Font(None, fv+10)
+        renderedText = fontObj.render("EXIT", True, whiteColor)
+        textRect = renderedText.get_rect()
+        textRect.center = (bx + int(half_bw/2), by + int(bh/2))
+        windowSurfaceObj.blit(renderedText, textRect)
+        # PAGE2 sur la moitié droite
+        renderedText2 = fontObj.render("PAGE2", True, whiteColor)
+        textRect2 = renderedText2.get_rect()
+        textRect2.center = (bx + half_bw + int(half_bw/2), by + int(bh/2))
+        windowSurfaceObj.blit(renderedText2, textRect2)
+        pygame.display.update()
       
     # ========== MENU 1 - CAMERA SETTINGS ==========
     elif menu == 1:
@@ -8302,6 +8779,37 @@ def Menu():
         text(0,9,1,0,1,"OTHER",ft,10)
         text(0,9,1,1,1,"Settings",ft,10)
 
+    # ========== MENU 11 - PAGE 2 (Extensions futures) ==========
+    elif menu == 11:
+        # Effacer la zone des boutons
+        pygame.draw.rect(windowSurfaceObj, blackColor, Rect(preview_width, 0, bw, preview_height))
+
+        # Boutons avec le même style que le menu principal (9 boutons)
+        bh = int(preview_height/9)
+
+        # Bouton 0 - Retour PAGE 1 (menu principal)
+        button(0,0,0,4)
+        text(0,0,1,0,1,"     PAGE 1",ft,7)
+
+        # Bouton 1 - JSK LIVE (vert comme STILL)
+        button(0,1,4,4)
+        text(0,1,8,0,1,"      JSK LIVE",ft,1)
+
+        # Bouton 2 - COLIM (jaune comme VIDEO)
+        button(0,2,2,4)
+        text(0,2,8,0,1,"        COLIM",ft,2)
+
+        # Boutons 3-7 vides pour futures extensions
+        button(0,3,0,4)
+        button(0,4,0,4)
+        button(0,5,0,4)
+        button(0,6,0,4)
+        button(0,7,0,4)
+
+        # Bouton 8 - EXIT
+        button(0,8,0,4)
+        text(0,8,2,0,1,"      EXIT",fv+10,7)
+
 text(0,0,6,2,1,"Please Wait, checking camera",int(fv* 1.7),1)
 text(0,0,6,2,1,"Found " + str(cameras[Pi_Cam]),int(fv*1.7),1)
 
@@ -8461,6 +8969,122 @@ while True:
             frame_from_thread, metadata_from_thread = None, None
             if capture_thread is not None:
                 frame_from_thread, metadata_from_thread = capture_thread.get_latest_frame()
+
+            # === JSK LIVE MODE: Traitement dédié dans le chemin Picamera2 ===
+            # Le pipeline JSK LIVE (HDR + Denoise) remplace le pipeline normal (debayer + ISP)
+            # Ce bloc DOIT être avant le traitement normal pour éviter le debayering inutile
+            if jsk_live_mode == 1 and jsk_processor is not None:
+                jsk_raw_input = None
+
+                # DEBUG JSK LIVE - compteur pour limiter les prints
+                if not hasattr(pygame, '_jsk_debug_count'):
+                    pygame._jsk_debug_count = 0
+                pygame._jsk_debug_count += 1
+                # Print les 10 premières itérations, puis toutes les 100
+                jsk_debug = (pygame._jsk_debug_count <= 10 or pygame._jsk_debug_count % 100 == 0)
+
+                if frame_from_thread is not None:
+                    raw_array = frame_from_thread
+                    if jsk_debug:
+                        print(f"[JSK DEBUG] Frame reçue: shape={raw_array.shape}, dtype={raw_array.dtype}, min={raw_array.min()}, max={raw_array.max()}")
+                    if len(raw_array.shape) == 2:
+                        # Frame RAW valide (2D Bayer)
+                        # IMPORTANT: capture_array("raw") retourne souvent des octets empaquetés (uint8)
+                        # alors que les pixels sont en 16-bit. Il faut dépaqueter.
+                        if raw_array.dtype == np.uint8:
+                            # Octets bruts → réinterpréter comme uint16 et extraire la largeur réelle
+                            raw_uint16 = raw_array.view(np.uint16)
+                            pixel_width = raw_stream_size[0]  # Largeur en pixels (ex: 1928)
+                            jsk_raw_input = raw_uint16[:, :pixel_width]
+                            if jsk_debug:
+                                print(f"[JSK DEBUG] Unpack uint8→uint16: ({raw_array.shape}) → ({jsk_raw_input.shape}), "
+                                      f"min={jsk_raw_input.min()}, max={jsk_raw_input.max()}")
+                        elif raw_array.dtype == np.uint16:
+                            # Déjà en uint16 - vérifier si padding à retirer
+                            pixel_width = raw_stream_size[0]
+                            if raw_array.shape[1] > pixel_width:
+                                jsk_raw_input = raw_array[:, :pixel_width]
+                            else:
+                                jsk_raw_input = raw_array
+                            if jsk_debug:
+                                print(f"[JSK DEBUG] uint16 direct: shape={jsk_raw_input.shape}, "
+                                      f"min={jsk_raw_input.min()}, max={jsk_raw_input.max()}")
+                        else:
+                            jsk_raw_input = raw_array
+
+                        # Normaliser vers 12-bit (0-4095) si les valeurs dépassent
+                        if jsk_raw_input is not None and jsk_raw_input.max() > 4095:
+                            max_val = jsk_raw_input.max()
+                            if jsk_debug:
+                                print(f"[JSK DEBUG] Normalisation {max_val} → 12-bit (0-4095)")
+                            jsk_raw_input = (jsk_raw_input.astype(np.float32) / max_val * 4095).astype(np.uint16)
+                    else:
+                        # Frame ISP reçue (3D) → forcer le mode RAW pour les prochaines captures
+                        if jsk_debug:
+                            print(f"[JSK DEBUG] Frame ISP (3D) reçue au lieu de RAW (2D) → forçage mode RAW")
+                        if capture_thread is not None:
+                            capture_thread.set_capture_params({'type': 'raw'})
+                    frame_from_thread = None  # Empêcher le traitement normal
+                else:
+                    if jsk_debug:
+                        print(f"[JSK DEBUG] Pas de frame disponible (frame_from_thread=None)")
+
+                # Dimensions écran fullscreen
+                display_modes = pygame.display.list_modes()
+                if display_modes and display_modes != -1:
+                    max_width, max_height = display_modes[0]
+                else:
+                    screen_info = pygame.display.Info()
+                    max_width, max_height = screen_info.current_w, screen_info.current_h
+
+                # Fond noir (évite l'écran blanc/résidu)
+                windowSurfaceObj.fill((0, 0, 0))
+
+                # Traitement image RAW avec pipeline JSK (HDR + Denoise)
+                if jsk_raw_input is not None:
+                    if jsk_debug:
+                        print(f"[JSK DEBUG] Pipeline JSK: hdr_method={jsk_processor.hdr_method} ({jsk_processor.hdr_methods[jsk_processor.hdr_method]}), "
+                              f"bits_clip={jsk_processor.hdr_bits_clip}, denoise={jsk_processor.denoise_type}, "
+                              f"stack={jsk_processor.stack_count}")
+                    jsk_result = jsk_processor.process_single(jsk_raw_input)
+                    if jsk_debug:
+                        if jsk_result is not None:
+                            print(f"[JSK DEBUG] Résultat process_single: shape={jsk_result.shape}, dtype={jsk_result.dtype}, "
+                                  f"min={jsk_result.min()}, max={jsk_result.max()}, mean={jsk_result.mean():.1f}")
+                        else:
+                            print(f"[JSK DEBUG] process_single a retourné None!")
+                    if jsk_result is not None:
+                        # Appliquer le stretch si activé
+                        if stretch_preset != 0:
+                            jsk_result = astro_stretch(jsk_result)
+                            if jsk_debug:
+                                print(f"[JSK DEBUG] Après stretch: min={jsk_result.min()}, max={jsk_result.max()}, mean={jsk_result.mean():.1f}")
+                        # Convertir en surface pygame et afficher en plein écran
+                        jsk_surface = pygame.surfarray.make_surface(np.swapaxes(jsk_result, 0, 1))
+                        jsk_surface = pygame.transform.scale(jsk_surface, (max_width, max_height))
+                        windowSurfaceObj.blit(jsk_surface, (0, 0))
+                        if jsk_debug:
+                            print(f"[JSK DEBUG] Image affichée: {max_width}x{max_height}")
+                        # Enregistrer la frame si recording actif
+                        if jsk_recorder is not None and jsk_recorder.is_recording:
+                            jsk_recorder.write_frame(jsk_result)
+                else:
+                    if jsk_debug:
+                        print(f"[JSK DEBUG] jsk_raw_input=None → pas de traitement image")
+
+                # TOUJOURS dessiner les boutons JSK LIVE (même sans image RAW)
+                draw_jsk_settings_icon(max_width, max_height, jsk_settings_visible == 1)
+                elapsed_str = "00:00"
+                if jsk_recorder is not None and jsk_recorder.is_recording:
+                    elapsed_str = jsk_recorder.get_elapsed_str()
+                draw_jsk_rec_button(max_width, max_height,
+                                   jsk_recorder is not None and jsk_recorder.is_recording,
+                                   elapsed_str)
+                draw_jsk_exit_button(max_width, max_height)
+
+                # Afficher le panneau de contrôle si visible
+                if jsk_settings_visible == 1:
+                    _jsk_slider_rects = draw_jsk_controls(max_width, max_height, None)
 
             # Si une frame est disponible, la traiter et l'afficher
             # Sinon, on saute juste le traitement (l'interface reste réactive)
@@ -9046,8 +9670,62 @@ while True:
                         # Mode RGB/YUV: panneau stretch uniquement
                         _stretch_slider_rects = draw_stretch_controls(max_width, max_height, img_array)
 
-    # Ne pas afficher les overlays en mode stretch
-    if (zoom > 0 or foc_man == 1 or focus_mode == 1 or histogram > 0) and stretch_mode == 0:
+            # ===== JSK LIVE MODE =====
+            if jsk_live_mode == 1 and jsk_processor is not None:
+                # Obtenir les dimensions de l'écran
+                display_modes = pygame.display.list_modes()
+                if display_modes and display_modes != -1:
+                    max_width, max_height = display_modes[0]
+                else:
+                    screen_info = pygame.display.Info()
+                    max_width, max_height = screen_info.current_w, screen_info.current_h
+
+                # Traiter l'image RAW avec le processeur JSK
+                # raw_array contient les données RAW 12 bits brutes (définies plus haut si raw_format >= 2)
+                jsk_raw_input = None
+                try:
+                    # Utiliser raw_array si disponible (données RAW brutes 12 bits)
+                    if 'raw_array' in dir() and raw_array is not None and len(raw_array.shape) == 2:
+                        jsk_raw_input = raw_array
+                except:
+                    pass
+
+                if jsk_raw_input is not None:
+                    # Appliquer le traitement JSK (HDR + denoise)
+                    # Le processeur JSK attend des données RAW 12 bits et fait son propre debayering
+                    jsk_result = jsk_processor.process_single(jsk_raw_input)
+
+                    if jsk_result is not None:
+                        # Appliquer le stretch si activé
+                        if stretch_preset != 0:
+                            jsk_result = astro_stretch(jsk_result)
+
+                        # Convertir en surface pygame
+                        jsk_surface = pygame.surfarray.make_surface(np.swapaxes(jsk_result, 0, 1))
+                        jsk_surface = pygame.transform.scale(jsk_surface, (max_width, max_height))
+                        windowSurfaceObj.blit(jsk_surface, (0, 0))
+
+                        # Enregistrer la frame si recording actif
+                        if jsk_recorder is not None and jsk_recorder.is_recording:
+                            jsk_recorder.write_frame(jsk_result)
+
+                # Afficher les boutons JSK LIVE
+                draw_jsk_settings_icon(max_width, max_height, jsk_settings_visible == 1)
+
+                elapsed_str = "00:00"
+                if jsk_recorder is not None and jsk_recorder.is_recording:
+                    elapsed_str = jsk_recorder.get_elapsed_str()
+                draw_jsk_rec_button(max_width, max_height,
+                                   jsk_recorder is not None and jsk_recorder.is_recording,
+                                   elapsed_str)
+                draw_jsk_exit_button(max_width, max_height)
+
+                # Afficher le panneau de contrôle si visible
+                if jsk_settings_visible == 1:
+                    _jsk_slider_rects = draw_jsk_controls(max_width, max_height, None)
+
+    # Ne pas afficher les overlays en mode stretch ou JSK LIVE
+    if (zoom > 0 or foc_man == 1 or focus_mode == 1 or histogram > 0) and stretch_mode == 0 and jsk_live_mode == 0:
         # Utiliser array3d au lieu de pixels3d pour ne pas verrouiller la surface
         # Cela améliore grandement la fluidité de l'affichage en mode focus et histogram
         image2 = pygame.surfarray.array3d(image)
@@ -9698,6 +10376,93 @@ while True:
                         print(f"[STRETCH] Sortie mode RAW preview - capture_thread reconfiguré en mode ISP")
 
             continue
+
+        # ===== GESTION DES CLICS EN MODE JSK LIVE =====
+        if jsk_live_mode == 1:
+            # Obtenir les dimensions de l'écran fullscreen
+            display_modes = pygame.display.list_modes()
+            if display_modes and display_modes != -1:
+                fs_width, fs_height = display_modes[0]
+            else:
+                screen_info = pygame.display.Info()
+                fs_width, fs_height = screen_info.current_w, screen_info.current_h
+
+            # Vérifier si clic sur le bouton Settings
+            if is_click_on_jsk_settings(mousex, mousey):
+                jsk_settings_visible = 1 - jsk_settings_visible  # Toggle
+                _jsk_slider_rects = {}
+                continue
+
+            # Vérifier si clic sur le bouton REC
+            if is_click_on_jsk_rec(mousex, mousey, fs_width):
+                if jsk_recorder is not None:
+                    if jsk_recorder.is_recording:
+                        # Arrêter l'enregistrement
+                        output_path = jsk_recorder.stop()
+                        print(f"[JSK LIVE] Enregistrement arrêté: {output_path}")
+                    else:
+                        # Démarrer l'enregistrement
+                        import datetime
+                        now = datetime.datetime.now()
+                        timestamp = now.strftime("%y%m%d%H%M%S")
+                        output_file = pic_dir + "JSK_" + timestamp + ".mp4"
+                        # Obtenir les dimensions de l'image
+                        if jsk_recorder.start(output_file, fs_width, fs_height, fps=25):
+                            print(f"[JSK LIVE] Enregistrement démarré: {output_file}")
+                        else:
+                            print(f"[JSK LIVE] Erreur démarrage enregistrement")
+                continue
+
+            # Vérifier si clic sur le bouton EXIT
+            if is_click_on_jsk_exit(mousex, mousey, fs_height):
+                # Quitter le mode JSK LIVE
+                jsk_live_mode = 0
+                jsk_settings_visible = 0
+                _jsk_slider_rects = {}
+
+                # Arrêter l'enregistrement si actif
+                if jsk_recorder is not None and jsk_recorder.is_recording:
+                    jsk_recorder.stop()
+
+                # Restaurer les paramètres sauvegardés
+                if 'jsk_saved_vwidth' in dir():
+                    vwidth = jsk_saved_vwidth
+                    vheight = jsk_saved_vheight
+                    zoom = jsk_saved_zoom
+                    use_native_sensor_mode = jsk_saved_use_native
+
+                # Reconfigurer la caméra avec les paramètres restaurés
+                print("[JSK LIVE] Restauration configuration caméra précédente")
+                kill_preview_process()
+                preview()
+
+                # Reconfigurer la capture en mode normal (ISP)
+                if capture_thread is not None:
+                    capture_thread.set_capture_params({'type': 'main'})
+
+                # Restaurer le mode d'affichage normal
+                if frame == 1:
+                    if fullscreen == 1:
+                        windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.FULLSCREEN, 24)
+                    else:
+                        windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), 0, 24)
+                else:
+                    windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.NOFRAME, 24)
+
+                windowSurfaceObj.fill((0, 0, 0))
+                menu = 11  # Retour à PAGE 2
+                Menu()
+                pygame.display.update()
+                print("[JSK LIVE] Mode désactivé")
+                continue
+
+            # Si panneau settings visible, gérer les clics sur les sliders
+            if jsk_settings_visible == 1:
+                if _jsk_slider_rects:
+                    if handle_jsk_slider_click(mousex, mousey, _jsk_slider_rects):
+                        continue
+
+            continue  # Rester en mode JSK LIVE
 
         # Permettre le déplacement du réticule même avec menu ouvert si on est en mode focus
         if mousex < preview_width and mousey < preview_height and mousex != 0 and mousey != 0 and event.button != 3 and (menu == 0 or focus_mode == 1):
@@ -12296,18 +13061,24 @@ while True:
                     Menu()
 
                 elif button_row == 8:
-                    # EXIT
-                    kill_preview_process()
-                    if picam2 is not None:
-                        try:
-                            picam2.stop()
-                            picam2.close()
-                        except:
-                            pass
-                    pygame.display.quit()
-                    sys.exit()
-                   
-                                           
+                    # Bouton divisé: EXIT (gauche) / PAGE2 (droite)
+                    if button_pos == 0:
+                        # Moitié gauche - EXIT
+                        kill_preview_process()
+                        if picam2 is not None:
+                            try:
+                                picam2.stop()
+                                picam2.close()
+                            except:
+                                pass
+                        pygame.display.quit()
+                        sys.exit()
+                    else:
+                        # Moitié droite - Accès PAGE 2 (menu 11)
+                        menu = 11
+                        Menu()
+
+
             # MENU 1
             elif menu == 1:
               if button_row == 1:
@@ -16176,6 +16947,101 @@ while True:
                   # Retour CAMERA Settings
                   menu = 1
                   Menu()
+
+            elif menu == 11:
+              # PAGE 2 - Extensions futures
+              if button_row == 0:
+                  # Retour au menu principal
+                  menu = 0
+                  Menu()
+
+              elif button_row == 1:
+                  # JSK LIVE - Activation du mode
+                  # Vérifier que le format RAW est sélectionné
+                  if raw_format < 2:
+                      # Afficher un message d'erreur si pas en mode RAW
+                      button(0,1,1,4)
+                      text(0,1,2,0,1,"  JSK LIVE",ft,0)
+                      text(0,1,6,1,1," RAW requis!",fv,0)
+                      pygame.display.update()
+                      time.sleep(1.5)
+                      button(0,1,4,4)
+                      text(0,1,8,0,1,"      JSK LIVE",ft,1)
+                      pygame.display.update()
+                  else:
+                      # Activer le mode JSK LIVE
+                      jsk_live_mode = 1
+                      jsk_settings_visible = 0
+
+                      # Sauvegarder les paramètres actuels pour restauration à la sortie
+                      jsk_saved_vwidth = vwidth
+                      jsk_saved_vheight = vheight
+                      jsk_saved_zoom = zoom
+                      jsk_saved_use_native = use_native_sensor_mode
+
+                      # Forcer le mode binning 1920x1080
+                      vwidth = 1920
+                      vheight = 1080
+                      zoom = 0
+                      use_native_sensor_mode = 0  # Mode binning
+
+                      # Reconfigurer la caméra en mode binning 1920x1080 RAW
+                      print("[JSK LIVE] Configuration caméra: binning 1920x1080 RAW12")
+                      kill_preview_process()
+                      preview()
+
+                      # Initialiser le processeur JSK
+                      jsk_processor = JSKLiveProcessor()
+                      jsk_processor.configure(
+                          stack_count=jsk_stack_count,
+                          hdr_bits_clip=jsk_hdr_bits_clip,
+                          hdr_method=jsk_hdr_method,
+                          denoise_type=jsk_denoise_type,
+                          denoise_strength=jsk_denoise_strength
+                      )
+
+                      # Initialiser le recorder (dimensions 1920x1080)
+                      jsk_recorder = JSKVideoRecorder()
+
+                      # Configurer capture_thread en mode RAW
+                      if capture_thread is not None:
+                          capture_thread.set_capture_params({'type': 'raw'})
+
+                      # Passer en plein écran
+                      display_modes = pygame.display.list_modes()
+                      if display_modes and display_modes != -1:
+                          max_width, max_height = display_modes[0]
+                      else:
+                          screen_info = pygame.display.Info()
+                          max_width, max_height = screen_info.current_w, screen_info.current_h
+                      windowSurfaceObj = pygame.display.set_mode((max_width, max_height), pygame.FULLSCREEN, 24)
+                      windowSurfaceObj.fill((0, 0, 0))
+                      pygame.display.update()
+                      print("[JSK LIVE] Mode activé (binning 1920x1080)")
+
+              elif button_row == 2:
+                  # COLIM - Fonctionnalité à implémenter
+                  # Placeholder: affiche un message temporaire
+                  button(0,2,1,4)
+                  text(0,2,2,0,1,"    COLIM",ft,0)
+                  text(0,2,6,1,1,"  A venir...",fv,0)
+                  pygame.display.update()
+                  time.sleep(1)
+                  button(0,2,2,4)
+                  text(0,2,8,0,1,"        COLIM",ft,2)
+                  pygame.display.update()
+
+              elif button_row == 8:
+                  # EXIT
+                  kill_preview_process()
+                  if picam2 is not None:
+                      try:
+                          picam2.stop()
+                          picam2.close()
+                      except:
+                          pass
+                  pygame.display.quit()
+                  sys.exit()
 
         # RESTART
         if restart > 0:
