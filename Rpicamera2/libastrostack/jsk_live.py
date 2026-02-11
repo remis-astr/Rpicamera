@@ -15,52 +15,56 @@ import cv2
 # HDR Processing - Adapté pour RAW 12 bits et RPi5 (numpy au lieu de cupy)
 # ============================================================================
 
-def HDR_compute_12bit(image_12b, method="Median", bits_to_clip=2, type_bayer=cv2.COLOR_BayerRG2RGB):
+def HDR_compute_12bit(image_12b, method="Median", bits_to_clip=2, type_bayer=cv2.COLOR_BayerRG2RGB, weights=None):
     """
     Crée une image HDR à partir d'une seule frame RAW 12 bits.
-    Génère 4 frames virtuelles avec différents seuils et les fusionne.
+    Génère (bits_to_clip + 1) frames virtuelles par retrait successif
+    des bits de poids fort, puis les fusionne.
+
+    Avec bits_to_clip=2, on obtient 3 images :
+        12-bit : seuil = 4095 (image originale)
+        11-bit : seuil = 2047 (1 bit retiré)
+        10-bit : seuil = 1023 (2 bits retirés)
 
     Args:
         image_12b: Image RAW 12 bits (numpy array, 1 canal Bayer)
         method: Méthode de fusion - "Median", "Mean", ou "Mertens"
-        bits_to_clip: Nombre de bits de poids fort à enlever (1-3)
-                     1 = seuil à 2048 (doux)
-                     2 = seuil à 1024 (moyen)
-                     3 = seuil à 512 (agressif)
+        bits_to_clip: Nombre de bits de poids fort à retirer (1-3)
         type_bayer: Pattern Bayer pour debayering (cv2.COLOR_BayerXX2RGB)
+        weights: Liste de poids (0-100) pour chaque image, longueur = bits_to_clip+1.
+                 Utilisé pour la méthode Mean (moyenne pondérée).
+                 None = poids égaux.
 
     Returns:
         Image HDR 8 bits RGB (numpy array)
     """
-    # Convertir en float32 pour les calculs
     image_float = image_12b.astype(np.float32)
+    n_images = bits_to_clip + 1
 
-    # Calculer les seuils basés sur bits_to_clip
-    # Pour RAW 12 bits, max = 4095
-    # bits_to_clip = 1 -> threshold_base = 11 bits = 2047
-    # bits_to_clip = 2 -> threshold_base = 10 bits = 1023
-    # bits_to_clip = 3 -> threshold_base = 9 bits = 511
-    threshold_bits = 12 - bits_to_clip
+    # Générer les seuils par retrait réel de bits de poids fort
+    thresholds = []
+    for i in range(n_images):
+        bit_depth = 12 - i
+        thresholds.append(2 ** bit_depth - 1)
 
-    # Calculer delta pour espacer les 4 seuils
-    if (12 - threshold_bits) <= 5:
-        delta_th = (12 - threshold_bits) / 3.0
-    else:
-        delta_th = 5.0 / 3.0
-
-    thres4 = 2 ** threshold_bits - 1
-    thres3 = 2 ** (threshold_bits + delta_th) - 1
-    thres2 = 2 ** (threshold_bits + delta_th * 2) - 1
-    thres1 = 2 ** (threshold_bits + delta_th * 3) - 1
-
-    # Générer les 4 images avec différents seuils
+    # Générer les images clippées (du seuil le plus haut au plus bas)
     img_list = []
-
-    for thres in [thres1, thres2, thres3, thres4]:
+    for thres in thresholds:
         img_clipped = image_float.copy()
         img_clipped[img_clipped > thres] = thres
         img_8b = (img_clipped / thres * 255.0).astype(np.uint8)
         img_list.append(img_8b)
+
+    # Préparer les poids normalisés pour la fusion
+    if weights is not None:
+        w = [max(0, w) for w in weights[:n_images]]
+    else:
+        w = [100] * n_images
+    w_sum = sum(w)
+    if w_sum == 0:
+        w = [1.0] * n_images
+        w_sum = float(n_images)
+    w_norm = [float(x) / w_sum for x in w]
 
     # Fusionner selon la méthode choisie
     if method == "Mertens":
@@ -71,8 +75,9 @@ def HDR_compute_12bit(image_12b, method="Median", bits_to_clip=2, type_bayer=cv2
         img_stack = np.stack(img_list, axis=0)
         HDR_image_gray = np.median(img_stack, axis=0).astype(np.uint8)
     elif method == "Mean":
-        img_stack = np.stack(img_list, axis=0)
-        HDR_image_gray = np.mean(img_stack, axis=0).astype(np.uint8)
+        # Moyenne pondérée par les poids utilisateur
+        img_stack = np.stack(img_list, axis=0).astype(np.float32)
+        HDR_image_gray = np.average(img_stack, axis=0, weights=w_norm).astype(np.uint8)
     else:
         # Fallback: pas de HDR, juste normalisation
         HDR_image_gray = (image_float / 4095.0 * 255.0).astype(np.uint8)
@@ -249,6 +254,7 @@ class JSKLiveProcessor:
         self.hdr_method = 1        # 0=OFF, 1=Median, 2=Mean, 3=Mertens
         self.denoise_type = 0      # 0=OFF, 1=Bilateral, 2=NLM, 3=Gaussian, 4=Median
         self.denoise_strength = 5  # 1-10
+        self.hdr_weights = [100, 100, 100, 100]  # Poids HDR par niveau de bit (0-100)
         self.bayer_pattern = cv2.COLOR_BayerRG2RGB
 
         # Buffer pour le stacking
@@ -270,6 +276,8 @@ class JSKLiveProcessor:
             self.denoise_type = max(0, min(4, kwargs['denoise_type']))
         if 'denoise_strength' in kwargs:
             self.denoise_strength = max(1, min(10, kwargs['denoise_strength']))
+        if 'hdr_weights' in kwargs:
+            self.hdr_weights = list(kwargs['hdr_weights'][:4])
         if 'bayer_pattern' in kwargs:
             self.bayer_pattern = kwargs['bayer_pattern']
 
@@ -314,7 +322,8 @@ class JSKLiveProcessor:
                 raw_frame,
                 method=method_name,
                 bits_to_clip=self.hdr_bits_clip,
-                type_bayer=self.bayer_pattern
+                type_bayer=self.bayer_pattern,
+                weights=self.hdr_weights
             )
 
         # 2. Ajouter l'image RGB traitée au buffer pour stacking
