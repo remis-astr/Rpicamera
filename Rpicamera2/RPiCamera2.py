@@ -70,6 +70,9 @@ from libastrostack.allsky import AllskyMeanController, stack_timelapse_images
 # Import JSK LIVE module (dans libastrostack/)
 from libastrostack.jsk_live import JSKLiveProcessor, JSKVideoRecorder
 
+# Import Collimation module (dans libastrostack/)
+from libastrostack.collimation import CollimationDetector, CIRCLE_COLORS, CIRCLE_LABELS, CIRCLE_ORDER
+
 # ============================================================================
 # Helper pour tuer le subprocess rpicam-vid (mode non-Picamera2)
 # ============================================================================
@@ -1526,6 +1529,38 @@ jsk_saved_vwidth = 1920
 jsk_saved_vheight = 1080
 jsk_saved_zoom = 0
 jsk_saved_use_native = 0
+
+# COLLIMATION Settings
+collimation_mode = 0              # 0=OFF, 1=Active
+collimation_detector = None       # Instance CollimationDetector
+collimation_sensitivity = 5       # 1-10 (sensibilite detection cercles)
+collimation_last_surface = None   # Derniere surface valide pour eviter le gel
+collimation_last_scale = (1.0, 1.0)  # Derniers scale_x, scale_y pour l'overlay
+collimation_settings_visible = 0  # 0=masque, 1=panneau lateral visible
+collimation_circle_enabled = {    # Cercles actives pour detection/affichage (tous OFF par defaut)
+    'focuser': False, 'secondary': False, 'primary': False, 'camera': False
+}
+collimation_circle_locked = {     # Cercles verrouilles (position figee)
+    'focuser': False, 'secondary': False, 'primary': False, 'camera': False
+}
+collimation_circle_min_pct = {    # Rayon min en % de min(h,w)
+    'focuser': 35, 'secondary': 15, 'primary': 8, 'camera': 2
+}
+collimation_circle_max_pct = {    # Rayon max en % de min(h,w)
+    'focuser': 49, 'secondary': 40, 'primary': 25, 'camera': 15
+}
+collimation_detect_interval = 4   # Detection tous les N frames (1-10)
+collimation_zoom = 0              # Zoom sauvegarde a l'entree du mode collimation
+# Variables de sauvegarde pour restauration a la sortie de collimation (comme JSK LIVE)
+collimation_saved_zoom = 0
+collimation_saved_vwidth = 1920
+collimation_saved_vheight = 1080
+collimation_saved_use_native = 0
+_collimation_slider_rects = {}    # Rects des sliders pour gestion des clics
+collimation_gain = 0              # Gain en mode collimation (0=AUTO, 1-max)
+collimation_exposure_us = 0       # Exposition en µs en mode collimation (0=AUTO)
+collimation_saved_gain = 0        # Sauvegarde du gain global a l'entree
+collimation_saved_exposure = 0    # Sauvegarde de l'exposition globale a l'entree
 
 # METRICS Settings - Phase 2 Demande 5 et 6
 focus_method = 1        # 0=OFF, 1=Laplacian, 2=Gradient, 3=Sobel, 4=Tenengrad
@@ -6314,6 +6349,806 @@ def is_click_on_jsk_exit(mousex, mousey, screen_height):
 # ============================================================================
 
 
+# ============================================================================
+# COLLIMATION FULLSCREEN CONTROLS
+# ============================================================================
+
+def draw_collimation_overlay(screen_width, screen_height, detector, scale_x, scale_y, circle_enabled=None, circle_locked=None):
+    """
+    Dessine l'overlay de collimation sur le flux live.
+
+    Affiche :
+    - Les cercles detectes avec couleurs distinctes (filtre par circle_enabled)
+    - Indicateur LOCK pour les cercles verrouilles
+    - La croix (crosshair) centree sur le porte-oculaire
+    - Les cercles theoriques concentriques
+    - Les labels et excentricites
+    - Le score de collimation
+
+    Args:
+        screen_width: Largeur ecran fullscreen
+        screen_height: Hauteur ecran fullscreen
+        detector: Instance CollimationDetector avec resultats detect()
+        scale_x: Ratio screen_width / image_width (pour mapper coordonnees)
+        scale_y: Ratio screen_height / image_height
+        circle_enabled: dict {name: bool} ou None (tous actifs)
+    """
+    global windowSurfaceObj, _font_cache
+
+    if detector is None:
+        return
+
+    circles = detector.circles
+    focuser_center = detector.focuser_center
+    eccentricities = detector.eccentricities
+
+    # Police pour les labels
+    cache_key_label = 22
+    if cache_key_label not in _font_cache:
+        _font_cache[cache_key_label] = pygame.font.Font(None, cache_key_label)
+    font_label = _font_cache[cache_key_label]
+
+    cache_key_title = 28
+    if cache_key_title not in _font_cache:
+        _font_cache[cache_key_title] = pygame.font.Font(None, cache_key_title)
+    font_title = _font_cache[cache_key_title]
+
+    cache_key_score = 36
+    if cache_key_score not in _font_cache:
+        _font_cache[cache_key_score] = pygame.font.Font(None, cache_key_score)
+    font_score = _font_cache[cache_key_score]
+
+    # --- Dessiner la croix (crosshair) centrée sur le focuser ---
+    if focuser_center is not None:
+        cx = int(focuser_center[0] * scale_x)
+        cy = int(focuser_center[1] * scale_y)
+
+        # Croix fine traversant tout l'écran
+        cross_color = (0, 255, 0, 128)  # Vert semi-transparent
+        pygame.draw.line(windowSurfaceObj, (0, 200, 0),
+                        (cx, 0), (cx, screen_height), 1)
+        pygame.draw.line(windowSurfaceObj, (0, 200, 0),
+                        (0, cy), (screen_width, cy), 1)
+
+        # Petite croix épaisse au centre
+        cross_size = 15
+        pygame.draw.line(windowSurfaceObj, (0, 255, 0),
+                        (cx - cross_size, cy), (cx + cross_size, cy), 2)
+        pygame.draw.line(windowSurfaceObj, (0, 255, 0),
+                        (cx, cy - cross_size), (cx, cy + cross_size), 2)
+
+    # --- Dessiner les cercles detectes ---
+    for name in CIRCLE_ORDER:
+        if name not in circles:
+            continue
+        # Filtrer par circle_enabled si fourni
+        if circle_enabled is not None and not circle_enabled.get(name, True):
+            continue
+
+        ox, oy, r = circles[name]
+        # Mapper les coordonnées image vers les coordonnées écran
+        sx = int(ox * scale_x)
+        sy = int(oy * scale_y)
+        sr = int(r * max(scale_x, scale_y))  # Rayon scalé
+
+        color = CIRCLE_COLORS[name]
+        label = CIRCLE_LABELS[name]
+
+        # Cercle détecté (trait épais)
+        pygame.draw.circle(windowSurfaceObj, color, (sx, sy), sr, 2)
+
+        # Point au centre du cercle
+        pygame.draw.circle(windowSurfaceObj, color, (sx, sy), 4, 0)
+
+        # Label avec excentricité et indicateur LOCK
+        is_locked = circle_locked is not None and circle_locked.get(name, False)
+        lock_indicator = " [LOCK]" if is_locked else ""
+        ecc_text = ""
+        if name in eccentricities and name != 'focuser':
+            ecc = eccentricities[name]
+            ecc_text = f"  [{ecc:.0f}px]"
+
+        text_surface = font_label.render(f"{label}{ecc_text}{lock_indicator}", True, color)
+        # Positionner le label au-dessus du cercle
+        text_x = sx - text_surface.get_width() // 2
+        text_y = sy - sr - 18
+        # Fond semi-transparent pour lisibilité
+        bg_rect = pygame.Rect(text_x - 2, text_y - 1,
+                             text_surface.get_width() + 4,
+                             text_surface.get_height() + 2)
+        bg_surface = pygame.Surface((bg_rect.width, bg_rect.height))
+        bg_surface.fill((0, 0, 0))
+        bg_surface.set_alpha(150)
+        windowSurfaceObj.blit(bg_surface, (bg_rect.x, bg_rect.y))
+        windowSurfaceObj.blit(text_surface, (text_x, text_y))
+
+        # Ligne d'excentricité : du centre du focuser au centre de ce cercle
+        if focuser_center is not None and name != 'focuser':
+            fcx = int(focuser_center[0] * scale_x)
+            fcy = int(focuser_center[1] * scale_y)
+            if eccentricities.get(name, 0) > 2:
+                pygame.draw.line(windowSurfaceObj, color,
+                               (fcx, fcy), (sx, sy), 1)
+
+    # --- Cercles théoriques concentriques (pointillés blancs) ---
+    if focuser_center is not None and 'focuser' in circles:
+        fcx = int(focuser_center[0] * scale_x)
+        fcy = int(focuser_center[1] * scale_y)
+        focuser_r = int(circles['focuser'][2] * max(scale_x, scale_y))
+
+        # 5 cercles espacés régulièrement du centre au bord du focuser
+        for i in range(1, 6):
+            ref_r = int(focuser_r * i / 5)
+            # Pointillés simulés : dessiner des arcs
+            _draw_dashed_circle(windowSurfaceObj, (80, 80, 80), (fcx, fcy), ref_r)
+
+    # --- Score de collimation ---
+    score = detector.get_collimation_score()
+    n_detected = len(circles)
+
+    # Titre en haut au centre
+    title_text = font_title.render("COLLIMATION NEWTON", True, (200, 200, 200))
+    title_x = (screen_width - title_text.get_width()) // 2
+    windowSurfaceObj.blit(title_text, (title_x, 10))
+
+    # Nombre de cercles détectés
+    det_text = font_label.render(f"Cercles: {n_detected}/4", True, (180, 180, 180))
+    windowSurfaceObj.blit(det_text, (title_x, 38))
+
+    # Score
+    if score is not None:
+        if score >= 80:
+            score_color = (0, 255, 0)
+        elif score >= 50:
+            score_color = (255, 255, 0)
+        else:
+            score_color = (255, 80, 80)
+        score_text = font_score.render(f"Score: {score}%", True, score_color)
+        score_x = screen_width - score_text.get_width() - 20
+        windowSurfaceObj.blit(score_text, (score_x, 15))
+
+
+def _draw_dashed_circle(surface, color, center, radius, dash_length=8, gap_length=6):
+    """Dessine un cercle en pointillés."""
+    if radius <= 0:
+        return
+    circumference = 2 * 3.14159 * radius
+    n_segments = max(1, int(circumference / (dash_length + gap_length)))
+    angle_step = 2 * 3.14159 / n_segments
+
+    for i in range(n_segments):
+        angle_start = i * angle_step
+        angle_end = angle_start + (dash_length / (dash_length + gap_length)) * angle_step
+        x1 = int(center[0] + radius * np.cos(angle_start))
+        y1 = int(center[1] + radius * np.sin(angle_start))
+        x2 = int(center[0] + radius * np.cos(angle_end))
+        y2 = int(center[1] + radius * np.sin(angle_end))
+        pygame.draw.line(surface, color, (x1, y1), (x2, y2), 1)
+
+
+def draw_collimation_exit_button(screen_width, screen_height):
+    """Dessine le bouton EXIT en bas à gauche pour le mode collimation."""
+    global windowSurfaceObj, _font_cache
+
+    icon_size = 50
+    margin = 15
+    icon_x = margin
+    icon_y = screen_height - icon_size - margin
+
+    bg_color = (70, 60, 60)
+    border_color = (120, 100, 100)
+    text_color = (200, 180, 180)
+
+    icon_rect = pygame.Rect(icon_x, icon_y, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg_color, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border_color, icon_rect, 2, border_radius=8)
+
+    cache_key = 22
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    exit_text = fontObj.render("EXIT", True, text_color)
+    exit_rect = exit_text.get_rect(center=icon_rect.center)
+    windowSurfaceObj.blit(exit_text, exit_rect)
+
+    return icon_rect
+
+
+def draw_collimation_sensitivity_slider(screen_width, screen_height, value):
+    """Dessine le slider de sensibilité en bas à droite.
+
+    Args:
+        value: 1-10 (sensibilité détection)
+
+    Returns:
+        Rect du slider pour gérer les clics
+    """
+    global windowSurfaceObj, _font_cache
+
+    slider_w = 200
+    slider_h = 30
+    margin = 15
+    sx = screen_width - slider_w - margin
+    sy = screen_height - slider_h - margin
+
+    # Fond
+    bg_rect = pygame.Rect(sx, sy, slider_w, slider_h)
+    pygame.draw.rect(windowSurfaceObj, (40, 40, 50), bg_rect, border_radius=5)
+    pygame.draw.rect(windowSurfaceObj, (80, 80, 90), bg_rect, 1, border_radius=5)
+
+    # Barre de remplissage
+    fill_w = int((value / 10.0) * (slider_w - 10))
+    fill_rect = pygame.Rect(sx + 5, sy + 5, fill_w, slider_h - 10)
+    pygame.draw.rect(windowSurfaceObj, (60, 120, 180), fill_rect, border_radius=3)
+
+    # Texte
+    cache_key = 20
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    label = fontObj.render(f"Sensibilite: {value}", True, (200, 200, 200))
+    label_rect = label.get_rect(center=bg_rect.center)
+    windowSurfaceObj.blit(label, label_rect)
+
+    return bg_rect
+
+
+def is_click_on_collimation_exit(mousex, mousey, screen_height):
+    """Vérifie si clic sur bouton EXIT collimation."""
+    icon_size = 50
+    margin = 15
+    icon_y = screen_height - icon_size - margin
+    return (margin <= mousex <= margin + icon_size and
+            icon_y <= mousey <= icon_y + icon_size)
+
+
+def is_click_on_collimation_slider(mousex, mousey, screen_width, screen_height):
+    """Vérifie si clic sur slider sensibilité. Retourne la nouvelle valeur ou None."""
+    slider_w = 200
+    slider_h = 30
+    margin = 15
+    sx = screen_width - slider_w - margin
+    sy = screen_height - slider_h - margin
+
+    if sx <= mousex <= sx + slider_w and sy <= mousey <= sy + slider_h:
+        # Mapper la position X sur 1-10
+        rel_x = mousex - sx
+        value = max(1, min(10, int((rel_x / slider_w) * 10) + 1))
+        return value
+    return None
+
+
+# --- Slider Gain pour le mode collimation ---
+
+def draw_collimation_gain_slider(screen_width, screen_height, value):
+    """Dessine le slider de gain au-dessus du slider sensibilite.
+
+    Args:
+        value: 0 (AUTO) a max_gains[Pi_Cam]
+
+    Returns:
+        Rect du slider pour gerer les clics
+    """
+    global windowSurfaceObj, _font_cache, Pi_Cam, max_gains
+
+    slider_w = 200
+    slider_h = 30
+    margin = 15
+    gap = 5
+    sx = screen_width - slider_w - margin
+    # Au-dessus du slider sensibilite
+    sy = screen_height - slider_h - margin - (slider_h + gap)
+
+    # Fond
+    bg_rect = pygame.Rect(sx, sy, slider_w, slider_h)
+    pygame.draw.rect(windowSurfaceObj, (40, 40, 50), bg_rect, border_radius=5)
+    pygame.draw.rect(windowSurfaceObj, (80, 80, 90), bg_rect, 1, border_radius=5)
+
+    # Barre de remplissage
+    max_gain = max_gains[Pi_Cam] if Pi_Cam < len(max_gains) else 64
+    if value > 0 and max_gain > 0:
+        fill_ratio = min(1.0, value / max_gain)
+        fill_w = int(fill_ratio * (slider_w - 10))
+        fill_rect = pygame.Rect(sx + 5, sy + 5, fill_w, slider_h - 10)
+        pygame.draw.rect(windowSurfaceObj, (120, 100, 60), fill_rect, border_radius=3)
+
+    # Texte
+    cache_key = 20
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    if value == 0:
+        label_text = "Gain: AUTO"
+    else:
+        label_text = f"Gain: {value}"
+    label = fontObj.render(label_text, True, (200, 200, 200))
+    label_rect = label.get_rect(center=bg_rect.center)
+    windowSurfaceObj.blit(label, label_rect)
+
+    return bg_rect
+
+
+def is_click_on_collimation_gain_slider(mousex, mousey, screen_width, screen_height):
+    """Verifie si clic sur slider gain. Retourne la nouvelle valeur ou None."""
+    global Pi_Cam, max_gains
+
+    slider_w = 200
+    slider_h = 30
+    margin = 15
+    gap = 5
+    sx = screen_width - slider_w - margin
+    sy = screen_height - slider_h - margin - (slider_h + gap)
+
+    if sx <= mousex <= sx + slider_w and sy <= mousey <= sy + slider_h:
+        max_gain = max_gains[Pi_Cam] if Pi_Cam < len(max_gains) else 64
+        rel_x = mousex - sx
+        ratio = rel_x / slider_w
+        # Zone gauche (< 5%) = AUTO (0)
+        if ratio < 0.05:
+            return 0
+        # Sinon mapper sur 1 a max_gain
+        value = max(1, int(ratio * max_gain))
+        return min(value, max_gain)
+    return None
+
+
+# --- Slider Exposure pour le mode collimation ---
+
+def draw_collimation_exposure_slider(screen_width, screen_height, value_us):
+    """Dessine le slider d'exposition au-dessus du slider gain.
+
+    Args:
+        value_us: 0 (AUTO) ou temps en microsecondes
+
+    Returns:
+        Rect du slider pour gerer les clics
+    """
+    global windowSurfaceObj, _font_cache, Pi_Cam, max_shutters
+
+    slider_w = 200
+    slider_h = 30
+    margin = 15
+    gap = 5
+    sx = screen_width - slider_w - margin
+    # Au-dessus du slider gain (2 niveaux au-dessus de sensibilite)
+    sy = screen_height - slider_h - margin - 2 * (slider_h + gap)
+
+    # Fond
+    bg_rect = pygame.Rect(sx, sy, slider_w, slider_h)
+    pygame.draw.rect(windowSurfaceObj, (40, 40, 50), bg_rect, border_radius=5)
+    pygame.draw.rect(windowSurfaceObj, (80, 80, 90), bg_rect, 1, border_radius=5)
+
+    # Plage logarithmique : 100us a max_shutters[Pi_Cam] secondes
+    min_exp_us = 100
+    max_exp_seconds = max_shutters[Pi_Cam] if Pi_Cam < len(max_shutters) else 100
+    max_exp_us = int(max_exp_seconds * 1_000_000)
+
+    # Barre de remplissage (echelle log)
+    if value_us > 0 and max_exp_us > min_exp_us:
+        import math
+        log_min = math.log10(min_exp_us)
+        log_max = math.log10(max_exp_us)
+        log_val = math.log10(max(min_exp_us, min(value_us, max_exp_us)))
+        fill_ratio = (log_val - log_min) / (log_max - log_min)
+        fill_w = int(fill_ratio * (slider_w - 10))
+        fill_rect = pygame.Rect(sx + 5, sy + 5, max(1, fill_w), slider_h - 10)
+        pygame.draw.rect(windowSurfaceObj, (60, 100, 120), fill_rect, border_radius=3)
+
+    # Texte
+    cache_key = 20
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    if value_us == 0:
+        label_text = "Expo: AUTO"
+    elif value_us < 1000:
+        label_text = f"Expo: {value_us}us"
+    elif value_us < 10000:
+        # Afficher en fraction 1/x
+        frac = 1_000_000 / value_us
+        label_text = f"Expo: 1/{int(frac)}"
+    elif value_us < 1_000_000:
+        label_text = f"Expo: {value_us / 1000:.0f}ms"
+    else:
+        label_text = f"Expo: {value_us / 1_000_000:.1f}s"
+    label = fontObj.render(label_text, True, (200, 200, 200))
+    label_rect = label.get_rect(center=bg_rect.center)
+    windowSurfaceObj.blit(label, label_rect)
+
+    return bg_rect
+
+
+def is_click_on_collimation_exposure_slider(mousex, mousey, screen_width, screen_height):
+    """Verifie si clic sur slider exposure. Retourne la nouvelle valeur en us ou None."""
+    global Pi_Cam, max_shutters
+
+    slider_w = 200
+    slider_h = 30
+    margin = 15
+    gap = 5
+    sx = screen_width - slider_w - margin
+    sy = screen_height - slider_h - margin - 2 * (slider_h + gap)
+
+    if sx <= mousex <= sx + slider_w and sy <= mousey <= sy + slider_h:
+        import math
+        min_exp_us = 100
+        max_exp_seconds = max_shutters[Pi_Cam] if Pi_Cam < len(max_shutters) else 100
+        max_exp_us = int(max_exp_seconds * 1_000_000)
+
+        rel_x = mousex - sx
+        ratio = rel_x / slider_w
+        # Zone gauche (< 5%) = AUTO (0)
+        if ratio < 0.05:
+            return 0
+        # Echelle logarithmique
+        log_min = math.log10(min_exp_us)
+        log_max = math.log10(max_exp_us)
+        log_val = log_min + ratio * (log_max - log_min)
+        value_us = int(10 ** log_val)
+        return max(min_exp_us, min(value_us, max_exp_us))
+    return None
+
+
+# --- Boutons Zoom +/- pour le mode collimation ---
+
+def draw_collimation_zoom_buttons(screen_width, screen_height, current_zoom):
+    """Dessine les boutons ZOOM+ et ZOOM- en haut a gauche + niveau de zoom."""
+    global windowSurfaceObj, _font_cache
+
+    btn_w = 50
+    btn_h = 36
+    margin = 15
+    gap = 8
+
+    # Bouton ZOOM-
+    x_minus = margin
+    y_btn = margin + 40  # En dessous du titre
+    minus_rect = pygame.Rect(x_minus, y_btn, btn_w, btn_h)
+    pygame.draw.rect(windowSurfaceObj, (50, 50, 60), minus_rect, border_radius=6)
+    pygame.draw.rect(windowSurfaceObj, (100, 100, 110), minus_rect, 1, border_radius=6)
+
+    # Bouton ZOOM+
+    x_plus = x_minus + btn_w + gap
+    plus_rect = pygame.Rect(x_plus, y_btn, btn_w, btn_h)
+    pygame.draw.rect(windowSurfaceObj, (50, 50, 60), plus_rect, border_radius=6)
+    pygame.draw.rect(windowSurfaceObj, (100, 100, 110), plus_rect, 1, border_radius=6)
+
+    # Texte des boutons
+    cache_key = 24
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    minus_text = fontObj.render("ZOOM-", True, (180, 180, 200))
+    minus_tr = minus_text.get_rect(center=minus_rect.center)
+    windowSurfaceObj.blit(minus_text, minus_tr)
+
+    plus_text = fontObj.render("ZOOM+", True, (180, 180, 200))
+    plus_tr = plus_text.get_rect(center=plus_rect.center)
+    windowSurfaceObj.blit(plus_text, plus_tr)
+
+    # Label du zoom actuel
+    zoom_labels = {0: "Full", 1: "2x", 2: "3x", 3: "4x", 4: "5x", 5: "6x"}
+    zoom_str = zoom_labels.get(current_zoom, f"{current_zoom}")
+    label = fontObj.render(f"Zoom: {zoom_str}", True, (200, 200, 100))
+    windowSurfaceObj.blit(label, (x_plus + btn_w + gap + 5, y_btn + 8))
+
+
+def is_click_on_collimation_zoom(mousex, mousey, screen_width, screen_height):
+    """Verifie si clic sur boutons zoom. Retourne +1, -1 ou None."""
+    btn_w = 50
+    btn_h = 36
+    margin = 15
+    gap = 8
+    y_btn = margin + 40
+
+    # ZOOM-
+    if margin <= mousex <= margin + btn_w and y_btn <= mousey <= y_btn + btn_h:
+        return -1
+    # ZOOM+
+    x_plus = margin + btn_w + gap
+    if x_plus <= mousex <= x_plus + btn_w and y_btn <= mousey <= y_btn + btn_h:
+        return +1
+    return None
+
+
+# --- Bouton Settings (engrenage) ---
+
+def draw_collimation_settings_icon(screen_width, screen_height, is_active):
+    """Dessine le bouton SETTINGS en bas a gauche (apres EXIT)."""
+    global windowSurfaceObj, _font_cache
+
+    icon_size = 50
+    margin = 15
+    # A droite du bouton EXIT
+    icon_x = margin + icon_size + 10
+    icon_y = screen_height - icon_size - margin
+
+    if is_active:
+        bg_color = (60, 80, 120)
+        border_color = (100, 140, 200)
+        text_color = (200, 220, 255)
+    else:
+        bg_color = (50, 50, 60)
+        border_color = (90, 90, 100)
+        text_color = (180, 180, 190)
+
+    icon_rect = pygame.Rect(icon_x, icon_y, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg_color, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border_color, icon_rect, 2, border_radius=8)
+
+    cache_key = 18
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    text = fontObj.render("PARAM", True, text_color)
+    text_rect = text.get_rect(center=icon_rect.center)
+    windowSurfaceObj.blit(text, text_rect)
+
+
+def is_click_on_collimation_settings(mousex, mousey, screen_width, screen_height):
+    """Verifie si clic sur le bouton SETTINGS."""
+    icon_size = 50
+    margin = 15
+    icon_x = margin + icon_size + 10
+    icon_y = screen_height - icon_size - margin
+    return (icon_x <= mousex <= icon_x + icon_size and
+            icon_y <= mousey <= icon_y + icon_size)
+
+
+# --- Panneau lateral de parametres par cercle ---
+
+def draw_collimation_circle_panel(screen_width, screen_height, circle_enabled,
+                                   circle_min_pct, circle_max_pct, detect_interval,
+                                   circle_locked=None, detected_circles=None):
+    """Dessine le panneau lateral droit avec les parametres par cercle.
+
+    Affiche pour chaque cercle :
+    - Toggle ON/OFF (rectangle colore)
+    - Bouton LOCK (visible quand cercle ON et detecte)
+    - Slider min_pct / max_pct (grises quand verrouille)
+    Et un slider global detect_interval en bas.
+
+    Returns:
+        dict de rects pour gestion des clics
+    """
+    global windowSurfaceObj, _font_cache
+
+    if circle_locked is None:
+        circle_locked = {}
+    if detected_circles is None:
+        detected_circles = {}
+
+    panel_w = 280
+    panel_h = screen_height - 30
+    panel_x = screen_width - panel_w - 10
+    panel_y = 15
+
+    # Fond semi-transparent
+    panel_surface = pygame.Surface((panel_w, panel_h))
+    panel_surface.fill((20, 20, 30))
+    panel_surface.set_alpha(210)
+    windowSurfaceObj.blit(panel_surface, (panel_x, panel_y))
+
+    # Bordure
+    pygame.draw.rect(windowSurfaceObj, (70, 70, 90),
+                     pygame.Rect(panel_x, panel_y, panel_w, panel_h), 1, border_radius=5)
+
+    # Polices
+    for sz in [20, 17, 15]:
+        if sz not in _font_cache:
+            _font_cache[sz] = pygame.font.Font(None, sz)
+    font_title = _font_cache[20]
+    font_label = _font_cache[17]
+    font_small = _font_cache[15]
+
+    # Titre
+    title = font_title.render("PARAMETRES CERCLES", True, (200, 200, 220))
+    windowSurfaceObj.blit(title, (panel_x + 10, panel_y + 8))
+
+    rects = {}
+    y_offset = panel_y + 35
+
+    circle_names = ['focuser', 'secondary', 'primary', 'camera']
+    circle_labels_fr = {
+        'focuser': 'Porte-Oculaire',
+        'secondary': 'Secondaire',
+        'primary': 'Reflet Primaire',
+        'camera': 'Reflet Camera'
+    }
+
+    for name in circle_names:
+        color = CIRCLE_COLORS[name]
+        enabled = circle_enabled.get(name, False)
+        locked = circle_locked.get(name, False)
+        is_detected = name in detected_circles
+        min_val = circle_min_pct.get(name, 10)
+        max_val = circle_max_pct.get(name, 49)
+
+        # --- Ligne titre du cercle : [ON/OFF] Nom [LOCK] ---
+        # Toggle ON/OFF
+        toggle_rect = pygame.Rect(panel_x + 10, y_offset, 40, 20)
+        if enabled:
+            pygame.draw.rect(windowSurfaceObj, color, toggle_rect, border_radius=4)
+            toggle_text = font_small.render("ON", True, (0, 0, 0))
+        else:
+            pygame.draw.rect(windowSurfaceObj, (60, 60, 70), toggle_rect, border_radius=4)
+            pygame.draw.rect(windowSurfaceObj, (100, 100, 110), toggle_rect, 1, border_radius=4)
+            toggle_text = font_small.render("OFF", True, (120, 120, 130))
+        toggle_tr = toggle_text.get_rect(center=toggle_rect.center)
+        windowSurfaceObj.blit(toggle_text, toggle_tr)
+        rects[f'{name}_toggle'] = toggle_rect
+
+        # Nom du cercle
+        name_text = font_label.render(circle_labels_fr[name], True, color if enabled else (100, 100, 110))
+        windowSurfaceObj.blit(name_text, (panel_x + 58, y_offset + 2))
+
+        # Bouton LOCK (a droite, visible quand ON et detecte ou deja locke)
+        if enabled and (is_detected or locked):
+            lock_rect = pygame.Rect(panel_x + panel_w - 60, y_offset, 50, 20)
+            if locked:
+                pygame.draw.rect(windowSurfaceObj, (200, 160, 40), lock_rect, border_radius=4)
+                lock_text = font_small.render("LOCK", True, (0, 0, 0))
+            else:
+                pygame.draw.rect(windowSurfaceObj, (50, 50, 60), lock_rect, border_radius=4)
+                pygame.draw.rect(windowSurfaceObj, (120, 120, 140), lock_rect, 1, border_radius=4)
+                lock_text = font_small.render("LOCK", True, (120, 120, 140))
+            lock_tr = lock_text.get_rect(center=lock_rect.center)
+            windowSurfaceObj.blit(lock_text, lock_tr)
+            rects[f'{name}_lock'] = lock_rect
+
+        y_offset += 26
+
+        if enabled:
+            # Couleurs des sliders : grises si verrouille
+            if locked:
+                slider_label_color = (90, 90, 95)
+                slider_bg_color = (30, 30, 35)
+                slider_min_fill = (50, 50, 60)
+                slider_max_fill = (60, 50, 50)
+            else:
+                slider_label_color = (160, 160, 170)
+                slider_bg_color = (40, 40, 50)
+                slider_min_fill = (80, 80, 100)
+                slider_max_fill = (100, 80, 80)
+
+            # --- Slider min_pct ---
+            slider_w = panel_w - 80
+            slider_h = 16
+            slider_x = panel_x + 70
+
+            min_label = font_small.render(f"Min: {min_val}%", True, slider_label_color)
+            windowSurfaceObj.blit(min_label, (panel_x + 12, y_offset + 1))
+
+            min_slider_rect = pygame.Rect(slider_x, y_offset, slider_w, slider_h)
+            pygame.draw.rect(windowSurfaceObj, slider_bg_color, min_slider_rect, border_radius=3)
+            min_fill_w = int((min_val / 50.0) * slider_w)
+            pygame.draw.rect(windowSurfaceObj, slider_min_fill,
+                           pygame.Rect(slider_x, y_offset, min_fill_w, slider_h), border_radius=3)
+            if not locked:
+                rects[f'{name}_min'] = min_slider_rect
+
+            y_offset += 20
+
+            # --- Slider max_pct ---
+            max_label = font_small.render(f"Max: {max_val}%", True, slider_label_color)
+            windowSurfaceObj.blit(max_label, (panel_x + 12, y_offset + 1))
+
+            max_slider_rect = pygame.Rect(slider_x, y_offset, slider_w, slider_h)
+            pygame.draw.rect(windowSurfaceObj, slider_bg_color, max_slider_rect, border_radius=3)
+            max_fill_w = int((max_val / 50.0) * slider_w)
+            pygame.draw.rect(windowSurfaceObj, slider_max_fill,
+                           pygame.Rect(slider_x, y_offset, max_fill_w, slider_h), border_radius=3)
+            if not locked:
+                rects[f'{name}_max'] = max_slider_rect
+
+            y_offset += 24
+        else:
+            y_offset += 8
+
+        # Separateur
+        pygame.draw.line(windowSurfaceObj, (50, 50, 60),
+                        (panel_x + 10, y_offset), (panel_x + panel_w - 10, y_offset), 1)
+        y_offset += 8
+
+    # --- Slider detect_interval ---
+    interval_label = font_label.render(f"Detect skip: {detect_interval} frames", True, (180, 180, 200))
+    windowSurfaceObj.blit(interval_label, (panel_x + 10, y_offset + 2))
+    y_offset += 22
+
+    interval_slider_w = panel_w - 30
+    interval_slider_h = 18
+    interval_slider_rect = pygame.Rect(panel_x + 15, y_offset, interval_slider_w, interval_slider_h)
+    pygame.draw.rect(windowSurfaceObj, (40, 40, 50), interval_slider_rect, border_radius=3)
+    interval_fill_w = int((detect_interval / 10.0) * interval_slider_w)
+    pygame.draw.rect(windowSurfaceObj, (60, 100, 140),
+                   pygame.Rect(panel_x + 15, y_offset, interval_fill_w, interval_slider_h), border_radius=3)
+    rects['detect_interval'] = interval_slider_rect
+
+    return rects
+
+
+def handle_collimation_panel_click(mousex, mousey, slider_rects, circle_enabled,
+                                    circle_min_pct, circle_max_pct, detect_interval,
+                                    circle_locked=None):
+    """Gere les clics sur le panneau de parametres.
+
+    Returns:
+        dict des modifications : {'circle_enabled': {name: bool}, 'circle_min_pct': {name: int},
+                                  'circle_max_pct': {name: int}, 'detect_interval': int,
+                                  'circle_locked': {name: bool}}
+        ou None si aucun clic traite.
+    """
+    if not slider_rects:
+        return None
+    if circle_locked is None:
+        circle_locked = {}
+
+    changes = {}
+
+    for key, rect in slider_rects.items():
+        if not rect.collidepoint(mousex, mousey):
+            continue
+
+        if key.endswith('_lock'):
+            name = key.replace('_lock', '')
+            new_locked = dict(circle_locked)
+            new_locked[name] = not circle_locked.get(name, False)
+            changes['circle_locked'] = new_locked
+            return changes
+
+        if key.endswith('_toggle'):
+            name = key.replace('_toggle', '')
+            new_enabled = dict(circle_enabled)
+            new_enabled[name] = not circle_enabled.get(name, False)
+            changes['circle_enabled'] = new_enabled
+            return changes
+
+        if key.endswith('_min'):
+            name = key.replace('_min', '')
+            rel_x = mousex - rect.x
+            value = max(1, min(49, int((rel_x / rect.width) * 50)))
+            # Garantir min < max
+            max_val = circle_max_pct.get(name, 49)
+            if value >= max_val:
+                value = max_val - 1
+            new_min = dict(circle_min_pct)
+            new_min[name] = value
+            changes['circle_min_pct'] = new_min
+            return changes
+
+        if key.endswith('_max'):
+            name = key.replace('_max', '')
+            rel_x = mousex - rect.x
+            value = max(2, min(50, int((rel_x / rect.width) * 50)))
+            # Garantir max > min
+            min_val = circle_min_pct.get(name, 1)
+            if value <= min_val:
+                value = min_val + 1
+            new_max = dict(circle_max_pct)
+            new_max[name] = value
+            changes['circle_max_pct'] = new_max
+            return changes
+
+        if key == 'detect_interval':
+            rel_x = mousex - rect.x
+            value = max(1, min(10, int((rel_x / rect.width) * 10) + 1))
+            changes['detect_interval'] = value
+            return changes
+
+    return None
+
+
+# ============================================================================
+# FIN COLLIMATION FULLSCREEN CONTROLS
+# ============================================================================
+
+
 def calculate_fwhm(image_surface, center_x, center_y, area_size):
     """
     Calcule le FWHM pour mesurer la netteté
@@ -7420,17 +8255,17 @@ def preview():
         if show_cmds == 1:
             print(f"  [FULL RECREATION] Config changed - recreating Picamera2...")
 
-            # Arrêter l'ancienne instance
-            if picam2 is not None:
-                try:
-                    picam2.stop()
-                    picam2.close()
-                    time.sleep(0.5)
-                except:
-                    pass
+        # Arrêter l'ancienne instance
+        if picam2 is not None:
+            try:
+                picam2.stop()
+                picam2.close()
+                time.sleep(0.5)
+            except:
+                pass
 
-            # Créer nouvelle instance
-            picam2 = Picamera2(camera)
+        # Créer nouvelle instance
+        picam2 = Picamera2(camera)
 
         # Déterminer la taille de capture selon caméra (pour les deux chemins)
         # IMX585 : Utiliser TOUJOURS les modes sensor hardware (crop ou full frame)
@@ -9009,6 +9844,104 @@ while True:
             if capture_thread is not None:
                 frame_from_thread, metadata_from_thread = capture_thread.get_latest_frame()
 
+            # === COLLIMATION MODE: Affichage fullscreen avec detection de cercles ===
+            if collimation_mode == 1 and collimation_detector is not None:
+                # Dimensions ecran fullscreen
+                display_modes = pygame.display.list_modes()
+                if display_modes and display_modes != -1:
+                    max_width, max_height = display_modes[0]
+                else:
+                    screen_info = pygame.display.Info()
+                    max_width, max_height = screen_info.current_w, screen_info.current_h
+
+                windowSurfaceObj.fill((0, 0, 0))
+
+                if frame_from_thread is not None:
+                    try:
+                        array = frame_from_thread
+
+                        # Si frame RAW 2D (Bayer), debayeriser
+                        if len(array.shape) == 2:
+                            if array.dtype == np.uint8:
+                                array = array.view(np.uint16)
+                            array = cv2.cvtColor(array, cv2.COLOR_BAYER_RG2RGB)
+
+                        # Si XRGB (4 canaux), extraire RGB
+                        if len(array.shape) == 3 and array.shape[2] == 4:
+                            array = array[:, :, :3]
+
+                        # Convertir en uint8 si necessaire
+                        if array.dtype != np.uint8:
+                            if array.max() > 0:
+                                array = np.clip(array.astype(np.float32) / array.max() * 255, 0, 255).astype(np.uint8)
+                            else:
+                                array = np.zeros_like(array, dtype=np.uint8)
+
+                        # Garantir que l'array est continu en memoire pour pygame
+                        if not array.flags['C_CONTIGUOUS']:
+                            array = np.ascontiguousarray(array)
+
+                        # Dimensions de l'image source (pour le scaling de l'overlay)
+                        img_h, img_w = array.shape[:2]
+                        scale_x = max_width / img_w
+                        scale_y = max_height / img_h
+
+                        # Affichage fullscreen AVANT la detection (afficher l'image immediatement)
+                        colim_surface = pygame.surfarray.make_surface(
+                            np.ascontiguousarray(np.swapaxes(array, 0, 1)[:, :, [2, 1, 0]])
+                        )
+                        colim_surface = pygame.transform.scale(colim_surface, (max_width, max_height))
+                        windowSurfaceObj.blit(colim_surface, (0, 0))
+
+                        # Sauvegarder la surface et les scales pour persistance
+                        collimation_last_surface = colim_surface
+                        collimation_last_scale = (scale_x, scale_y)
+
+                        # Temporiser : permettre a pygame de traiter ses evenements
+                        pygame.event.pump()
+
+                        # Detection des cercles (downscale + skip geres par le detecteur)
+                        collimation_detector.detect(array)
+
+                        # Overlay collimation (cercles, croix, texte)
+                        draw_collimation_overlay(max_width, max_height, collimation_detector,
+                                                scale_x, scale_y, collimation_circle_enabled,
+                                                circle_locked=collimation_circle_locked)
+
+                    except Exception as e:
+                        if collimation_last_surface is not None:
+                            windowSurfaceObj.blit(collimation_last_surface, (0, 0))
+                        if show_cmds == 1:
+                            print(f"[COLIM] Erreur traitement frame: {e}")
+
+                elif collimation_last_surface is not None:
+                    windowSurfaceObj.blit(collimation_last_surface, (0, 0))
+                    if collimation_detector.circles:
+                        draw_collimation_overlay(max_width, max_height, collimation_detector,
+                                                collimation_last_scale[0], collimation_last_scale[1],
+                                                collimation_circle_enabled,
+                                                circle_locked=collimation_circle_locked)
+
+                # Boutons (toujours visibles meme sans frame)
+                draw_collimation_exit_button(max_width, max_height)
+                draw_collimation_sensitivity_slider(max_width, max_height, collimation_sensitivity)
+                draw_collimation_gain_slider(max_width, max_height, collimation_gain)
+                draw_collimation_exposure_slider(max_width, max_height, collimation_exposure_us)
+                draw_collimation_zoom_buttons(max_width, max_height, collimation_zoom)
+                draw_collimation_settings_icon(max_width, max_height, collimation_settings_visible == 1)
+
+                # Panneau de parametres par cercle (si visible)
+                if collimation_settings_visible == 1:
+                    _collimation_slider_rects = draw_collimation_circle_panel(
+                        max_width, max_height, collimation_circle_enabled,
+                        collimation_circle_min_pct, collimation_circle_max_pct,
+                        collimation_detect_interval,
+                        circle_locked=collimation_circle_locked,
+                        detected_circles=collimation_detector.circles if collimation_detector else {})
+
+                pygame.display.update()
+                frame_from_thread = None  # Empecher le traitement normal
+
             # === JSK LIVE MODE: Traitement dédié dans le chemin Picamera2 ===
             # Le pipeline JSK LIVE (HDR + Denoise) remplace le pipeline normal (debayer + ISP)
             # Ce bloc DOIT être avant le traitement normal pour éviter le debayering inutile
@@ -9709,6 +10642,65 @@ while True:
                         # Mode RGB/YUV: panneau stretch uniquement
                         _stretch_slider_rects = draw_stretch_controls(max_width, max_height, img_array)
 
+            # ===== COLLIMATION MODE (rpicam-vid) =====
+            if collimation_mode == 1 and collimation_detector is not None:
+                display_modes = pygame.display.list_modes()
+                if display_modes and display_modes != -1:
+                    max_width, max_height = display_modes[0]
+                else:
+                    screen_info = pygame.display.Info()
+                    max_width, max_height = screen_info.current_w, screen_info.current_h
+
+                windowSurfaceObj.fill((0, 0, 0))
+
+                try:
+                    img_arr = pygame.surfarray.array3d(image)
+                    img_arr = np.transpose(img_arr, (1, 0, 2))  # (W,H,3) -> (H,W,3)
+                    if img_arr.dtype != np.uint8:
+                        img_arr = np.clip(img_arr, 0, 255).astype(np.uint8)
+
+                    img_h, img_w = img_arr.shape[:2]
+                    scale_x = max_width / img_w
+                    scale_y = max_height / img_h
+
+                    # Affichage AVANT detection (image visible immediatement)
+                    colim_surface = pygame.transform.scale(image, (max_width, max_height))
+                    windowSurfaceObj.blit(colim_surface, (0, 0))
+                    collimation_last_surface = colim_surface
+
+                    # Temporiser : permettre a pygame de traiter ses evenements
+                    pygame.event.pump()
+
+                    # Detection des cercles
+                    collimation_detector.detect(img_arr)
+
+                    draw_collimation_overlay(max_width, max_height, collimation_detector,
+                                            scale_x, scale_y, collimation_circle_enabled,
+                                            circle_locked=collimation_circle_locked)
+
+                except Exception as e:
+                    if collimation_last_surface is not None:
+                        windowSurfaceObj.blit(collimation_last_surface, (0, 0))
+                    if show_cmds == 1:
+                        print(f"[COLIM] Erreur traitement rpicam-vid: {e}")
+
+                draw_collimation_exit_button(max_width, max_height)
+                draw_collimation_sensitivity_slider(max_width, max_height, collimation_sensitivity)
+                draw_collimation_gain_slider(max_width, max_height, collimation_gain)
+                draw_collimation_exposure_slider(max_width, max_height, collimation_exposure_us)
+                draw_collimation_zoom_buttons(max_width, max_height, collimation_zoom)
+                draw_collimation_settings_icon(max_width, max_height, collimation_settings_visible == 1)
+
+                if collimation_settings_visible == 1:
+                    _collimation_slider_rects = draw_collimation_circle_panel(
+                        max_width, max_height, collimation_circle_enabled,
+                        collimation_circle_min_pct, collimation_circle_max_pct,
+                        collimation_detect_interval,
+                        circle_locked=collimation_circle_locked,
+                        detected_circles=collimation_detector.circles if collimation_detector else {})
+
+                pygame.display.update()
+
             # ===== JSK LIVE MODE =====
             if jsk_live_mode == 1 and jsk_processor is not None:
                 # Obtenir les dimensions de l'écran
@@ -9764,7 +10756,7 @@ while True:
                     _jsk_slider_rects = draw_jsk_controls(max_width, max_height, None)
 
     # Ne pas afficher les overlays en mode stretch ou JSK LIVE
-    if (zoom > 0 or foc_man == 1 or focus_mode == 1 or histogram > 0) and stretch_mode == 0 and jsk_live_mode == 0:
+    if (zoom > 0 or foc_man == 1 or focus_mode == 1 or histogram > 0) and stretch_mode == 0 and jsk_live_mode == 0 and collimation_mode == 0:
         # Utiliser array3d au lieu de pixels3d pour ne pas verrouiller la surface
         # Cela améliore grandement la fluidité de l'affichage en mode focus et histogram
         image2 = pygame.surfarray.array3d(image)
@@ -10438,6 +11430,168 @@ while True:
                         print(f"[STRETCH] Sortie mode RAW preview - capture_thread reconfiguré en mode ISP")
 
             continue
+
+        # ===== GESTION DES CLICS EN MODE COLLIMATION =====
+        if collimation_mode == 1:
+            display_modes = pygame.display.list_modes()
+            if display_modes and display_modes != -1:
+                fs_width, fs_height = display_modes[0]
+            else:
+                screen_info = pygame.display.Info()
+                fs_width, fs_height = screen_info.current_w, screen_info.current_h
+
+            # Clic sur EXIT
+            if is_click_on_collimation_exit(mousex, mousey, fs_height):
+                collimation_mode = 0
+                collimation_detector = None
+                collimation_last_surface = None
+                collimation_settings_visible = 0
+                collimation_circle_locked = {
+                    'focuser': False, 'secondary': False, 'primary': False, 'camera': False
+                }
+
+                # Restaurer les parametres sauvegardes (comme JSK LIVE)
+                zoom = collimation_saved_zoom
+                vwidth = collimation_saved_vwidth
+                vheight = collimation_saved_vheight
+                use_native_sensor_mode = collimation_saved_use_native
+                gain = collimation_saved_gain
+                custom_sspeed = collimation_saved_exposure
+                sync_video_resolution_with_zoom()
+
+                # Reconfigurer la camera avec les parametres restaures
+                print("[COLIM] Restauration configuration camera precedente")
+                kill_preview_process()
+                preview()
+
+                # Restaurer le mode d'affichage normal
+                if frame == 1:
+                    if fullscreen == 1:
+                        windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.FULLSCREEN, 24)
+                    else:
+                        windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), 0, 24)
+                else:
+                    windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.NOFRAME, 24)
+
+                windowSurfaceObj.fill((0, 0, 0))
+                menu = 11  # Retour a PAGE 2
+                Menu()
+                pygame.display.update()
+                print("[COLIM] Mode collimation desactive")
+                continue
+
+            # Clic sur slider sensibilite
+            new_sens = is_click_on_collimation_slider(mousex, mousey, fs_width, fs_height)
+            if new_sens is not None:
+                collimation_sensitivity = new_sens
+                if collimation_detector is not None:
+                    collimation_detector.set_sensitivity(collimation_sensitivity)
+                continue
+
+            # Clic sur slider gain
+            new_gain_val = is_click_on_collimation_gain_slider(mousex, mousey, fs_width, fs_height)
+            if new_gain_val is not None:
+                collimation_gain = new_gain_val
+                if collimation_gain > 0:
+                    apply_controls_immediately(gain_value=collimation_gain)
+                print(f"[COLIM] Gain: {collimation_gain if collimation_gain > 0 else 'AUTO'}")
+                continue
+
+            # Clic sur slider exposure
+            new_exp_val = is_click_on_collimation_exposure_slider(mousex, mousey, fs_width, fs_height)
+            if new_exp_val is not None:
+                collimation_exposure_us = new_exp_val
+                if collimation_exposure_us > 0:
+                    apply_controls_immediately(exposure_time=collimation_exposure_us)
+                print(f"[COLIM] Exposure: {collimation_exposure_us if collimation_exposure_us > 0 else 'AUTO'}us")
+                continue
+
+            # Clic sur boutons ZOOM +/-
+            zoom_delta = is_click_on_collimation_zoom(mousex, mousey, fs_width, fs_height)
+            if zoom_delta is not None:
+                new_zoom = max(0, min(5, collimation_zoom + zoom_delta))
+                if new_zoom != collimation_zoom:
+                    collimation_zoom = new_zoom
+                    zoom = collimation_zoom
+                    sync_video_resolution_with_zoom()
+                    print(f"[COLIM] Zoom change: {collimation_zoom}")
+
+                    # Reconfigurer la camera directement (restart=1 n'est jamais
+                    # atteint en mode collimation a cause du 'continue' final)
+                    windowSurfaceObj.fill((0, 0, 0))
+                    _ck = 36
+                    if _ck not in _font_cache:
+                        _font_cache[_ck] = pygame.font.Font(None, _ck)
+                    _msg = _font_cache[_ck].render("Reconfiguration camera...", True, (200, 200, 200))
+                    _msg_rect = _msg.get_rect(center=(fs_width // 2, fs_height // 2))
+                    windowSurfaceObj.blit(_msg, _msg_rect)
+                    pygame.display.update()
+
+                    kill_preview_process()
+                    preview()
+
+                    # Re-appliquer gain/exposure collimation (preview() utilise les valeurs globales)
+                    if collimation_gain > 0 or collimation_exposure_us > 0:
+                        apply_controls_immediately(
+                            exposure_time=collimation_exposure_us if collimation_exposure_us > 0 else None,
+                            gain_value=collimation_gain if collimation_gain > 0 else None)
+
+                    # Restaurer le fullscreen apres reconfiguration
+                    windowSurfaceObj = pygame.display.set_mode((fs_width, fs_height), pygame.FULLSCREEN, 24)
+                    windowSurfaceObj.fill((0, 0, 0))
+                    pygame.display.update()
+                    collimation_last_surface = None
+                continue
+
+            # Clic sur bouton SETTINGS (panneau parametres)
+            if is_click_on_collimation_settings(mousex, mousey, fs_width, fs_height):
+                collimation_settings_visible = 1 - collimation_settings_visible
+                continue
+
+            # Clic sur le panneau de parametres (si visible)
+            if collimation_settings_visible == 1 and _collimation_slider_rects:
+                panel_changes = handle_collimation_panel_click(
+                    mousex, mousey, _collimation_slider_rects,
+                    collimation_circle_enabled, collimation_circle_min_pct,
+                    collimation_circle_max_pct, collimation_detect_interval,
+                    circle_locked=collimation_circle_locked)
+                if panel_changes is not None:
+                    if 'circle_locked' in panel_changes:
+                        collimation_circle_locked = panel_changes['circle_locked']
+                        if collimation_detector is not None:
+                            for cname, clocked in collimation_circle_locked.items():
+                                collimation_detector.set_circle_locked(cname, clocked)
+                                if clocked:
+                                    print(f"[COLIM] {cname} VERROUILLE")
+                                else:
+                                    print(f"[COLIM] {cname} DEVERROUILLE")
+                    if 'circle_enabled' in panel_changes:
+                        collimation_circle_enabled = panel_changes['circle_enabled']
+                        if collimation_detector is not None:
+                            for cname, cenabled in collimation_circle_enabled.items():
+                                collimation_detector.set_circle_enabled(cname, cenabled)
+                                # Deverrouiller aussi si on desactive
+                                if not cenabled and collimation_circle_locked.get(cname, False):
+                                    collimation_circle_locked[cname] = False
+                    if 'circle_min_pct' in panel_changes:
+                        collimation_circle_min_pct = panel_changes['circle_min_pct']
+                        if collimation_detector is not None:
+                            for cname, cval in collimation_circle_min_pct.items():
+                                collimation_detector.set_circle_radius_range(
+                                    cname, cval, collimation_circle_max_pct.get(cname, 49))
+                    if 'circle_max_pct' in panel_changes:
+                        collimation_circle_max_pct = panel_changes['circle_max_pct']
+                        if collimation_detector is not None:
+                            for cname, cval in collimation_circle_max_pct.items():
+                                collimation_detector.set_circle_radius_range(
+                                    cname, collimation_circle_min_pct.get(cname, 1), cval)
+                    if 'detect_interval' in panel_changes:
+                        collimation_detect_interval = panel_changes['detect_interval']
+                        if collimation_detector is not None:
+                            collimation_detector.set_detect_interval(collimation_detect_interval)
+                    continue
+
+            continue  # Rester en mode collimation
 
         # ===== GESTION DES CLICS EN MODE JSK LIVE =====
         if jsk_live_mode == 1:
@@ -17085,16 +18239,50 @@ while True:
                       print("[JSK LIVE] Mode activé (binning 1920x1080)")
 
               elif button_row == 2:
-                  # COLIM - Fonctionnalité à implémenter
-                  # Placeholder: affiche un message temporaire
-                  button(0,2,1,4)
-                  text(0,2,2,0,1,"    COLIM",ft,0)
-                  text(0,2,6,1,1,"  A venir...",fv,0)
+                  # COLIM - Mode collimation Newton
+                  collimation_mode = 1
+
+                  # Sauvegarder les parametres actuels pour restauration a la sortie (comme JSK LIVE)
+                  collimation_saved_zoom = zoom
+                  collimation_saved_vwidth = vwidth
+                  collimation_saved_vheight = vheight
+                  collimation_saved_use_native = use_native_sensor_mode
+                  collimation_saved_gain = gain
+                  collimation_saved_exposure = custom_sspeed if custom_sspeed > 0 else sspeed
+
+                  # Initialiser gain/exposure collimation depuis les valeurs actuelles
+                  collimation_gain = gain
+                  collimation_exposure_us = custom_sspeed if custom_sspeed > 0 else sspeed
+
+                  # Remettre le zoom a 0 pour un etat propre (evite les crashes)
+                  collimation_zoom = 0
+                  zoom = 0
+                  sync_video_resolution_with_zoom()
+
+                  collimation_detector = CollimationDetector()
+                  collimation_detector.set_sensitivity(collimation_sensitivity)
+                  collimation_detector.set_detect_interval(collimation_detect_interval)
+                  # Appliquer la config des cercles au detecteur
+                  for cname in ['focuser', 'secondary', 'primary', 'camera']:
+                      collimation_detector.set_circle_enabled(cname, collimation_circle_enabled.get(cname, False))
+                      collimation_detector.set_circle_radius_range(
+                          cname, collimation_circle_min_pct.get(cname, 10),
+                          collimation_circle_max_pct.get(cname, 49))
+                  collimation_last_surface = None
+                  collimation_settings_visible = 0
+
+                  # Passer en plein ecran et declencher restart pour reconfigurer la camera
+                  display_modes = pygame.display.list_modes()
+                  if display_modes and display_modes != -1:
+                      max_width, max_height = display_modes[0]
+                  else:
+                      screen_info = pygame.display.Info()
+                      max_width, max_height = screen_info.current_w, screen_info.current_h
+                  windowSurfaceObj = pygame.display.set_mode((max_width, max_height), pygame.FULLSCREEN, 24)
+                  windowSurfaceObj.fill((0, 0, 0))
                   pygame.display.update()
-                  time.sleep(1)
-                  button(0,2,2,4)
-                  text(0,2,8,0,1,"        COLIM",ft,2)
-                  pygame.display.update()
+                  restart = 1  # Reconfigurer la camera en zoom 0
+                  print(f"[COLIM] Mode collimation active (zoom=0, gain={collimation_gain}, expo={collimation_exposure_us}us)")
 
               elif button_row == 8:
                   # EXIT
@@ -17111,6 +18299,34 @@ while True:
         # RESTART
         if restart > 0:
             kill_preview_process()
-            text(0,0,6,2,1,"Waiting for preview ...",int(fv*1.7),1)
+            if collimation_mode == 1:
+                # En mode collimation fullscreen : message simple au lieu de text()
+                display_modes = pygame.display.list_modes()
+                if display_modes and display_modes != -1:
+                    max_width, max_height = display_modes[0]
+                else:
+                    screen_info = pygame.display.Info()
+                    max_width, max_height = screen_info.current_w, screen_info.current_h
+                windowSurfaceObj.fill((0, 0, 0))
+                _ck = 36
+                if _ck not in _font_cache:
+                    _font_cache[_ck] = pygame.font.Font(None, _ck)
+                _msg = _font_cache[_ck].render("Reconfiguration camera...", True, (200, 200, 200))
+                _msg_rect = _msg.get_rect(center=(max_width // 2, max_height // 2))
+                windowSurfaceObj.blit(_msg, _msg_rect)
+                pygame.display.update()
+            else:
+                text(0,0,6,2,1,"Waiting for preview ...",int(fv*1.7),1)
             time.sleep(1)
             preview()
+            # Si en mode collimation, restaurer le fullscreen apres restart
+            if collimation_mode == 1:
+                display_modes = pygame.display.list_modes()
+                if display_modes and display_modes != -1:
+                    max_width, max_height = display_modes[0]
+                else:
+                    screen_info = pygame.display.Info()
+                    max_width, max_height = screen_info.current_w, screen_info.current_h
+                windowSurfaceObj = pygame.display.set_mode((max_width, max_height), pygame.FULLSCREEN, 24)
+                windowSurfaceObj.fill((0, 0, 0))
+                pygame.display.update()
