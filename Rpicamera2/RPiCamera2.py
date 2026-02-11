@@ -1510,15 +1510,17 @@ jsk_live_mode = 0           # 0=OFF, 1=Active
 jsk_settings_visible = 0    # 0=Masqué, 1=Affiché
 jsk_stack_count = 1         # 1-4 images à empiler (après HDR)
 jsk_hdr_bits_clip = 2       # 1-3 bits de poids fort à enlever
-jsk_hdr_method = 1          # 0=OFF, 1=Median, 2=Mean, 3=Mertens
+jsk_hdr_method = 2          # 0=OFF, 1=Median, 2=Mean, 3=Mertens
 jsk_denoise_type = 0        # 0=OFF, 1=Bilateral, 2=FastNLM, 3=Gaussian, 4=Median
 jsk_denoise_strength = 5    # 1-10
+jsk_hdr_weights = [100, 100, 100, 100]  # Poids des images HDR (0-100), un par niveau de bit
 jsk_hdr_methods = ['OFF', 'Median', 'Mean', 'Mertens']
 jsk_denoise_types = ['OFF', 'Bilateral', 'FastNLM', 'Gaussian', 'Median']
 jsk_processor = None        # Instance JSKLiveProcessor
 jsk_recorder = None         # Instance JSKVideoRecorder
 jsk_rec_blink = 0           # État clignotement point rouge REC
 _jsk_slider_rects = {}      # Rectangles des sliders JSK pour détection clics
+_jsk_slider_dragging = False # True si on est en train de glisser un slider JSK
 # Variables de sauvegarde pour restauration à la sortie de JSK LIVE
 jsk_saved_vwidth = 1920
 jsk_saved_vheight = 1080
@@ -6026,7 +6028,7 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
     global windowSurfaceObj, _font_cache
     global jsk_stack_count, jsk_hdr_bits_clip, jsk_hdr_method
     global jsk_denoise_type, jsk_denoise_strength
-    global jsk_hdr_methods, jsk_denoise_types
+    global jsk_hdr_methods, jsk_denoise_types, jsk_hdr_weights
     global stretch_preset, ghs_D, ghs_b, ghs_SP
 
     control_rects = {}
@@ -6133,6 +6135,38 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
             f"GHS SP: {ghs_SP/100:.2f}", ghs_SP, 0, 100, (180, 140, 100)
         )
 
+    # ===== Panneau gauche : HDR Weights (uniquement en mode Mean) =====
+    if jsk_hdr_method == 2:
+        left_panel_width = 220
+        left_panel_x = panel_margin
+        left_start_y = 90
+        n_weights = jsk_hdr_bits_clip + 1  # 2, 3 ou 4 sliders
+
+        # Fond semi-transparent
+        left_panel_height = 50 + n_weights * (slider_height + margin)
+        s_left = pygame.Surface((left_panel_width + 20, left_panel_height), pygame.SRCALPHA)
+        s_left.fill((20, 20, 30, 180))
+        windowSurfaceObj.blit(s_left, (left_panel_x - 10, left_start_y - 20))
+
+        # Titre
+        title_left = titleFont.render("HDR Weights", True, (200, 180, 100))
+        windowSurfaceObj.blit(title_left, (left_panel_x, left_start_y - 15))
+        left_start_y += 25
+
+        # Labels pour chaque niveau de bit
+        bit_labels = ["12-bit", "11-bit", "10-bit", "9-bit"]
+        weight_colors = [(140, 200, 140), (200, 180, 100), (200, 140, 100), (200, 100, 100)]
+
+        left_slider_width = 200
+
+        for i in range(n_weights):
+            w_val = jsk_hdr_weights[i]
+            control_rects[f'jsk_hdr_w{i}'] = draw_jsk_slider(
+                left_panel_x, left_start_y, left_slider_width, slider_height,
+                f"{bit_labels[i]}: {w_val}%", w_val, 0, 100, weight_colors[i]
+            )
+            left_start_y += slider_height + margin
+
     return control_rects
 
 
@@ -6193,7 +6227,7 @@ def handle_jsk_slider_click(mousex, mousey, control_rects):
         True si un contrôle a été modifié, False sinon
     """
     global jsk_stack_count, jsk_hdr_bits_clip, jsk_hdr_method
-    global jsk_denoise_type, jsk_denoise_strength
+    global jsk_denoise_type, jsk_denoise_strength, jsk_hdr_weights
     global stretch_preset, ghs_D, ghs_SP
     global jsk_processor
 
@@ -6228,6 +6262,10 @@ def handle_jsk_slider_click(mousex, mousey, control_rects):
             elif name == 'jsk_ghs_SP':
                 ghs_SP = int(ratio * 100)
                 ghs_SP = max(0, min(100, ghs_SP))
+            elif name.startswith('jsk_hdr_w'):
+                idx = int(name[-1])
+                jsk_hdr_weights[idx] = int(ratio * 100)
+                jsk_hdr_weights[idx] = max(0, min(100, jsk_hdr_weights[idx]))
 
             # Mettre à jour le processeur JSK
             if jsk_processor is not None:
@@ -6236,7 +6274,8 @@ def handle_jsk_slider_click(mousex, mousey, control_rects):
                     hdr_bits_clip=jsk_hdr_bits_clip,
                     hdr_method=jsk_hdr_method,
                     denoise_type=jsk_denoise_type,
-                    denoise_strength=jsk_denoise_strength
+                    denoise_strength=jsk_denoise_strength,
+                    hdr_weights=jsk_hdr_weights
                 )
 
             return True
@@ -10106,9 +10145,32 @@ while True:
           if not use_picamera2 and p is not None:
               os.killpg(p.pid, signal.SIGTERM)
           pygame.quit()
+      # === JSK LIVE: gestion du drag des sliders (MOUSEBUTTONDOWN + MOUSEMOTION) ===
+      elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+        if jsk_live_mode == 1 and jsk_settings_visible == 1 and _jsk_slider_rects:
+            mx, my = event.pos
+            if handle_jsk_slider_click(mx, my, _jsk_slider_rects):
+                _jsk_slider_dragging = True
+                continue
+      elif event.type == pygame.MOUSEMOTION:
+        if _jsk_slider_dragging and jsk_live_mode == 1 and jsk_settings_visible == 1 and _jsk_slider_rects:
+            buttons = pygame.mouse.get_pressed()
+            if buttons[0]:  # Bouton gauche maintenu
+                mx, my = event.pos
+                handle_jsk_slider_click(mx, my, _jsk_slider_rects)
+                continue
+            else:
+                _jsk_slider_dragging = False
       # MOVE HISTAREA
       elif (event.type == MOUSEBUTTONUP):
         mousex, mousey = event.pos
+        # Fin du drag JSK si actif → ne pas traiter le BUTTONUP comme un clic normal
+        if _jsk_slider_dragging:
+            _jsk_slider_dragging = False
+            # Appliquer la position finale du slider puis ignorer le reste
+            if jsk_live_mode == 1 and jsk_settings_visible == 1 and _jsk_slider_rects:
+                handle_jsk_slider_click(mousex, mousey, _jsk_slider_rects)
+            continue
 
         # Si on est en mode LiveStack actif, un clic quitte ce mode
         if livestack_active:
@@ -10391,6 +10453,7 @@ while True:
             if is_click_on_jsk_settings(mousex, mousey):
                 jsk_settings_visible = 1 - jsk_settings_visible  # Toggle
                 _jsk_slider_rects = {}
+                _jsk_slider_dragging = False
                 continue
 
             # Vérifier si clic sur le bouton REC
@@ -10419,6 +10482,7 @@ while True:
                 jsk_live_mode = 0
                 jsk_settings_visible = 0
                 _jsk_slider_rects = {}
+                _jsk_slider_dragging = False
 
                 # Arrêter l'enregistrement si actif
                 if jsk_recorder is not None and jsk_recorder.is_recording:
@@ -16997,7 +17061,8 @@ while True:
                           hdr_bits_clip=jsk_hdr_bits_clip,
                           hdr_method=jsk_hdr_method,
                           denoise_type=jsk_denoise_type,
-                          denoise_strength=jsk_denoise_strength
+                          denoise_strength=jsk_denoise_strength,
+                          hdr_weights=jsk_hdr_weights
                       )
 
                       # Initialiser le recorder (dimensions 1920x1080)
