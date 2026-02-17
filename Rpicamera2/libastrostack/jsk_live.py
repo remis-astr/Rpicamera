@@ -269,7 +269,7 @@ class JSKLiveProcessor:
         if 'stack_count' in kwargs:
             self.stack_count = max(1, min(4, kwargs['stack_count']))
         if 'hdr_bits_clip' in kwargs:
-            self.hdr_bits_clip = max(1, min(3, kwargs['hdr_bits_clip']))
+            self.hdr_bits_clip = max(0, min(3, kwargs['hdr_bits_clip']))
         if 'hdr_method' in kwargs:
             self.hdr_method = max(0, min(3, kwargs['hdr_method']))
         if 'denoise_type' in kwargs:
@@ -313,8 +313,8 @@ class JSKLiveProcessor:
             return None
 
         # 1. HDR Processing sur la frame RAW brute
-        if self.hdr_method == 0:
-            # HDR OFF - simple conversion
+        if self.hdr_method == 0 or self.hdr_bits_clip == 0:
+            # HDR OFF ou clip=0 - simple conversion 12bit->8bit sans clipping
             rgb_image = HDR_bypass_12bit(raw_frame, self.bayer_pattern)
         else:
             method_name = self.hdr_methods[self.hdr_method]
