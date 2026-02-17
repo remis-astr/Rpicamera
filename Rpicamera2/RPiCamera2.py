@@ -1522,13 +1522,19 @@ jsk_denoise_types = ['OFF', 'Bilateral', 'FastNLM', 'Gaussian', 'Median']
 jsk_processor = None        # Instance JSKLiveProcessor
 jsk_recorder = None         # Instance JSKVideoRecorder
 jsk_rec_blink = 0           # État clignotement point rouge REC
+_jsk_last_surface = None    # Cache de la derniere surface JSK valide (evite ecran noir)
 _jsk_slider_rects = {}      # Rectangles des sliders JSK pour détection clics
 _jsk_slider_dragging = False # True si on est en train de glisser un slider JSK
+_jsk_ge_dragging = None      # 'gain' ou 'expo' si on drag un slider gain/expo JSK
 # Variables de sauvegarde pour restauration à la sortie de JSK LIVE
 jsk_saved_vwidth = 1920
 jsk_saved_vheight = 1080
 jsk_saved_zoom = 0
 jsk_saved_use_native = 0
+jsk_gain = 10               # Gain en mode JSK LIVE (1-300)
+jsk_exposure_us = 10000     # Exposition en µs en mode JSK LIVE (1000-1000000 = 1ms-1000ms)
+jsk_saved_gain = 0          # Sauvegarde du gain global a l'entree
+jsk_saved_exposure = 0      # Sauvegarde de l'exposition globale a l'entree
 
 # COLLIMATION Settings
 collimation_mode = 0              # 0=OFF, 1=Active
@@ -6064,7 +6070,8 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
     global jsk_stack_count, jsk_hdr_bits_clip, jsk_hdr_method
     global jsk_denoise_type, jsk_denoise_strength
     global jsk_hdr_methods, jsk_denoise_types, jsk_hdr_weights
-    global stretch_preset, ghs_D, ghs_b, ghs_SP
+    global stretch_preset, ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
+    global stretch_factor
 
     control_rects = {}
 
@@ -6091,18 +6098,18 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
     start_y += 25
 
     slider_width = 250
-    slider_height = 40
-    margin = 8
+    slider_height = 30
+    margin = 4
 
-    # Section HDR
     cache_key_section = 18
     if cache_key_section not in _font_cache:
         _font_cache[cache_key_section] = pygame.font.Font(None, cache_key_section)
     sectionFont = _font_cache[cache_key_section]
 
+    # ===== Section HDR =====
     section = sectionFont.render("HDR Processing:", True, (150, 180, 200))
     windowSurfaceObj.blit(section, (panel_x, start_y))
-    start_y += 20
+    start_y += 16
 
     # Stack Count (1-4)
     control_rects['jsk_stack'] = draw_jsk_slider(
@@ -6111,24 +6118,28 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
     )
     start_y += slider_height + margin
 
-    # HDR Bits Clip (1-3)
-    control_rects['jsk_hdr_clip'] = draw_jsk_slider(
-        panel_x, start_y, slider_width, slider_height,
-        f"HDR Clip: {jsk_hdr_bits_clip} bits", jsk_hdr_bits_clip, 1, 3, (180, 140, 100)
-    )
-    start_y += slider_height + margin
-
-    # HDR Method (0-3)
+    # HDR Method (0-3) - OFF desactive le HDR, ne garde que le stretch
     control_rects['jsk_hdr_method'] = draw_jsk_slider(
         panel_x, start_y, slider_width, slider_height,
         f"HDR: {jsk_hdr_methods[jsk_hdr_method]}", jsk_hdr_method, 0, 3, (140, 100, 180)
     )
-    start_y += slider_height + margin + 10
+    start_y += slider_height + margin
 
-    # Section Denoise
+    # HDR Bits Clip (0-3) - 0=pas de clipping, uniquement si HDR actif
+    if jsk_hdr_method > 0:
+        clip_label = "HDR Clip: OFF" if jsk_hdr_bits_clip == 0 else f"HDR Clip: {jsk_hdr_bits_clip} bits"
+        control_rects['jsk_hdr_clip'] = draw_jsk_slider(
+            panel_x, start_y, slider_width, slider_height,
+            clip_label, jsk_hdr_bits_clip, 0, 3, (180, 140, 100)
+        )
+        start_y += slider_height + margin
+
+    start_y += 6
+
+    # ===== Section Denoise =====
     section = sectionFont.render("Denoise:", True, (150, 180, 200))
     windowSurfaceObj.blit(section, (panel_x, start_y))
-    start_y += 20
+    start_y += 16
 
     # Denoise Type (0-4)
     control_rects['jsk_denoise_type'] = draw_jsk_slider(
@@ -6142,12 +6153,12 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
         panel_x, start_y, slider_width, slider_height,
         f"Strength: {jsk_denoise_strength}", jsk_denoise_strength, 1, 10, (180, 160, 100)
     )
-    start_y += slider_height + margin + 10
+    start_y += slider_height + margin + 6
 
-    # Section Stretch (réutilise les paramètres existants)
+    # ===== Section Stretch =====
     section = sectionFont.render("Stretch:", True, (150, 180, 200))
     windowSurfaceObj.blit(section, (panel_x, start_y))
-    start_y += 20
+    start_y += 16
 
     # Stretch Preset
     stretch_names = ['OFF', 'GHS', 'Arcsinh']
@@ -6157,17 +6168,42 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
     )
     start_y += slider_height + margin
 
-    # Si GHS actif, afficher les paramètres principaux
+    # Parametres GHS complets
     if stretch_preset == 1:
         control_rects['jsk_ghs_D'] = draw_jsk_slider(
             panel_x, start_y, slider_width, slider_height,
-            f"GHS D: {ghs_D/10:.1f}", ghs_D, -10, 100, (100, 180, 140)
+            f"D (Stretch): {ghs_D/10:.1f}", ghs_D, -10, 100, (100, 180, 140)
+        )
+        start_y += slider_height + margin
+
+        control_rects['jsk_ghs_b'] = draw_jsk_slider(
+            panel_x, start_y, slider_width, slider_height,
+            f"b (Local Int): {ghs_b/10:.1f}", ghs_b, -300, 100, (100, 160, 180)
         )
         start_y += slider_height + margin
 
         control_rects['jsk_ghs_SP'] = draw_jsk_slider(
             panel_x, start_y, slider_width, slider_height,
-            f"GHS SP: {ghs_SP/100:.2f}", ghs_SP, 0, 100, (180, 140, 100)
+            f"SP (Symmetry): {ghs_SP/100:.2f}", ghs_SP, 0, 100, (180, 140, 100)
+        )
+        start_y += slider_height + margin
+
+        control_rects['jsk_ghs_LP'] = draw_jsk_slider(
+            panel_x, start_y, slider_width, slider_height,
+            f"LP (Shadows): {ghs_LP/100:.2f}", ghs_LP, 0, 100, (140, 100, 180)
+        )
+        start_y += slider_height + margin
+
+        control_rects['jsk_ghs_HP'] = draw_jsk_slider(
+            panel_x, start_y, slider_width, slider_height,
+            f"HP (Highlights): {ghs_HP/100:.2f}", ghs_HP, 0, 100, (180, 100, 140)
+        )
+
+    # Parametre Arcsinh
+    elif stretch_preset == 2:
+        control_rects['jsk_stretch_factor'] = draw_jsk_slider(
+            panel_x, start_y, slider_width, slider_height,
+            f"Factor: {stretch_factor/10:.1f}", stretch_factor, 0, 80, (200, 160, 100)
         )
 
     # ===== Panneau gauche : HDR Weights (uniquement en mode Mean) =====
@@ -6203,6 +6239,119 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
             left_start_y += slider_height + margin
 
     return control_rects
+
+
+def draw_jsk_gain_exposure(screen_width, screen_height):
+    """
+    Dessine les sliders Gain et Exposition en bas de l'ecran JSK LIVE,
+    a droite du bouton EXIT. Toujours visibles.
+    Gain: 1-300 lineaire. Expo: 1ms-1000ms log.
+    """
+    global windowSurfaceObj, _font_cache
+    global jsk_gain, jsk_exposure_us
+
+    slider_w = 200
+    slider_h = 30
+    gap = 5
+    # Positionner a droite du bouton EXIT (EXIT = 15+50=65 de large)
+    sx = 80
+    margin_y = 15
+
+    # --- Slider Exposition (en bas) ---
+    sy_expo = screen_height - slider_h - margin_y
+
+    bg_rect_expo = pygame.Rect(sx, sy_expo, slider_w, slider_h)
+    pygame.draw.rect(windowSurfaceObj, (40, 40, 50), bg_rect_expo, border_radius=5)
+    pygame.draw.rect(windowSurfaceObj, (80, 80, 90), bg_rect_expo, 1, border_radius=5)
+
+    min_exp_ms = 1
+    max_exp_ms = 1000
+    min_exp_us = min_exp_ms * 1000
+    max_exp_us = max_exp_ms * 1000
+
+    exp_clamped = max(min_exp_us, min(jsk_exposure_us, max_exp_us))
+    log_min = math.log10(min_exp_us)
+    log_max = math.log10(max_exp_us)
+    log_val = math.log10(exp_clamped)
+    fill_ratio = (log_val - log_min) / (log_max - log_min)
+    fill_w = int(fill_ratio * (slider_w - 10))
+    fill_rect = pygame.Rect(sx + 5, sy_expo + 5, max(1, fill_w), slider_h - 10)
+    pygame.draw.rect(windowSurfaceObj, (60, 100, 120), fill_rect, border_radius=3)
+
+    cache_key = 20
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    expo_ms = jsk_exposure_us / 1000.0
+    if expo_ms < 10:
+        expo_text = f"Expo: {expo_ms:.1f}ms"
+    else:
+        expo_text = f"Expo: {expo_ms:.0f}ms"
+    label_surf = fontObj.render(expo_text, True, (200, 200, 200))
+    label_rect = label_surf.get_rect(center=bg_rect_expo.center)
+    windowSurfaceObj.blit(label_surf, label_rect)
+
+    # --- Slider Gain (au-dessus de l'expo) ---
+    sy_gain = sy_expo - slider_h - gap
+
+    bg_rect_gain = pygame.Rect(sx, sy_gain, slider_w, slider_h)
+    pygame.draw.rect(windowSurfaceObj, (40, 40, 50), bg_rect_gain, border_radius=5)
+    pygame.draw.rect(windowSurfaceObj, (80, 80, 90), bg_rect_gain, 1, border_radius=5)
+
+    fill_ratio = min(1.0, (jsk_gain - 1) / 299.0)
+    fill_w = int(fill_ratio * (slider_w - 10))
+    if fill_w > 0:
+        fill_rect = pygame.Rect(sx + 5, sy_gain + 5, fill_w, slider_h - 10)
+        pygame.draw.rect(windowSurfaceObj, (120, 100, 60), fill_rect, border_radius=3)
+
+    gain_text = f"Gain: {jsk_gain}"
+    label_surf = fontObj.render(gain_text, True, (200, 200, 200))
+    label_rect = label_surf.get_rect(center=bg_rect_gain.center)
+    windowSurfaceObj.blit(label_surf, label_rect)
+
+
+def _jsk_ge_slider_positions(screen_height):
+    """Retourne les positions (sx, sy_gain, sy_expo, slider_w, slider_h) des sliders gain/expo."""
+    slider_w = 200
+    slider_h = 30
+    gap = 5
+    sx = 80
+    margin_y = 15
+    sy_expo = screen_height - slider_h - margin_y
+    sy_gain = sy_expo - slider_h - gap
+    return sx, sy_gain, sy_expo, slider_w, slider_h
+
+
+def is_click_on_jsk_gain_slider(mousex, mousey, screen_width, screen_height):
+    """Verifie si clic sur slider gain JSK. Retourne la nouvelle valeur (1-300) ou None."""
+    sx, sy_gain, _, slider_w, slider_h = _jsk_ge_slider_positions(screen_height)
+
+    if sx <= mousex <= sx + slider_w and sy_gain <= mousey <= sy_gain + slider_h:
+        rel_x = mousex - sx
+        ratio = max(0.0, min(1.0, rel_x / slider_w))
+        value = int(1 + ratio * 299)
+        return max(1, min(300, value))
+    return None
+
+
+def is_click_on_jsk_exposure_slider(mousex, mousey, screen_width, screen_height):
+    """Verifie si clic sur slider exposure JSK. Retourne la valeur en us (1000-1000000) ou None."""
+    sx, _, sy_expo, slider_w, slider_h = _jsk_ge_slider_positions(screen_height)
+
+    if sx <= mousex <= sx + slider_w and sy_expo <= mousey <= sy_expo + slider_h:
+        min_exp_us = 1000    # 1ms
+        max_exp_us = 1000000 # 1000ms
+
+        rel_x = mousex - sx
+        ratio = max(0.0, min(1.0, rel_x / slider_w))
+        # Echelle logarithmique
+        log_min = math.log10(min_exp_us)
+        log_max = math.log10(max_exp_us)
+        log_val = log_min + ratio * (log_max - log_min)
+        value_us = int(10 ** log_val)
+        return max(min_exp_us, min(value_us, max_exp_us))
+    return None
 
 
 def draw_jsk_slider(x, y, width, height, label, value, vmin, vmax, color=(100, 140, 180)):
@@ -6263,7 +6412,8 @@ def handle_jsk_slider_click(mousex, mousey, control_rects):
     """
     global jsk_stack_count, jsk_hdr_bits_clip, jsk_hdr_method
     global jsk_denoise_type, jsk_denoise_strength, jsk_hdr_weights
-    global stretch_preset, ghs_D, ghs_SP
+    global stretch_preset, ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
+    global stretch_factor
     global jsk_processor
 
     for name, rect in control_rects.items():
@@ -6277,8 +6427,8 @@ def handle_jsk_slider_click(mousex, mousey, control_rects):
                 jsk_stack_count = int(1 + ratio * 3)
                 jsk_stack_count = max(1, min(4, jsk_stack_count))
             elif name == 'jsk_hdr_clip':
-                jsk_hdr_bits_clip = int(1 + ratio * 2)
-                jsk_hdr_bits_clip = max(1, min(3, jsk_hdr_bits_clip))
+                jsk_hdr_bits_clip = int(ratio * 3)
+                jsk_hdr_bits_clip = max(0, min(3, jsk_hdr_bits_clip))
             elif name == 'jsk_hdr_method':
                 jsk_hdr_method = int(ratio * 3)
                 jsk_hdr_method = max(0, min(3, jsk_hdr_method))
@@ -6294,9 +6444,21 @@ def handle_jsk_slider_click(mousex, mousey, control_rects):
             elif name == 'jsk_ghs_D':
                 ghs_D = int(-10 + ratio * 110)
                 ghs_D = max(-10, min(100, ghs_D))
+            elif name == 'jsk_ghs_b':
+                ghs_b = int(-300 + ratio * 400)
+                ghs_b = max(-300, min(100, ghs_b))
             elif name == 'jsk_ghs_SP':
                 ghs_SP = int(ratio * 100)
                 ghs_SP = max(0, min(100, ghs_SP))
+            elif name == 'jsk_ghs_LP':
+                ghs_LP = int(ratio * 100)
+                ghs_LP = max(0, min(100, ghs_LP))
+            elif name == 'jsk_ghs_HP':
+                ghs_HP = int(ratio * 100)
+                ghs_HP = max(0, min(100, ghs_HP))
+            elif name == 'jsk_stretch_factor':
+                stretch_factor = int(ratio * 80)
+                stretch_factor = max(0, min(80, stretch_factor))
             elif name.startswith('jsk_hdr_w'):
                 idx = int(name[-1])
                 jsk_hdr_weights[idx] = int(ratio * 100)
@@ -10009,9 +10171,6 @@ while True:
                     screen_info = pygame.display.Info()
                     max_width, max_height = screen_info.current_w, screen_info.current_h
 
-                # Fond noir (évite l'écran blanc/résidu)
-                windowSurfaceObj.fill((0, 0, 0))
-
                 # Traitement image RAW avec pipeline JSK (HDR + Denoise)
                 if jsk_raw_input is not None:
                     if jsk_debug:
@@ -10034,6 +10193,7 @@ while True:
                         # Convertir en surface pygame et afficher en plein écran
                         jsk_surface = pygame.surfarray.make_surface(np.swapaxes(jsk_result, 0, 1))
                         jsk_surface = pygame.transform.scale(jsk_surface, (max_width, max_height))
+                        _jsk_last_surface = jsk_surface
                         windowSurfaceObj.blit(jsk_surface, (0, 0))
                         if jsk_debug:
                             print(f"[JSK DEBUG] Image affichée: {max_width}x{max_height}")
@@ -10041,8 +10201,11 @@ while True:
                         if jsk_recorder is not None and jsk_recorder.is_recording:
                             jsk_recorder.write_frame(jsk_result)
                 else:
-                    if jsk_debug:
-                        print(f"[JSK DEBUG] jsk_raw_input=None → pas de traitement image")
+                    # Pas de nouvelle frame: réafficher la dernière image valide
+                    if _jsk_last_surface is not None:
+                        windowSurfaceObj.blit(_jsk_last_surface, (0, 0))
+                    else:
+                        windowSurfaceObj.fill((0, 0, 0))
 
                 # TOUJOURS dessiner les boutons JSK LIVE (même sans image RAW)
                 draw_jsk_settings_icon(max_width, max_height, jsk_settings_visible == 1)
@@ -10053,6 +10216,9 @@ while True:
                                    jsk_recorder is not None and jsk_recorder.is_recording,
                                    elapsed_str)
                 draw_jsk_exit_button(max_width, max_height)
+
+                # Sliders Gain/Expo toujours visibles en bas a gauche
+                draw_jsk_gain_exposure(max_width, max_height)
 
                 # Afficher le panneau de contrôle si visible
                 if jsk_settings_visible == 1:
@@ -10734,11 +10900,18 @@ while True:
                         # Convertir en surface pygame
                         jsk_surface = pygame.surfarray.make_surface(np.swapaxes(jsk_result, 0, 1))
                         jsk_surface = pygame.transform.scale(jsk_surface, (max_width, max_height))
+                        _jsk_last_surface = jsk_surface
                         windowSurfaceObj.blit(jsk_surface, (0, 0))
 
                         # Enregistrer la frame si recording actif
                         if jsk_recorder is not None and jsk_recorder.is_recording:
                             jsk_recorder.write_frame(jsk_result)
+                else:
+                    # Pas de nouvelle frame: réafficher la dernière image valide
+                    if _jsk_last_surface is not None:
+                        windowSurfaceObj.blit(_jsk_last_surface, (0, 0))
+                    else:
+                        windowSurfaceObj.fill((0, 0, 0))
 
                 # Afficher les boutons JSK LIVE
                 draw_jsk_settings_icon(max_width, max_height, jsk_settings_visible == 1)
@@ -10750,6 +10923,9 @@ while True:
                                    jsk_recorder is not None and jsk_recorder.is_recording,
                                    elapsed_str)
                 draw_jsk_exit_button(max_width, max_height)
+
+                # Sliders Gain/Expo toujours visibles en bas a gauche
+                draw_jsk_gain_exposure(max_width, max_height)
 
                 # Afficher le panneau de contrôle si visible
                 if jsk_settings_visible == 1:
@@ -11139,12 +11315,57 @@ while True:
           pygame.quit()
       # === JSK LIVE: gestion du drag des sliders (MOUSEBUTTONDOWN + MOUSEMOTION) ===
       elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-        if jsk_live_mode == 1 and jsk_settings_visible == 1 and _jsk_slider_rects:
+        if jsk_live_mode == 1:
             mx, my = event.pos
-            if handle_jsk_slider_click(mx, my, _jsk_slider_rects):
-                _jsk_slider_dragging = True
+            # Drag sliders gain/expo (toujours visibles)
+            display_modes = pygame.display.list_modes()
+            if display_modes and display_modes != -1:
+                _fs_w, _fs_h = display_modes[0]
+            else:
+                _si = pygame.display.Info()
+                _fs_w, _fs_h = _si.current_w, _si.current_h
+            new_g = is_click_on_jsk_gain_slider(mx, my, _fs_w, _fs_h)
+            if new_g is not None:
+                jsk_gain = new_g
+                apply_controls_immediately(gain_value=jsk_gain)
+                _jsk_ge_dragging = 'gain'
                 continue
+            new_e = is_click_on_jsk_exposure_slider(mx, my, _fs_w, _fs_h)
+            if new_e is not None:
+                jsk_exposure_us = new_e
+                apply_controls_immediately(exposure_time=jsk_exposure_us)
+                _jsk_ge_dragging = 'expo'
+                continue
+            # Drag sliders du panneau settings
+            if jsk_settings_visible == 1 and _jsk_slider_rects:
+                if handle_jsk_slider_click(mx, my, _jsk_slider_rects):
+                    _jsk_slider_dragging = True
+                    continue
       elif event.type == pygame.MOUSEMOTION:
+        # Drag sliders gain/expo JSK
+        if _jsk_ge_dragging is not None and jsk_live_mode == 1:
+            buttons = pygame.mouse.get_pressed()
+            if buttons[0]:
+                mx, my = event.pos
+                display_modes = pygame.display.list_modes()
+                if display_modes and display_modes != -1:
+                    _fs_w, _fs_h = display_modes[0]
+                else:
+                    _si = pygame.display.Info()
+                    _fs_w, _fs_h = _si.current_w, _si.current_h
+                if _jsk_ge_dragging == 'gain':
+                    new_g = is_click_on_jsk_gain_slider(mx, my, _fs_w, _fs_h)
+                    if new_g is not None:
+                        jsk_gain = new_g
+                        apply_controls_immediately(gain_value=jsk_gain)
+                else:
+                    new_e = is_click_on_jsk_exposure_slider(mx, my, _fs_w, _fs_h)
+                    if new_e is not None:
+                        jsk_exposure_us = new_e
+                        apply_controls_immediately(exposure_time=jsk_exposure_us)
+                continue
+            else:
+                _jsk_ge_dragging = None
         if _jsk_slider_dragging and jsk_live_mode == 1 and jsk_settings_visible == 1 and _jsk_slider_rects:
             buttons = pygame.mouse.get_pressed()
             if buttons[0]:  # Bouton gauche maintenu
@@ -11156,6 +11377,10 @@ while True:
       # MOVE HISTAREA
       elif (event.type == MOUSEBUTTONUP):
         mousex, mousey = event.pos
+        # Fin du drag JSK gain/expo
+        if _jsk_ge_dragging is not None:
+            _jsk_ge_dragging = None
+            continue
         # Fin du drag JSK si actif → ne pas traiter le BUTTONUP comme un clic normal
         if _jsk_slider_dragging:
             _jsk_slider_dragging = False
@@ -11623,8 +11848,8 @@ while True:
                         now = datetime.datetime.now()
                         timestamp = now.strftime("%y%m%d%H%M%S")
                         output_file = pic_dir + "JSK_" + timestamp + ".mp4"
-                        # Obtenir les dimensions de l'image
-                        if jsk_recorder.start(output_file, fs_width, fs_height, fps=25):
+                        # Enregistrer en resolution native binning 1920x1080
+                        if jsk_recorder.start(output_file, 1920, 1080, fps=25):
                             print(f"[JSK LIVE] Enregistrement démarré: {output_file}")
                         else:
                             print(f"[JSK LIVE] Erreur démarrage enregistrement")
@@ -11637,6 +11862,8 @@ while True:
                 jsk_settings_visible = 0
                 _jsk_slider_rects = {}
                 _jsk_slider_dragging = False
+                _jsk_ge_dragging = None
+                _jsk_last_surface = None
 
                 # Arrêter l'enregistrement si actif
                 if jsk_recorder is not None and jsk_recorder.is_recording:
@@ -11648,11 +11875,20 @@ while True:
                     vheight = jsk_saved_vheight
                     zoom = jsk_saved_zoom
                     use_native_sensor_mode = jsk_saved_use_native
+                gain = jsk_saved_gain
+                if jsk_saved_exposure > 0:
+                    custom_sspeed = jsk_saved_exposure
 
                 # Reconfigurer la caméra avec les paramètres restaurés
                 print("[JSK LIVE] Restauration configuration caméra précédente")
                 kill_preview_process()
                 preview()
+
+                # Restaurer gain/exposition sur la camera
+                if gain > 0 or custom_sspeed > 0:
+                    apply_controls_immediately(
+                        exposure_time=custom_sspeed if custom_sspeed > 0 else None,
+                        gain_value=gain if gain > 0 else None)
 
                 # Reconfigurer la capture en mode normal (ISP)
                 if capture_thread is not None:
@@ -11672,6 +11908,21 @@ while True:
                 Menu()
                 pygame.display.update()
                 print("[JSK LIVE] Mode désactivé")
+                continue
+
+            # Gerer les clics sur les sliders Gain/Expo (toujours visibles)
+            new_gain_val = is_click_on_jsk_gain_slider(mousex, mousey, fs_width, fs_height)
+            if new_gain_val is not None:
+                jsk_gain = new_gain_val
+                apply_controls_immediately(gain_value=jsk_gain)
+                print(f"[JSK LIVE] Gain: {jsk_gain}")
+                continue
+
+            new_exp_val = is_click_on_jsk_exposure_slider(mousex, mousey, fs_width, fs_height)
+            if new_exp_val is not None:
+                jsk_exposure_us = new_exp_val
+                apply_controls_immediately(exposure_time=jsk_exposure_us)
+                print(f"[JSK LIVE] Expo: {jsk_exposure_us / 1000:.1f}ms")
                 continue
 
             # Si panneau settings visible, gérer les clics sur les sliders
@@ -18196,6 +18447,13 @@ while True:
                       jsk_saved_vheight = vheight
                       jsk_saved_zoom = zoom
                       jsk_saved_use_native = use_native_sensor_mode
+                      jsk_saved_gain = gain
+                      jsk_saved_exposure = custom_sspeed if custom_sspeed > 0 else sspeed
+
+                      # Initialiser gain/exposure JSK depuis les valeurs actuelles (clamp aux bornes)
+                      jsk_gain = max(1, min(300, gain if gain > 0 else 10))
+                      _init_expo = custom_sspeed if custom_sspeed > 0 else sspeed
+                      jsk_exposure_us = max(1000, min(1000000, _init_expo if _init_expo > 0 else 10000))
 
                       # Forcer le mode binning 1920x1080
                       vwidth = 1920
