@@ -70,6 +70,9 @@ from libastrostack.allsky import AllskyMeanController, stack_timelapse_images
 # Import JSK LIVE module (dans libastrostack/)
 from libastrostack.jsk_live import JSKLiveProcessor, JSKVideoRecorder
 
+# Import Mineral Moon module (dans libastrostack/)
+from libastrostack.mineral_moon import MineralMoonProcessor, MOON_PRESETS
+
 # Import Collimation module (dans libastrostack/)
 from libastrostack.collimation import CollimationDetector, CIRCLE_COLORS, CIRCLE_LABELS, CIRCLE_ORDER
 
@@ -1511,18 +1514,19 @@ ghs_presets = ['Manual', 'Galaxies', 'Nebulae', 'Initial']
 # JSK LIVE Settings
 jsk_live_mode = 0           # 0=OFF, 1=Active
 jsk_settings_visible = 0    # 0=Masqué, 1=Affiché
-jsk_stack_count = 1         # 1-4 images à empiler (après HDR)
+jsk_stack_count = 1         # 1-6 images à empiler (après HDR)
 jsk_hdr_bits_clip = 2       # 1-3 bits de poids fort à enlever
 jsk_hdr_method = 2          # 0=OFF, 1=Median, 2=Mean, 3=Mertens
 jsk_denoise_type = 0        # 0=OFF, 1=Bilateral, 2=FastNLM, 3=Gaussian, 4=Median
 jsk_denoise_strength = 5    # 1-10
-jsk_hdr_weights = [100, 100, 100, 100]  # Poids des images HDR (0-100), un par niveau de bit
+jsk_hdr_weights = [100, 100, 100, 100, 100, 100]  # Poids des images HDR (0-100), un par niveau de bit
 jsk_hdr_methods = ['OFF', 'Median', 'Mean', 'Mertens']
 jsk_denoise_types = ['OFF', 'Bilateral', 'FastNLM', 'Gaussian', 'Median']
 jsk_processor = None        # Instance JSKLiveProcessor
 jsk_recorder = None         # Instance JSKVideoRecorder
 jsk_rec_blink = 0           # État clignotement point rouge REC
 _jsk_last_surface = None    # Cache de la derniere surface JSK valide (evite ecran noir)
+_jsk_last_blit_pos = (0, 0) # Position blit de la derniere surface JSK (letterbox ou plein ecran)
 _jsk_slider_rects = {}      # Rectangles des sliders JSK pour détection clics
 _jsk_slider_dragging = False # True si on est en train de glisser un slider JSK
 _jsk_ge_dragging = None      # 'gain' ou 'expo' si on drag un slider gain/expo JSK
@@ -1535,6 +1539,45 @@ jsk_gain = 10               # Gain en mode JSK LIVE (1-300)
 jsk_exposure_us = 10000     # Exposition en µs en mode JSK LIVE (1000-1000000 = 1ms-1000ms)
 jsk_saved_gain = 0          # Sauvegarde du gain global a l'entree
 jsk_saved_exposure = 0      # Sauvegarde de l'exposition globale a l'entree
+jsk_crop_square = 0         # 0=OFF, 1=crop carré centré (min sensor dim)
+jsk_binning = 1             # 1=binning ON (défaut, 1928×1090), 0=natif (3856×2180)
+
+# MINERAL MOON Settings
+moon_mode = 0               # 0=OFF, 1=Active
+moon_settings_visible = 0   # 0=Masqué, 1=Affiché
+moon_histogram_visible = 1  # 0=Masqué, 1=Affiché
+moon_processor = None       # Instance MineralMoonProcessor
+moon_recorder = None        # Instance JSKVideoRecorder (réutilisée)
+moon_rec_blink = 0          # Clignotement bouton REC
+_moon_last_surface = None   # Cache dernière surface valide
+_moon_last_frame_bgr = None # Cache dernière frame BGR (pour SNAP)
+_moon_slider_rects = {}     # Rects des sliders settings
+_moon_slider_dragging = False
+_moon_ge_dragging = None    # 'gain' ou 'expo'
+# Sauvegarde paramètres à l'entrée
+moon_saved_vwidth = 1920
+moon_saved_vheight = 1080
+moon_saved_zoom = 0
+moon_saved_use_native = 0
+moon_saved_gain = 0
+moon_saved_exposure = 0
+# Gain / Expo Moon
+moon_gain = 50
+moon_exposure_us = 100000   # 100ms
+# Binning Moon
+moon_binning = 1            # 1=binning ON (défaut), 0=natif
+# Paramètres processor (entiers pour sliders)
+moon_sat_factor = 25        # /10 → 2.5  (plage 10-60)
+moon_sat_iter = 4           # 1-8
+moon_lum_protect = 220      # 100-255
+moon_noise_enabled = 1      # 0=OFF, 1=ON
+moon_noise_strength = 7     # impair : 3,5,7,9,11
+moon_lrgb_enabled = 0       # 0=OFF, 1=ON
+moon_lrgb_weight = 60       # /100 → 0.60 (plage 10-100)
+moon_wb_r = 100             # /100 → 1.00 ColourGains rouge (50-250)
+moon_wb_g = 100             # /100 → 1.00 gain vert OpenCV   (50-250)
+moon_wb_b = 100             # /100 → 1.00 ColourGains bleu  (50-250)
+moon_preset = 1             # 0=Subtil, 1=Standard, 2=Intense
 
 # COLLIMATION Settings
 collimation_mode = 0              # 0=OFF, 1=Active
@@ -4047,7 +4090,7 @@ def duration_input_dialog(title, current_seconds, min_seconds, max_seconds):
 
 def text(col,row,fColor,top,upd,msg,fsize,bkgnd_Color):
     global bh,preview_width,fv,tduration,menu
-    colors =  [dgryColor, greenColor, yellowColor, redColor, purpleColor, blueColor, whiteColor, greyColor, blackColor, purpleColor,lgrnColor,lpurColor,lyelColor]
+    colors =  [dgryColor, greenColor, yellowColor, redColor, purpleColor, blueColor, whiteColor, greyColor, blackColor, purpleColor,lgrnColor,lpurColor,lyelColor,navyColor]
     Color  =  colors[fColor]
     bColor =  colors[bkgnd_Color]
     bx = preview_width + (col * bw)
@@ -6054,6 +6097,111 @@ def draw_jsk_exit_button(screen_width, screen_height):
     return icon_rect
 
 
+def draw_jsk_crop_button(screen_width, screen_height, crop_active=False):
+    """
+    Dessine le bouton CROP en bas à droite (à gauche du bouton REC) pour JSK LIVE.
+
+    Returns:
+        Rect du bouton pour détecter les clics
+    """
+    global windowSurfaceObj, _font_cache
+
+    icon_size = 50
+    margin = 15
+    # Position: à gauche du bouton REC (qui est en haut à droite)
+    # On le place en bas à droite
+    icon_x = screen_width - icon_size - margin
+    icon_y = screen_height - icon_size - margin
+
+    if crop_active:
+        bg_color = (60, 130, 80)
+        border_color = (100, 200, 120)
+        text_color = (200, 255, 210)
+    else:
+        bg_color = (50, 60, 70)
+        border_color = (80, 100, 110)
+        text_color = (160, 180, 190)
+
+    icon_rect = pygame.Rect(icon_x, icon_y, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg_color, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border_color, icon_rect, 2, border_radius=8)
+
+    cache_key = 19
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    line1 = fontObj.render("CROP", True, text_color)
+    line2 = fontObj.render("1080", True, text_color)
+    cx, cy = icon_rect.centerx, icon_rect.centery
+    windowSurfaceObj.blit(line1, line1.get_rect(centerx=cx, centery=cy - 8))
+    windowSurfaceObj.blit(line2, line2.get_rect(centerx=cx, centery=cy + 8))
+
+    return icon_rect
+
+
+def is_click_on_jsk_crop(mousex, mousey, screen_width, screen_height):
+    """Vérifie si clic sur bouton CROP JSK."""
+    icon_size = 50
+    margin = 15
+    icon_x = screen_width - icon_size - margin
+    icon_y = screen_height - icon_size - margin
+    return (icon_x <= mousex <= icon_x + icon_size and
+            icon_y <= mousey <= icon_y + icon_size)
+
+
+def draw_jsk_binning_button(screen_width, screen_height, binning_active=True):
+    """
+    Dessine le bouton BINNING en bas à droite, à gauche du bouton CROP.
+
+    Returns:
+        Rect du bouton pour détecter les clics
+    """
+    global windowSurfaceObj, _font_cache
+
+    icon_size = 50
+    margin = 15
+    # 2ème bouton en partant de la droite (CROP est le 1er)
+    icon_x = screen_width - 2 * icon_size - 2 * margin
+    icon_y = screen_height - icon_size - margin
+
+    if binning_active:
+        bg_color = (60, 100, 150)
+        border_color = (100, 160, 220)
+        text_color = (180, 220, 255)
+    else:
+        bg_color = (50, 60, 70)
+        border_color = (80, 100, 110)
+        text_color = (160, 180, 190)
+
+    icon_rect = pygame.Rect(icon_x, icon_y, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg_color, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border_color, icon_rect, 2, border_radius=8)
+
+    cache_key = 19
+    if cache_key not in _font_cache:
+        _font_cache[cache_key] = pygame.font.Font(None, cache_key)
+    fontObj = _font_cache[cache_key]
+
+    line1 = fontObj.render("BIN", True, text_color)
+    line2 = fontObj.render("2x2" if binning_active else "OFF", True, text_color)
+    cx, cy = icon_rect.centerx, icon_rect.centery
+    windowSurfaceObj.blit(line1, line1.get_rect(centerx=cx, centery=cy - 8))
+    windowSurfaceObj.blit(line2, line2.get_rect(centerx=cx, centery=cy + 8))
+
+    return icon_rect
+
+
+def is_click_on_jsk_binning(mousex, mousey, screen_width, screen_height):
+    """Vérifie si clic sur bouton BINNING JSK."""
+    icon_size = 50
+    margin = 15
+    icon_x = screen_width - 2 * icon_size - 2 * margin
+    icon_y = screen_height - icon_size - margin
+    return (icon_x <= mousex <= icon_x + icon_size and
+            icon_y <= mousey <= icon_y + icon_size)
+
+
 def draw_jsk_controls(screen_width, screen_height, image_array=None):
     """
     Dessine le panneau de contrôle JSK LIVE sur le côté droit.
@@ -6111,10 +6259,10 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
     windowSurfaceObj.blit(section, (panel_x, start_y))
     start_y += 16
 
-    # Stack Count (1-4)
+    # Stack Count (1-6)
     control_rects['jsk_stack'] = draw_jsk_slider(
         panel_x, start_y, slider_width, slider_height,
-        f"Stack: {jsk_stack_count}", jsk_stack_count, 1, 4, (100, 180, 140)
+        f"Stack: {jsk_stack_count}", jsk_stack_count, 1, 6, (100, 180, 140)
     )
     start_y += slider_height + margin
 
@@ -6203,7 +6351,7 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
     elif stretch_preset == 2:
         control_rects['jsk_stretch_factor'] = draw_jsk_slider(
             panel_x, start_y, slider_width, slider_height,
-            f"Factor: {stretch_factor/10:.1f}", stretch_factor, 0, 80, (200, 160, 100)
+            f"Factor: {stretch_factor/10:.1f}", stretch_factor, 0, 1000, (200, 160, 100)
         )
 
     # ===== Panneau gauche : HDR Weights (uniquement en mode Mean) =====
@@ -6225,8 +6373,8 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
         left_start_y += 25
 
         # Labels pour chaque niveau de bit
-        bit_labels = ["12-bit", "11-bit", "10-bit", "9-bit"]
-        weight_colors = [(140, 200, 140), (200, 180, 100), (200, 140, 100), (200, 100, 100)]
+        bit_labels = ["12-bit", "11-bit", "10-bit", "9-bit", "8-bit", "7-bit"]
+        weight_colors = [(140, 200, 140), (200, 180, 100), (200, 140, 100), (200, 100, 100), (180, 80, 120), (160, 60, 140)]
 
         left_slider_width = 200
 
@@ -6424,8 +6572,8 @@ def handle_jsk_slider_click(mousex, mousey, control_rects):
             ratio = max(0, min(1, rel_x / slider_width))
 
             if name == 'jsk_stack':
-                jsk_stack_count = int(1 + ratio * 3)
-                jsk_stack_count = max(1, min(4, jsk_stack_count))
+                jsk_stack_count = int(1 + ratio * 5)
+                jsk_stack_count = max(1, min(6, jsk_stack_count))
             elif name == 'jsk_hdr_clip':
                 jsk_hdr_bits_clip = int(ratio * 3)
                 jsk_hdr_bits_clip = max(0, min(3, jsk_hdr_bits_clip))
@@ -6457,8 +6605,8 @@ def handle_jsk_slider_click(mousex, mousey, control_rects):
                 ghs_HP = int(ratio * 100)
                 ghs_HP = max(0, min(100, ghs_HP))
             elif name == 'jsk_stretch_factor':
-                stretch_factor = int(ratio * 80)
-                stretch_factor = max(0, min(80, stretch_factor))
+                stretch_factor = int(ratio * 1000)
+                stretch_factor = max(0, min(1000, stretch_factor))
             elif name.startswith('jsk_hdr_w'):
                 idx = int(name[-1])
                 jsk_hdr_weights[idx] = int(ratio * 100)
@@ -6508,6 +6656,494 @@ def is_click_on_jsk_exit(mousex, mousey, screen_height):
 
 # ============================================================================
 # FIN JSK LIVE FULLSCREEN CONTROLS
+# ============================================================================
+
+
+# ============================================================================
+# MINERAL MOON FULLSCREEN CONTROLS
+# ============================================================================
+
+def draw_moon_settings_icon(screen_width, screen_height, active=False):
+    """Icône Settings (engrenage) en haut à gauche — Moon mode."""
+    global windowSurfaceObj, _font_cache
+    icon_size = 50
+    margin = 15
+    bg = (60, 80, 100) if active else (40, 50, 60)
+    border = (120, 160, 200) if active else (70, 90, 110)
+    icon_rect = pygame.Rect(margin, margin, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border, icon_rect, 2, border_radius=8)
+    ck = 22
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    s = f.render("SET", True, (200, 220, 240))
+    windowSurfaceObj.blit(s, s.get_rect(center=icon_rect.center))
+    return icon_rect
+
+
+def draw_moon_rec_button(screen_width, screen_height, is_recording=False, elapsed_str="00:00"):
+    """Bouton REC en haut à droite — Moon mode."""
+    global windowSurfaceObj, _font_cache, moon_rec_blink
+    icon_size = 50
+    margin = 15
+    icon_x = screen_width - icon_size - margin
+    if is_recording:
+        moon_rec_blink = 1 - moon_rec_blink
+        bg = (180, 40, 40) if moon_rec_blink else (120, 30, 30)
+    else:
+        bg = (50, 60, 70)
+    border = (220, 80, 80) if is_recording else (80, 100, 110)
+    icon_rect = pygame.Rect(icon_x, margin, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border, icon_rect, 2, border_radius=8)
+    ck = 19
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    tc = (255, 200, 200) if is_recording else (160, 180, 190)
+    l1 = f.render("REC" if not is_recording else "■ REC", True, tc)
+    l2 = f.render(elapsed_str, True, tc)
+    cx, cy = icon_rect.centerx, icon_rect.centery
+    windowSurfaceObj.blit(l1, l1.get_rect(centerx=cx, centery=cy - 8))
+    windowSurfaceObj.blit(l2, l2.get_rect(centerx=cx, centery=cy + 8))
+    return icon_rect
+
+
+def draw_moon_exit_button(screen_width, screen_height):
+    """Bouton EXIT en bas à gauche — Moon mode."""
+    global windowSurfaceObj, _font_cache
+    icon_size = 50
+    margin = 15
+    icon_rect = pygame.Rect(margin, screen_height - icon_size - margin, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, (70, 60, 60), icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, (120, 100, 100), icon_rect, 2, border_radius=8)
+    ck = 22
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    windowSurfaceObj.blit(_font_cache[ck].render("EXIT", True, (200, 180, 180)),
+                          _font_cache[ck].render("EXIT", True, (200, 180, 180)).get_rect(center=icon_rect.center))
+    return icon_rect
+
+
+def draw_moon_hist_button(screen_width, screen_height, hist_visible=True):
+    """Bouton HIST (toggle histogramme) en bas à gauche, à droite de EXIT — Moon mode."""
+    global windowSurfaceObj, _font_cache
+    icon_size = 50
+    margin = 15
+    icon_rect = pygame.Rect(margin + icon_size + margin,
+                            screen_height - icon_size - margin, icon_size, icon_size)
+    bg     = (50, 80, 110) if hist_visible else (40, 45, 55)
+    border = (100, 160, 200) if hist_visible else (70, 80, 90)
+    tc     = (160, 210, 240) if hist_visible else (100, 110, 120)
+    pygame.draw.rect(windowSurfaceObj, bg, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border, icon_rect, 2, border_radius=8)
+    ck = 19
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    cx, cy = icon_rect.centerx, icon_rect.centery
+    windowSurfaceObj.blit(f.render("HIST", True, tc),
+                          f.render("HIST", True, tc).get_rect(centerx=cx, centery=cy - 8))
+    windowSurfaceObj.blit(f.render("ON" if hist_visible else "OFF", True, tc),
+                          f.render("ON" if hist_visible else "OFF", True, tc).get_rect(centerx=cx, centery=cy + 8))
+    return icon_rect
+
+
+def is_click_on_moon_hist(mx, my, screen_width, screen_height):
+    icon_size = 50; margin = 15
+    ix = margin + icon_size + margin
+    iy = screen_height - icon_size - margin
+    return ix <= mx <= ix + icon_size and iy <= my <= iy + icon_size
+
+
+def draw_moon_snap_button(screen_width, screen_height):
+    """Bouton SNAP (sauvegarde JPG) en bas à droite — Moon mode."""
+    global windowSurfaceObj, _font_cache
+    icon_size = 50
+    margin = 15
+    icon_rect = pygame.Rect(screen_width - icon_size - margin,
+                            screen_height - icon_size - margin, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, (50, 90, 70), icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, (80, 160, 120), icon_rect, 2, border_radius=8)
+    ck = 19
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    cx, cy = icon_rect.centerx, icon_rect.centery
+    windowSurfaceObj.blit(f.render("SNAP", True, (160, 240, 200)),
+                          f.render("SNAP", True, (160, 240, 200)).get_rect(centerx=cx, centery=cy - 8))
+    windowSurfaceObj.blit(f.render("JPG", True, (120, 200, 160)),
+                          f.render("JPG", True, (120, 200, 160)).get_rect(centerx=cx, centery=cy + 8))
+    return icon_rect
+
+
+def draw_moon_binning_button(screen_width, screen_height, binning_active=True):
+    """Bouton BINNING en bas à droite, à gauche de SNAP — Moon mode."""
+    global windowSurfaceObj, _font_cache
+    icon_size = 50
+    margin = 15
+    icon_x = screen_width - 2 * icon_size - 2 * margin
+    icon_y = screen_height - icon_size - margin
+    bg     = (60, 100, 150) if binning_active else (50, 60, 70)
+    border = (100, 160, 220) if binning_active else (80, 100, 110)
+    tc     = (180, 220, 255) if binning_active else (160, 180, 190)
+    icon_rect = pygame.Rect(icon_x, icon_y, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border, icon_rect, 2, border_radius=8)
+    ck = 19
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    cx, cy = icon_rect.centerx, icon_rect.centery
+    windowSurfaceObj.blit(f.render("BIN", True, tc),
+                          f.render("BIN", True, tc).get_rect(centerx=cx, centery=cy - 8))
+    windowSurfaceObj.blit(f.render("2x2" if binning_active else "OFF", True, tc),
+                          f.render("2x2" if binning_active else "OFF", True, tc).get_rect(centerx=cx, centery=cy + 8))
+    return icon_rect
+
+
+def _moon_ge_slider_positions(screen_height, screen_width=1920):
+    """Positions des sliders Gain/Expo Moon (haut-centre, sous les icônes)."""
+    slider_w = 300
+    slider_h = 30
+    sx = (screen_width - slider_w) // 2
+    sy_expo = 75    # juste sous les icônes du haut (margin 15 + size 50 + 10)
+    sy_gain = sy_expo + slider_h + 8
+    return sx, sy_gain, sy_expo, slider_w, slider_h
+
+
+def draw_moon_gain_exposure(screen_width, screen_height):
+    """Dessine les sliders Gain et Exposition en haut-centre — Moon mode."""
+    global windowSurfaceObj, _font_cache, moon_gain, moon_exposure_us
+    sx, sy_gain, sy_expo, slider_w, slider_h = _moon_ge_slider_positions(screen_height, screen_width)
+
+    min_exp_ms, max_exp_ms = 1, 1000
+    min_exp_us = min_exp_ms * 1000
+    max_exp_us = max_exp_ms * 1000
+
+    import math
+    exp_c  = max(min_exp_us, min(moon_exposure_us, max_exp_us))
+    log_min, log_max = math.log10(min_exp_us), math.log10(max_exp_us)
+    log_val = math.log10(exp_c)
+    expo_ratio = (log_val - log_min) / (log_max - log_min)
+
+    ck = 22
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    fontObj = _font_cache[ck]
+
+    expo_ms = moon_exposure_us / 1000.0
+    expo_text = f"Expo: {expo_ms:.1f}ms" if expo_ms < 10 else f"Expo: {expo_ms:.0f}ms"
+
+    for sy, label, ratio, color in [
+        (sy_expo, expo_text, expo_ratio,             (80, 120, 160)),
+        (sy_gain, f"Gain: {moon_gain}", (moon_gain - 1) / 299.0, (120, 100, 60)),
+    ]:
+        bg_rect = pygame.Rect(sx, sy, slider_w, slider_h)
+        pygame.draw.rect(windowSurfaceObj, (40, 40, 50), bg_rect, border_radius=5)
+        pygame.draw.rect(windowSurfaceObj, (80, 80, 90), bg_rect, 1, border_radius=5)
+        fill_w = int(min(1.0, ratio) * (slider_w - 10))
+        if fill_w > 0:
+            pygame.draw.rect(windowSurfaceObj, color,
+                             pygame.Rect(sx + 5, sy + 5, fill_w, slider_h - 10), border_radius=3)
+        lbl = fontObj.render(label, True, (200, 200, 200))
+        windowSurfaceObj.blit(lbl, lbl.get_rect(center=bg_rect.center))
+
+
+def is_click_on_moon_gain_slider(mx, my, screen_width, screen_height):
+    """Retourne nouvelle valeur gain (1-300) ou None."""
+    sx, sy_gain, _, slider_w, slider_h = _moon_ge_slider_positions(screen_height, screen_width)
+    if sx <= mx <= sx + slider_w and sy_gain <= my <= sy_gain + slider_h:
+        return max(1, min(300, int(1 + (mx - sx) / slider_w * 299)))
+    return None
+
+
+def is_click_on_moon_exposure_slider(mx, my, screen_width, screen_height):
+    """Retourne nouvelle valeur expo en µs ou None."""
+    import math
+    sx, _, sy_expo, slider_w, slider_h = _moon_ge_slider_positions(screen_height, screen_width)
+    if sx <= mx <= sx + slider_w and sy_expo <= my <= sy_expo + slider_h:
+        ratio   = max(0.0, min(1.0, (mx - sx) / slider_w))
+        log_min = math.log10(1000)
+        log_max = math.log10(1000000)
+        return int(10 ** (log_min + ratio * (log_max - log_min)))
+    return None
+
+
+def is_click_on_moon_settings(mx, my):
+    icon_size = 50; margin = 15
+    return margin <= mx <= margin + icon_size and margin <= my <= margin + icon_size
+
+
+def is_click_on_moon_rec(mx, my, screen_width):
+    icon_size = 50; margin = 15
+    ix = screen_width - icon_size - margin
+    return ix <= mx <= ix + icon_size and margin <= my <= margin + icon_size
+
+
+def is_click_on_moon_exit(mx, my, screen_height):
+    icon_size = 50; margin = 15
+    iy = screen_height - icon_size - margin
+    return margin <= mx <= margin + icon_size and iy <= my <= iy + icon_size
+
+
+def is_click_on_moon_snap(mx, my, screen_width, screen_height):
+    icon_size = 50; margin = 15
+    ix = screen_width - icon_size - margin
+    iy = screen_height - icon_size - margin
+    return ix <= mx <= ix + icon_size and iy <= my <= iy + icon_size
+
+
+def is_click_on_moon_binning(mx, my, screen_width, screen_height):
+    icon_size = 50; margin = 15
+    ix = screen_width - 2 * icon_size - 2 * margin
+    iy = screen_height - icon_size - margin
+    return ix <= mx <= ix + icon_size and iy <= my <= iy + icon_size
+
+
+def draw_moon_histogram(bgr_frame, sw, sh):
+    """Histogramme RGB en courbes polylignes — normalisation par canal — bas-centre."""
+    global windowSurfaceObj
+    bins  = 128
+    h_w, h_h = 520, 80
+    hx = (sw - h_w) // 2
+    hy = sh - h_h - 10
+    inner_h = h_h - 8
+    base_y  = hy + h_h - 4
+    # Fond semi-transparent
+    surf = pygame.Surface((h_w, h_h), pygame.SRCALPHA)
+    surf.fill((15, 15, 25, 170))
+    windowSurfaceObj.blit(surf, (hx, hy))
+    pygame.draw.rect(windowSurfaceObj, (50, 60, 80), (hx, hy, h_w, h_h), 1)
+    # Échantillonner 1 pixel sur 4 (perf)
+    sample = bgr_frame[::4, ::4]
+    # B, G, R — chaque canal normalisé à son propre max (courbe toujours visible)
+    # Ordre de dessin : B d'abord, R en dernier (par-dessus)
+    for ch_idx, color in [(0, (80, 130, 255)), (1, (60, 220, 60)), (2, (255, 50, 50))]:
+        hist, _ = np.histogram(sample[:, :, ch_idx].ravel(), bins=bins, range=(0, 256))
+        max_v = float(hist.max()) if hist.max() > 0 else 1.0
+        hist_norm = hist / max_v
+        pts = [(hx + 2 + int(i * (h_w - 4) / bins),
+                base_y - int(v * inner_h))
+               for i, v in enumerate(hist_norm)]
+        if len(pts) >= 2:
+            pygame.draw.lines(windowSurfaceObj, color, False, pts, 2)
+    # Légende B G R
+    ck = 16
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    for label, color, ox in [("B", (80, 130, 255), 4), ("G", (60, 220, 60), 18), ("R", (255, 50, 50), 32)]:
+        windowSurfaceObj.blit(f.render(label, True, color), (hx + ox, hy + 2))
+
+
+def draw_moon_controls(screen_width, screen_height):
+    """
+    Panneau de contrôle Moon côté droit.
+    Retourne dict des rects de sliders pour détection clics.
+    """
+    global windowSurfaceObj, _font_cache
+    global moon_sat_factor, moon_sat_iter, moon_lum_protect
+    global moon_noise_enabled, moon_noise_strength
+    global moon_lrgb_enabled, moon_lrgb_weight
+    global moon_wb_r, moon_wb_g, moon_wb_b, moon_preset, moon_processor
+
+    panel_w   = 230
+    panel_m   = 10
+    panel_x   = screen_width - panel_w - panel_m
+    start_y   = 80
+    slider_w  = panel_w - 10
+    slider_h  = 28
+    margin    = 5
+    control_rects = {}
+
+    # Fond semi-transparent
+    panel_h = screen_height - start_y - 70
+    surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+    surf.fill((20, 30, 40, 190))
+    windowSurfaceObj.blit(surf, (panel_x, start_y - 10))
+
+    # Titre
+    ck = 26
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    title = _font_cache[ck].render("MINERAL MOON", True, (180, 210, 240))
+    windowSurfaceObj.blit(title, (panel_x, start_y - 15))
+    start_y += 20
+
+    # Boost par passe (info)
+    ck2 = 18
+    if ck2 not in _font_cache:
+        _font_cache[ck2] = pygame.font.Font(None, ck2)
+    if moon_processor is not None:
+        bpp = _font_cache[ck2].render(moon_processor.boost_per_pass_str(), True, (160, 200, 160))
+        windowSurfaceObj.blit(bpp, (panel_x + 2, start_y))
+    start_y += 16
+
+    # --- Saturation ---
+    control_rects['moon_sat_factor'] = draw_jsk_slider(
+        panel_x, start_y, slider_w, slider_h,
+        f"Sat: x{moon_sat_factor/10:.1f}", moon_sat_factor, 10, 60, (140, 100, 180))
+    start_y += slider_h + margin
+
+    control_rects['moon_sat_iter'] = draw_jsk_slider(
+        panel_x, start_y, slider_w, slider_h,
+        f"Passes: {moon_sat_iter}", moon_sat_iter, 1, 8, (120, 140, 180))
+    start_y += slider_h + margin
+
+    # --- Protection ---
+    control_rects['moon_lum_protect'] = draw_jsk_slider(
+        panel_x, start_y, slider_w, slider_h,
+        f"Protect L: {moon_lum_protect}", moon_lum_protect, 100, 255, (180, 160, 80))
+    start_y += slider_h + margin + 4
+
+    # --- Denoise ---
+    noise_label = f"Denoise: {'ON' if moon_noise_enabled else 'OFF'}"
+    control_rects['moon_noise_en'] = draw_jsk_slider(
+        panel_x, start_y, slider_w, slider_h,
+        noise_label, moon_noise_enabled, 0, 1, (100, 160, 140))
+    start_y += slider_h + margin
+
+    if moon_noise_enabled:
+        control_rects['moon_noise_str'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Force: {moon_noise_strength}", moon_noise_strength, 3, 11, (80, 140, 120))
+        start_y += slider_h + margin
+    start_y += 4
+
+    # --- LRGB ---
+    lrgb_label = f"LRGB: {'ON' if moon_lrgb_enabled else 'OFF'}"
+    control_rects['moon_lrgb_en'] = draw_jsk_slider(
+        panel_x, start_y, slider_w, slider_h,
+        lrgb_label, moon_lrgb_enabled, 0, 1, (160, 120, 180))
+    start_y += slider_h + margin
+
+    if moon_lrgb_enabled:
+        control_rects['moon_lrgb_w'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Poids: {moon_lrgb_weight/100:.2f}", moon_lrgb_weight, 10, 100, (140, 100, 160))
+        start_y += slider_h + margin
+    start_y += 4
+
+    # --- WB Manuel ---
+    ck3 = 20
+    if ck3 not in _font_cache:
+        _font_cache[ck3] = pygame.font.Font(None, ck3)
+    wb_title = _font_cache[ck3].render("WB Manuel", True, (180, 200, 220))
+    windowSurfaceObj.blit(wb_title, (panel_x + 2, start_y))
+    start_y += 16
+
+    control_rects['moon_wb_r'] = draw_jsk_slider(
+        panel_x, start_y, slider_w, slider_h,
+        f"R: {moon_wb_r/100:.2f}", moon_wb_r, 50, 250, (180, 80, 80))
+    start_y += slider_h + margin
+
+    control_rects['moon_wb_g'] = draw_jsk_slider(
+        panel_x, start_y, slider_w, slider_h,
+        f"G: {moon_wb_g/100:.2f}", moon_wb_g, 50, 250, (80, 180, 80))
+    start_y += slider_h + margin
+
+    control_rects['moon_wb_b'] = draw_jsk_slider(
+        panel_x, start_y, slider_w, slider_h,
+        f"B: {moon_wb_b/100:.2f}", moon_wb_b, 50, 250, (80, 100, 200))
+    start_y += slider_h + margin + 4
+
+    # --- Zoom ---
+    control_rects['moon_zoom'] = draw_jsk_slider(
+        panel_x, start_y, slider_w, slider_h,
+        f"Zoom: {zoom}x", zoom, 0, 5, (100, 160, 160))
+
+    return control_rects
+
+
+def handle_moon_slider_click(mx, my, control_rects):
+    """
+    Gère le clic sur un slider du panneau Moon.
+    Retourne True si un contrôle a été modifié.
+    """
+    global moon_sat_factor, moon_sat_iter, moon_lum_protect
+    global moon_noise_enabled, moon_noise_strength
+    global moon_lrgb_enabled, moon_lrgb_weight
+    global moon_wb_r, moon_wb_g, moon_wb_b, moon_preset, moon_processor
+    global zoom, vwidth, vheight, capture_thread, picam2
+
+    for name, rect in control_rects.items():
+        if not rect.collidepoint(mx, my):
+            continue
+
+        rel_x = mx - rect.x - 7
+        ratio = max(0.0, min(1.0, rel_x / (rect.width - 15)))
+
+        if name == 'moon_sat_factor':
+            moon_sat_factor = int(10 + ratio * 50)
+        elif name == 'moon_sat_iter':
+            moon_sat_iter = max(1, min(8, int(1 + ratio * 7)))
+        elif name == 'moon_lum_protect':
+            moon_lum_protect = int(100 + ratio * 155)
+        elif name == 'moon_noise_en':
+            moon_noise_enabled = 1 if ratio >= 0.5 else 0
+        elif name == 'moon_noise_str':
+            raw = int(3 + ratio * 8)
+            moon_noise_strength = raw if raw % 2 == 1 else raw + 1
+            moon_noise_strength = max(3, min(11, moon_noise_strength))
+        elif name == 'moon_lrgb_en':
+            moon_lrgb_enabled = 1 if ratio >= 0.5 else 0
+        elif name == 'moon_lrgb_w':
+            moon_lrgb_weight = max(10, min(100, int(10 + ratio * 90)))
+        elif name == 'moon_wb_r':
+            moon_wb_r = max(50, min(250, int(50 + ratio * 200)))
+            if picam2 is not None:
+                try:
+                    picam2.set_controls({"ColourGains": (moon_wb_b / 100.0, moon_wb_r / 100.0)})
+                except Exception:
+                    pass
+        elif name == 'moon_wb_g':
+            moon_wb_g = max(50, min(250, int(50 + ratio * 200)))
+            # Gain vert appliqué en post-traitement OpenCV (pas via ISP)
+        elif name == 'moon_wb_b':
+            moon_wb_b = max(50, min(250, int(50 + ratio * 200)))
+            if picam2 is not None:
+                try:
+                    picam2.set_controls({"ColourGains": (moon_wb_b / 100.0, moon_wb_r / 100.0)})
+                except Exception:
+                    pass
+        elif name == 'moon_zoom':
+            new_zoom = max(0, min(5, int(ratio * 5 + 0.5)))
+            if new_zoom != zoom:
+                zoom = new_zoom
+                sync_video_resolution_with_zoom()
+                kill_preview_process()
+                preview()
+                # Restaurer AWB manuel après reconfiguration
+                if picam2 is not None:
+                    try:
+                        picam2.set_controls({
+                            "AwbEnable": False,
+                            "ColourGains": (moon_wb_b / 100.0, moon_wb_r / 100.0)
+                        })
+                    except Exception:
+                        pass
+
+        # Mettre à jour le processor (sauf zoom qui gère lui-même)
+        if name != 'moon_zoom':
+            if moon_processor is not None:
+                moon_processor.configure(
+                    saturation_factor=moon_sat_factor / 10.0,
+                    saturation_iterations=moon_sat_iter,
+                    luminance_protect=moon_lum_protect,
+                    noise_reduction=moon_noise_enabled == 1,
+                    noise_strength=moon_noise_strength,
+                    lrgb_composite=moon_lrgb_enabled == 1,
+                    lrgb_color_weight=moon_lrgb_weight / 100.0,
+                )
+        return True
+
+    return False
+
+
+# ============================================================================
+# FIN MINERAL MOON FULLSCREEN CONTROLS
 # ============================================================================
 
 
@@ -9835,8 +10471,11 @@ def Menu():
         button(0,2,2,4)
         text(0,2,8,0,1,"        COLIM",ft,2)
 
-        # Boutons 3-7 vides pour futures extensions
-        button(0,3,0,4)
+        # Bouton 3 - MOON (bleu marine)
+        button(0,3,10,4)
+        text(0,3,6,0,1,"        MOON",ft,13)
+
+        # Boutons 4-7 vides pour futures extensions
         button(0,4,0,4)
         button(0,5,0,4)
         button(0,6,0,4)
@@ -10104,23 +10743,71 @@ while True:
                 pygame.display.update()
                 frame_from_thread = None  # Empecher le traitement normal
 
+            # === MINERAL MOON MODE: Post-traitement sur flux ISP (main stream) ===
+            if moon_mode == 1 and moon_processor is not None:
+                display_modes = pygame.display.list_modes()
+                if display_modes and display_modes != -1:
+                    max_width, max_height = display_modes[0]
+                else:
+                    screen_info = pygame.display.Info()
+                    max_width, max_height = screen_info.current_w, screen_info.current_h
+
+                if frame_from_thread is not None and len(frame_from_thread.shape) == 3:
+                    # frame_from_thread est RGB888 (ISP main stream)
+                    frame_bgr = cv2.cvtColor(frame_from_thread, cv2.COLOR_RGB2BGR)
+                    # Gain vert (canal G=1 en BGR) appliqué avant le traitement Moon
+                    if moon_wb_g != 100:
+                        g_gain = moon_wb_g / 100.0
+                        frame_bgr = frame_bgr.copy()
+                        frame_bgr[:, :, 1] = np.clip(
+                            frame_bgr[:, :, 1].astype(np.float32) * g_gain, 0, 255
+                        ).astype(np.uint8)
+                    moon_result_bgr = moon_processor.process(frame_bgr)
+                    _moon_last_frame_bgr = moon_result_bgr  # pour SNAP
+                    moon_result_rgb = cv2.cvtColor(moon_result_bgr, cv2.COLOR_BGR2RGB)
+                    moon_surface = pygame.surfarray.make_surface(np.swapaxes(moon_result_rgb, 0, 1))
+                    moon_surface = pygame.transform.scale(moon_surface, (max_width, max_height))
+                    _moon_last_surface = moon_surface
+                    windowSurfaceObj.blit(moon_surface, (0, 0))
+                    if moon_recorder is not None and moon_recorder.is_recording:
+                        moon_recorder.write_frame(moon_result_rgb)
+                else:
+                    if _moon_last_surface is not None:
+                        windowSurfaceObj.blit(_moon_last_surface, (0, 0))
+                    else:
+                        windowSurfaceObj.fill((0, 0, 0))
+
+                frame_from_thread = None  # Empêcher le traitement normal
+
+                # Histogramme RGB (toggle via bouton HIST)
+                if moon_histogram_visible == 1 and _moon_last_frame_bgr is not None:
+                    draw_moon_histogram(_moon_last_frame_bgr, max_width, max_height)
+
+                # Boutons permanents
+                draw_moon_settings_icon(max_width, max_height, moon_settings_visible == 1)
+                elapsed_str = "00:00"
+                if moon_recorder is not None and moon_recorder.is_recording:
+                    elapsed_str = moon_recorder.get_elapsed_str()
+                draw_moon_rec_button(max_width, max_height,
+                                     moon_recorder is not None and moon_recorder.is_recording,
+                                     elapsed_str)
+                draw_moon_binning_button(max_width, max_height, moon_binning == 1)
+                draw_moon_snap_button(max_width, max_height)
+                draw_moon_exit_button(max_width, max_height)
+                draw_moon_hist_button(max_width, max_height, moon_histogram_visible == 1)
+                draw_moon_gain_exposure(max_width, max_height)
+
+                if moon_settings_visible == 1:
+                    _moon_slider_rects = draw_moon_controls(max_width, max_height)
+
             # === JSK LIVE MODE: Traitement dédié dans le chemin Picamera2 ===
             # Le pipeline JSK LIVE (HDR + Denoise) remplace le pipeline normal (debayer + ISP)
             # Ce bloc DOIT être avant le traitement normal pour éviter le debayering inutile
             if jsk_live_mode == 1 and jsk_processor is not None:
                 jsk_raw_input = None
 
-                # DEBUG JSK LIVE - compteur pour limiter les prints
-                if not hasattr(pygame, '_jsk_debug_count'):
-                    pygame._jsk_debug_count = 0
-                pygame._jsk_debug_count += 1
-                # Print les 10 premières itérations, puis toutes les 100
-                jsk_debug = (pygame._jsk_debug_count <= 10 or pygame._jsk_debug_count % 100 == 0)
-
                 if frame_from_thread is not None:
                     raw_array = frame_from_thread
-                    if jsk_debug:
-                        print(f"[JSK DEBUG] Frame reçue: shape={raw_array.shape}, dtype={raw_array.dtype}, min={raw_array.min()}, max={raw_array.max()}")
                     if len(raw_array.shape) == 2:
                         # Frame RAW valide (2D Bayer)
                         # IMPORTANT: capture_array("raw") retourne souvent des octets empaquetés (uint8)
@@ -10130,9 +10817,6 @@ while True:
                             raw_uint16 = raw_array.view(np.uint16)
                             pixel_width = raw_stream_size[0]  # Largeur en pixels (ex: 1928)
                             jsk_raw_input = raw_uint16[:, :pixel_width]
-                            if jsk_debug:
-                                print(f"[JSK DEBUG] Unpack uint8→uint16: ({raw_array.shape}) → ({jsk_raw_input.shape}), "
-                                      f"min={jsk_raw_input.min()}, max={jsk_raw_input.max()}")
                         elif raw_array.dtype == np.uint16:
                             # Déjà en uint16 - vérifier si padding à retirer
                             pixel_width = raw_stream_size[0]
@@ -10140,28 +10824,18 @@ while True:
                                 jsk_raw_input = raw_array[:, :pixel_width]
                             else:
                                 jsk_raw_input = raw_array
-                            if jsk_debug:
-                                print(f"[JSK DEBUG] uint16 direct: shape={jsk_raw_input.shape}, "
-                                      f"min={jsk_raw_input.min()}, max={jsk_raw_input.max()}")
                         else:
                             jsk_raw_input = raw_array
 
                         # Normaliser vers 12-bit (0-4095) si les valeurs dépassent
                         if jsk_raw_input is not None and jsk_raw_input.max() > 4095:
                             max_val = jsk_raw_input.max()
-                            if jsk_debug:
-                                print(f"[JSK DEBUG] Normalisation {max_val} → 12-bit (0-4095)")
                             jsk_raw_input = (jsk_raw_input.astype(np.float32) / max_val * 4095).astype(np.uint16)
                     else:
                         # Frame ISP reçue (3D) → forcer le mode RAW pour les prochaines captures
-                        if jsk_debug:
-                            print(f"[JSK DEBUG] Frame ISP (3D) reçue au lieu de RAW (2D) → forçage mode RAW")
                         if capture_thread is not None:
                             capture_thread.set_capture_params({'type': 'raw'})
                     frame_from_thread = None  # Empêcher le traitement normal
-                else:
-                    if jsk_debug:
-                        print(f"[JSK DEBUG] Pas de frame disponible (frame_from_thread=None)")
 
                 # Dimensions écran fullscreen
                 display_modes = pygame.display.list_modes()
@@ -10173,37 +10847,40 @@ while True:
 
                 # Traitement image RAW avec pipeline JSK (HDR + Denoise)
                 if jsk_raw_input is not None:
-                    if jsk_debug:
-                        print(f"[JSK DEBUG] Pipeline JSK: hdr_method={jsk_processor.hdr_method} ({jsk_processor.hdr_methods[jsk_processor.hdr_method]}), "
-                              f"bits_clip={jsk_processor.hdr_bits_clip}, denoise={jsk_processor.denoise_type}, "
-                              f"stack={jsk_processor.stack_count}")
                     jsk_result = jsk_processor.process_single(jsk_raw_input)
-                    if jsk_debug:
-                        if jsk_result is not None:
-                            print(f"[JSK DEBUG] Résultat process_single: shape={jsk_result.shape}, dtype={jsk_result.dtype}, "
-                                  f"min={jsk_result.min()}, max={jsk_result.max()}, mean={jsk_result.mean():.1f}")
-                        else:
-                            print(f"[JSK DEBUG] process_single a retourné None!")
                     if jsk_result is not None:
                         # Appliquer le stretch si activé
                         if stretch_preset != 0:
                             jsk_result = astro_stretch(jsk_result)
-                            if jsk_debug:
-                                print(f"[JSK DEBUG] Après stretch: min={jsk_result.min()}, max={jsk_result.max()}, mean={jsk_result.mean():.1f}")
-                        # Convertir en surface pygame et afficher en plein écran
+                        # Convertir en surface pygame
                         jsk_surface = pygame.surfarray.make_surface(np.swapaxes(jsk_result, 0, 1))
-                        jsk_surface = pygame.transform.scale(jsk_surface, (max_width, max_height))
-                        _jsk_last_surface = jsk_surface
-                        windowSurfaceObj.blit(jsk_surface, (0, 0))
-                        if jsk_debug:
-                            print(f"[JSK DEBUG] Image affichée: {max_width}x{max_height}")
+                        # Affichage: letterbox si crop carré, plein écran sinon
+                        if jsk_crop_square:
+                            img_h = jsk_result.shape[0]
+                            img_w = jsk_result.shape[1]
+                            # Scale pour tenir dans max_height (image carrée → hauteur = max_height)
+                            scaled_size = min(max_height, max_width)
+                            jsk_surface_scaled = pygame.transform.scale(jsk_surface, (scaled_size, scaled_size))
+                            windowSurfaceObj.fill((0, 0, 0))
+                            blit_x = (max_width - scaled_size) // 2
+                            blit_y = (max_height - scaled_size) // 2
+                            windowSurfaceObj.blit(jsk_surface_scaled, (blit_x, blit_y))
+                            _jsk_last_surface = jsk_surface_scaled
+                            _jsk_last_blit_pos = (blit_x, blit_y)
+                        else:
+                            jsk_surface = pygame.transform.scale(jsk_surface, (max_width, max_height))
+                            _jsk_last_surface = jsk_surface
+                            _jsk_last_blit_pos = (0, 0)
+                            windowSurfaceObj.blit(jsk_surface, (0, 0))
                         # Enregistrer la frame si recording actif
                         if jsk_recorder is not None and jsk_recorder.is_recording:
                             jsk_recorder.write_frame(jsk_result)
                 else:
                     # Pas de nouvelle frame: réafficher la dernière image valide
                     if _jsk_last_surface is not None:
-                        windowSurfaceObj.blit(_jsk_last_surface, (0, 0))
+                        if jsk_crop_square:
+                            windowSurfaceObj.fill((0, 0, 0))
+                        windowSurfaceObj.blit(_jsk_last_surface, _jsk_last_blit_pos)
                     else:
                         windowSurfaceObj.fill((0, 0, 0))
 
@@ -10215,6 +10892,8 @@ while True:
                 draw_jsk_rec_button(max_width, max_height,
                                    jsk_recorder is not None and jsk_recorder.is_recording,
                                    elapsed_str)
+                draw_jsk_binning_button(max_width, max_height, jsk_binning == 1)
+                draw_jsk_crop_button(max_width, max_height, jsk_crop_square == 1)
                 draw_jsk_exit_button(max_width, max_height)
 
                 # Sliders Gain/Expo toujours visibles en bas a gauche
@@ -10899,9 +11578,21 @@ while True:
 
                         # Convertir en surface pygame
                         jsk_surface = pygame.surfarray.make_surface(np.swapaxes(jsk_result, 0, 1))
-                        jsk_surface = pygame.transform.scale(jsk_surface, (max_width, max_height))
-                        _jsk_last_surface = jsk_surface
-                        windowSurfaceObj.blit(jsk_surface, (0, 0))
+                        # Affichage: letterbox si crop carré, plein écran sinon
+                        if jsk_crop_square:
+                            scaled_size = min(max_height, max_width)
+                            jsk_surface_scaled = pygame.transform.scale(jsk_surface, (scaled_size, scaled_size))
+                            windowSurfaceObj.fill((0, 0, 0))
+                            blit_x = (max_width - scaled_size) // 2
+                            blit_y = (max_height - scaled_size) // 2
+                            windowSurfaceObj.blit(jsk_surface_scaled, (blit_x, blit_y))
+                            _jsk_last_surface = jsk_surface_scaled
+                            _jsk_last_blit_pos = (blit_x, blit_y)
+                        else:
+                            jsk_surface = pygame.transform.scale(jsk_surface, (max_width, max_height))
+                            _jsk_last_surface = jsk_surface
+                            _jsk_last_blit_pos = (0, 0)
+                            windowSurfaceObj.blit(jsk_surface, (0, 0))
 
                         # Enregistrer la frame si recording actif
                         if jsk_recorder is not None and jsk_recorder.is_recording:
@@ -10909,7 +11600,9 @@ while True:
                 else:
                     # Pas de nouvelle frame: réafficher la dernière image valide
                     if _jsk_last_surface is not None:
-                        windowSurfaceObj.blit(_jsk_last_surface, (0, 0))
+                        if jsk_crop_square:
+                            windowSurfaceObj.fill((0, 0, 0))
+                        windowSurfaceObj.blit(_jsk_last_surface, _jsk_last_blit_pos)
                     else:
                         windowSurfaceObj.fill((0, 0, 0))
 
@@ -10922,6 +11615,8 @@ while True:
                 draw_jsk_rec_button(max_width, max_height,
                                    jsk_recorder is not None and jsk_recorder.is_recording,
                                    elapsed_str)
+                draw_jsk_binning_button(max_width, max_height, jsk_binning == 1)
+                draw_jsk_crop_button(max_width, max_height, jsk_crop_square == 1)
                 draw_jsk_exit_button(max_width, max_height)
 
                 # Sliders Gain/Expo toujours visibles en bas a gauche
@@ -10932,7 +11627,7 @@ while True:
                     _jsk_slider_rects = draw_jsk_controls(max_width, max_height, None)
 
     # Ne pas afficher les overlays en mode stretch ou JSK LIVE
-    if (zoom > 0 or foc_man == 1 or focus_mode == 1 or histogram > 0) and stretch_mode == 0 and jsk_live_mode == 0 and collimation_mode == 0:
+    if (zoom > 0 or foc_man == 1 or focus_mode == 1 or histogram > 0) and stretch_mode == 0 and jsk_live_mode == 0 and collimation_mode == 0 and moon_mode == 0:
         # Utiliser array3d au lieu de pixels3d pour ne pas verrouiller la surface
         # Cela améliore grandement la fluidité de l'affichage en mode focus et histogram
         image2 = pygame.surfarray.array3d(image)
@@ -11036,8 +11731,6 @@ while True:
             graph = pygame.transform.flip(graph, 0, 1)
             graph.set_alpha(180)  # Légèrement plus opaque pour meilleure lisibilité
             # Plus besoin de scaling - déjà à la bonne taille !
-            # DEBUG: Cadre rouge pour visualiser les limites de l'histogramme
-            pygame.draw.rect(windowSurfaceObj, (255, 0, 0), Rect(0, hist_y, hist_width, hist_height), 2)
             # Afficher l'histogramme sur toute la largeur sans cadre
             windowSurfaceObj.blit(graph, (0, hist_y))
         
@@ -11313,8 +12006,32 @@ while True:
           if not use_picamera2 and p is not None:
               os.killpg(p.pid, signal.SIGTERM)
           pygame.quit()
-      # === JSK LIVE: gestion du drag des sliders (MOUSEBUTTONDOWN + MOUSEMOTION) ===
+      # === MOON / JSK LIVE: gestion du drag des sliders (MOUSEBUTTONDOWN + MOUSEMOTION) ===
       elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+        if moon_mode == 1:
+            mx, my = event.pos
+            display_modes = pygame.display.list_modes()
+            if display_modes and display_modes != -1:
+                _fs_w, _fs_h = display_modes[0]
+            else:
+                _si = pygame.display.Info()
+                _fs_w, _fs_h = _si.current_w, _si.current_h
+            new_g = is_click_on_moon_gain_slider(mx, my, _fs_w, _fs_h)
+            if new_g is not None:
+                moon_gain = new_g
+                apply_controls_immediately(gain_value=moon_gain)
+                _moon_ge_dragging = 'gain'
+                continue
+            new_e = is_click_on_moon_exposure_slider(mx, my, _fs_w, _fs_h)
+            if new_e is not None:
+                moon_exposure_us = new_e
+                apply_controls_immediately(exposure_time=moon_exposure_us)
+                _moon_ge_dragging = 'expo'
+                continue
+            if moon_settings_visible == 1 and _moon_slider_rects:
+                if handle_moon_slider_click(mx, my, _moon_slider_rects):
+                    _moon_slider_dragging = True
+                    continue
         if jsk_live_mode == 1:
             mx, my = event.pos
             # Drag sliders gain/expo (toujours visibles)
@@ -11342,6 +12059,38 @@ while True:
                     _jsk_slider_dragging = True
                     continue
       elif event.type == pygame.MOUSEMOTION:
+        # Drag sliders gain/expo Moon
+        if _moon_ge_dragging is not None and moon_mode == 1:
+            buttons = pygame.mouse.get_pressed()
+            if buttons[0]:
+                mx, my = event.pos
+                display_modes = pygame.display.list_modes()
+                if display_modes and display_modes != -1:
+                    _fs_w, _fs_h = display_modes[0]
+                else:
+                    _si = pygame.display.Info()
+                    _fs_w, _fs_h = _si.current_w, _si.current_h
+                if _moon_ge_dragging == 'gain':
+                    new_g = is_click_on_moon_gain_slider(mx, my, _fs_w, _fs_h)
+                    if new_g is not None:
+                        moon_gain = new_g
+                        apply_controls_immediately(gain_value=moon_gain)
+                else:
+                    new_e = is_click_on_moon_exposure_slider(mx, my, _fs_w, _fs_h)
+                    if new_e is not None:
+                        moon_exposure_us = new_e
+                        apply_controls_immediately(exposure_time=moon_exposure_us)
+                continue
+            else:
+                _moon_ge_dragging = None
+        if _moon_slider_dragging and moon_mode == 1 and moon_settings_visible == 1 and _moon_slider_rects:
+            buttons = pygame.mouse.get_pressed()
+            if buttons[0]:
+                mx, my = event.pos
+                handle_moon_slider_click(mx, my, _moon_slider_rects)
+                continue
+            else:
+                _moon_slider_dragging = False
         # Drag sliders gain/expo JSK
         if _jsk_ge_dragging is not None and jsk_live_mode == 1:
             buttons = pygame.mouse.get_pressed()
@@ -11377,6 +12126,15 @@ while True:
       # MOVE HISTAREA
       elif (event.type == MOUSEBUTTONUP):
         mousex, mousey = event.pos
+        # Fin du drag Moon
+        if _moon_ge_dragging is not None:
+            _moon_ge_dragging = None
+            continue
+        if _moon_slider_dragging:
+            _moon_slider_dragging = False
+            if moon_mode == 1 and moon_settings_visible == 1 and _moon_slider_rects:
+                handle_moon_slider_click(mousex, mousey, _moon_slider_rects)
+            continue
         # Fin du drag JSK gain/expo
         if _jsk_ge_dragging is not None:
             _jsk_ge_dragging = None
@@ -11818,6 +12576,140 @@ while True:
 
             continue  # Rester en mode collimation
 
+        # ===== GESTION DES CLICS EN MODE MINERAL MOON =====
+        if moon_mode == 1:
+            display_modes = pygame.display.list_modes()
+            if display_modes and display_modes != -1:
+                fs_width, fs_height = display_modes[0]
+            else:
+                screen_info = pygame.display.Info()
+                fs_width, fs_height = screen_info.current_w, screen_info.current_h
+
+            # Settings
+            if is_click_on_moon_settings(mousex, mousey):
+                moon_settings_visible = 1 - moon_settings_visible
+                _moon_slider_rects = {}
+                _moon_slider_dragging = False
+                continue
+
+            # REC
+            if is_click_on_moon_rec(mousex, mousey, fs_width):
+                if moon_recorder is not None:
+                    if moon_recorder.is_recording:
+                        output_path = moon_recorder.stop()
+                        print(f"[MOON] Enregistrement arrêté: {output_path}")
+                    else:
+                        import datetime
+                        ts = datetime.datetime.now().strftime("%y%m%d%H%M%S")
+                        out = pic_dir + "moon_mineral_" + ts + ".mp4"
+                        rw, rh = vwidth, vheight
+                        if moon_recorder.start(out, rw, rh, fps=25):
+                            print(f"[MOON] Enregistrement démarré: {out} ({rw}×{rh})")
+                        else:
+                            print(f"[MOON] Erreur démarrage enregistrement")
+                continue
+
+            # BINNING
+            if is_click_on_moon_binning(mousex, mousey, fs_width, fs_height):
+                if moon_recorder is not None and moon_recorder.is_recording:
+                    moon_recorder.stop()
+                moon_binning = 1 - moon_binning
+                if moon_binning == 1:
+                    vwidth = 1920; vheight = 1080; use_native_sensor_mode = 0
+                else:
+                    vwidth = igw;  vheight = igh;  use_native_sensor_mode = 1
+                _moon_last_surface = None
+                kill_preview_process()
+                preview()
+                # Restaurer AWB manuel après reconfiguration caméra
+                if picam2 is not None:
+                    try:
+                        picam2.set_controls({
+                            "AwbEnable": False,
+                            "ColourGains": (moon_wb_b / 100.0, moon_wb_r / 100.0)
+                        })
+                    except Exception:
+                        pass
+                print(f"[MOON] Binning: {'ON' if moon_binning else 'OFF'}")
+                continue
+
+            # HIST — toggle affichage histogramme
+            if is_click_on_moon_hist(mousex, mousey, fs_width, fs_height):
+                moon_histogram_visible = 1 - moon_histogram_visible
+                continue
+
+            # SNAP — sauvegarder la dernière frame traitée en JPG
+            if is_click_on_moon_snap(mousex, mousey, fs_width, fs_height):
+                if _moon_last_frame_bgr is not None:
+                    import datetime
+                    ts = datetime.datetime.now().strftime("%y%m%d%H%M%S")
+                    snap_path = pic_dir + "moon_mineral_" + ts + ".jpg"
+                    cv2.imwrite(snap_path, _moon_last_frame_bgr,
+                                [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    print(f"[MOON] SNAP sauvegardé: {snap_path}")
+                else:
+                    print("[MOON] SNAP: pas d'image disponible")
+                continue
+
+            # EXIT
+            if is_click_on_moon_exit(mousex, mousey, fs_height):
+                moon_mode = 0
+                moon_settings_visible = 0
+                moon_binning = 1
+                _moon_slider_rects = {}
+                _moon_slider_dragging = False
+                _moon_ge_dragging = None
+                _moon_last_surface = None
+
+                if moon_recorder is not None and moon_recorder.is_recording:
+                    moon_recorder.stop()
+
+                # Restaurer AWB
+                if picam2 is not None:
+                    try:
+                        picam2.set_controls({"AwbEnable": True})
+                    except Exception:
+                        pass
+
+                # Restaurer paramètres caméra
+                vwidth = moon_saved_vwidth
+                vheight = moon_saved_vheight
+                zoom = moon_saved_zoom
+                use_native_sensor_mode = moon_saved_use_native
+                gain = moon_saved_gain
+                if moon_saved_exposure > 0:
+                    custom_sspeed = moon_saved_exposure
+
+                print("[MOON] Restauration configuration caméra")
+                kill_preview_process()
+                preview()
+
+                windowSurfaceObj.fill((0, 0, 0))
+                menu = 11
+                Menu()
+                pygame.display.update()
+                print("[MOON] Mode désactivé")
+                continue
+
+            # Sliders Gain/Expo
+            new_g = is_click_on_moon_gain_slider(mousex, mousey, fs_width, fs_height)
+            if new_g is not None:
+                moon_gain = new_g
+                apply_controls_immediately(gain_value=moon_gain)
+                continue
+            new_e = is_click_on_moon_exposure_slider(mousex, mousey, fs_width, fs_height)
+            if new_e is not None:
+                moon_exposure_us = new_e
+                apply_controls_immediately(exposure_time=moon_exposure_us)
+                continue
+
+            # Sliders settings panel
+            if moon_settings_visible == 1 and _moon_slider_rects:
+                if handle_moon_slider_click(mousex, mousey, _moon_slider_rects):
+                    continue
+
+            continue  # Rester en mode Moon
+
         # ===== GESTION DES CLICS EN MODE JSK LIVE =====
         if jsk_live_mode == 1:
             # Obtenir les dimensions de l'écran fullscreen
@@ -11835,6 +12727,44 @@ while True:
                 _jsk_slider_dragging = False
                 continue
 
+            # Vérifier si clic sur le bouton BINNING
+            if is_click_on_jsk_binning(mousex, mousey, fs_width, fs_height):
+                # Arrêter l'enregistrement si actif (la résolution va changer)
+                if jsk_recorder is not None and jsk_recorder.is_recording:
+                    output_path = jsk_recorder.stop()
+                    print(f"[JSK LIVE] Enregistrement arrêté (changement binning): {output_path}")
+                jsk_binning = 1 - jsk_binning  # Toggle
+                if jsk_binning == 1:
+                    # Mode binning 2×2 → 1928×1090
+                    vwidth = 1920
+                    vheight = 1080
+                    use_native_sensor_mode = 0
+                else:
+                    # Mode natif → résolution complète du capteur
+                    vwidth = igw
+                    vheight = igh
+                    use_native_sensor_mode = 1
+                if jsk_processor is not None:
+                    jsk_processor.clear_buffer()
+                _jsk_last_surface = None
+                _jsk_last_blit_pos = (0, 0)
+                kill_preview_process()
+                preview()
+                print(f"[JSK LIVE] Binning: {'ON (1928×1090)' if jsk_binning else 'OFF (' + str(igw) + '×' + str(igh) + ')'}")
+                continue
+
+            # Vérifier si clic sur le bouton CROP
+            if is_click_on_jsk_crop(mousex, mousey, fs_width, fs_height):
+                jsk_crop_square = 1 - jsk_crop_square  # Toggle
+                if jsk_processor is not None:
+                    jsk_processor.configure(crop_square=jsk_crop_square == 1)
+                    jsk_processor.clear_buffer()  # Vider le buffer de stacking (taille change)
+                _jsk_last_surface = None  # Forcer le réaffichage
+                _jsk_last_blit_pos = (0, 0)
+                crop_sz = min(raw_stream_size[1], raw_stream_size[0])
+                print(f"[JSK LIVE] Crop carré: {'ON (' + str(crop_sz) + '×' + str(crop_sz) + ')' if jsk_crop_square else 'OFF'}")
+                continue
+
             # Vérifier si clic sur le bouton REC
             if is_click_on_jsk_rec(mousex, mousey, fs_width):
                 if jsk_recorder is not None:
@@ -11848,9 +12778,16 @@ while True:
                         now = datetime.datetime.now()
                         timestamp = now.strftime("%y%m%d%H%M%S")
                         output_file = pic_dir + "JSK_" + timestamp + ".mp4"
-                        # Enregistrer en resolution native binning 1920x1080
-                        if jsk_recorder.start(output_file, 1920, 1080, fps=25):
-                            print(f"[JSK LIVE] Enregistrement démarré: {output_file}")
+                        # Dimensions selon binning + crop
+                        rw = raw_stream_size[0]
+                        rh = raw_stream_size[1]
+                        if jsk_crop_square:
+                            crop_sz = min(rh, rw)
+                            rec_w, rec_h = crop_sz, crop_sz
+                        else:
+                            rec_w, rec_h = rw, rh
+                        if jsk_recorder.start(output_file, rec_w, rec_h, fps=25):
+                            print(f"[JSK LIVE] Enregistrement démarré: {output_file} ({rec_w}×{rec_h})")
                         else:
                             print(f"[JSK LIVE] Erreur démarrage enregistrement")
                 continue
@@ -11860,10 +12797,13 @@ while True:
                 # Quitter le mode JSK LIVE
                 jsk_live_mode = 0
                 jsk_settings_visible = 0
+                jsk_crop_square = 0
+                jsk_binning = 1
                 _jsk_slider_rects = {}
                 _jsk_slider_dragging = False
                 _jsk_ge_dragging = None
                 _jsk_last_surface = None
+                _jsk_last_blit_pos = (0, 0)
 
                 # Arrêter l'enregistrement si actif
                 if jsk_recorder is not None and jsk_recorder.is_recording:
@@ -18441,6 +19381,8 @@ while True:
                       # Activer le mode JSK LIVE
                       jsk_live_mode = 1
                       jsk_settings_visible = 0
+                      jsk_binning = 1       # Toujours binning ON à l'entrée
+                      jsk_crop_square = 0   # Crop OFF à l'entrée
 
                       # Sauvegarder les paramètres actuels pour restauration à la sortie
                       jsk_saved_vwidth = vwidth
@@ -18495,6 +19437,72 @@ while True:
                       windowSurfaceObj.fill((0, 0, 0))
                       pygame.display.update()
                       print("[JSK LIVE] Mode activé (binning 1920x1080)")
+
+              elif button_row == 3:
+                  # MOON - Mode Mineral Moon
+                  moon_mode = 1
+                  moon_settings_visible = 0
+                  moon_binning = 1
+                  _moon_last_surface = None
+                  _moon_slider_rects = {}
+
+                  # Sauvegarder les paramètres actuels
+                  moon_saved_vwidth = vwidth
+                  moon_saved_vheight = vheight
+                  moon_saved_zoom = zoom
+                  moon_saved_use_native = use_native_sensor_mode
+                  moon_saved_gain = gain
+                  moon_saved_exposure = custom_sspeed if custom_sspeed > 0 else sspeed
+
+                  # Initialiser gain/expo depuis valeurs actuelles
+                  moon_gain = max(1, min(300, gain if gain > 0 else 50))
+                  _init_expo = custom_sspeed if custom_sspeed > 0 else sspeed
+                  moon_exposure_us = max(1000, min(1000000, _init_expo if _init_expo > 0 else 100000))
+
+                  # Forcer binning 1920×1080 à l'entrée
+                  vwidth = 1920
+                  vheight = 1080
+                  zoom = 0
+                  use_native_sensor_mode = 0
+
+                  # Reconfigurer la caméra
+                  print("[MOON] Configuration caméra: binning 1920×1080")
+                  kill_preview_process()
+                  preview()
+
+                  # Désactiver AWB, passer en WB manuel
+                  if picam2 is not None:
+                      try:
+                          picam2.set_controls({
+                              "AwbEnable": False,
+                              "ColourGains": (moon_wb_b / 100.0, moon_wb_r / 100.0)
+                          })
+                      except Exception as e:
+                          print(f"[MOON] Avertissement WB: {e}")
+
+                  # S'assurer que capture_thread est en mode main (ISP)
+                  if capture_thread is not None:
+                      capture_thread.set_capture_params({'type': 'main'})
+
+                  # Initialiser le processor avec le preset courant
+                  moon_processor = MineralMoonProcessor()
+                  moon_processor.apply_preset(moon_preset)
+
+                  # Initialiser le recorder
+                  moon_recorder = JSKVideoRecorder()
+
+                  # Plein écran
+                  display_modes = pygame.display.list_modes()
+                  if display_modes and display_modes != -1:
+                      max_width, max_height = display_modes[0]
+                  else:
+                      screen_info = pygame.display.Info()
+                      max_width, max_height = screen_info.current_w, screen_info.current_h
+                  windowSurfaceObj = pygame.display.set_mode(
+                      (max_width, max_height), pygame.FULLSCREEN, 24)
+                  windowSurfaceObj.fill((0, 0, 0))
+                  pygame.display.update()
+                  print(f"[MOON] Mode activé — preset: {MOON_PRESETS[moon_preset]['name']}")
 
               elif button_row == 2:
                   # COLIM - Mode collimation Newton
