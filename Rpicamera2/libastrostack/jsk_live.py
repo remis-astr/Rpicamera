@@ -249,13 +249,14 @@ class JSKLiveProcessor:
 
     def __init__(self):
         # Paramètres par défaut
-        self.stack_count = 1       # 1-4 images à empiler
+        self.stack_count = 1       # 1-6 images à empiler
         self.hdr_bits_clip = 2     # 1-3 bits à clipper
         self.hdr_method = 1        # 0=OFF, 1=Median, 2=Mean, 3=Mertens
         self.denoise_type = 0      # 0=OFF, 1=Bilateral, 2=NLM, 3=Gaussian, 4=Median
         self.denoise_strength = 5  # 1-10
-        self.hdr_weights = [100, 100, 100, 100]  # Poids HDR par niveau de bit (0-100)
+        self.hdr_weights = [100, 100, 100, 100, 100, 100]  # Poids HDR par niveau de bit (0-100)
         self.bayer_pattern = cv2.COLOR_BayerRG2RGB
+        self.crop_square = False   # True = crop carré 1080×1080 centré avant traitement
 
         # Buffer pour le stacking
         self.frame_buffer = []
@@ -267,7 +268,7 @@ class JSKLiveProcessor:
     def configure(self, **kwargs):
         """Configure les paramètres du processeur."""
         if 'stack_count' in kwargs:
-            self.stack_count = max(1, min(4, kwargs['stack_count']))
+            self.stack_count = max(1, min(6, kwargs['stack_count']))
         if 'hdr_bits_clip' in kwargs:
             self.hdr_bits_clip = max(0, min(3, kwargs['hdr_bits_clip']))
         if 'hdr_method' in kwargs:
@@ -280,6 +281,8 @@ class JSKLiveProcessor:
             self.hdr_weights = list(kwargs['hdr_weights'][:4])
         if 'bayer_pattern' in kwargs:
             self.bayer_pattern = kwargs['bayer_pattern']
+        if 'crop_square' in kwargs:
+            self.crop_square = bool(kwargs['crop_square'])
 
     def clear_buffer(self):
         """Vide le buffer de frames."""
@@ -311,6 +314,16 @@ class JSKLiveProcessor:
         """
         if raw_frame is None:
             return None
+
+        # 0. Crop carré centré sur le RAW (avant tout traitement pour gain de performance)
+        if self.crop_square:
+            h, w = raw_frame.shape[:2]
+            crop_size = min(h, w)          # = 1080 sur capteur 1920×1080
+            x_start = (w - crop_size) // 2
+            # S'assurer que x_start est pair pour préserver l'alignement Bayer
+            if x_start % 2 != 0:
+                x_start += 1
+            raw_frame = raw_frame[:crop_size, x_start:x_start + crop_size]
 
         # 1. HDR Processing sur la frame RAW brute
         if self.hdr_method == 0 or self.hdr_bits_clip == 0:
