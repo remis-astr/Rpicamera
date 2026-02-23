@@ -73,6 +73,9 @@ from libastrostack.jsk_live import JSKLiveProcessor, JSKVideoRecorder
 # Import Mineral Moon module (dans libastrostack/)
 from libastrostack.mineral_moon import MineralMoonProcessor, MOON_PRESETS
 
+# Import Solar module (dans libastrostack/)
+from libastrostack.solar import SolarProcessor, SOLAR_PRESETS
+
 # Import Collimation module (dans libastrostack/)
 from libastrostack.collimation import CollimationDetector, CIRCLE_COLORS, CIRCLE_LABELS, CIRCLE_ORDER
 
@@ -1541,6 +1544,12 @@ jsk_saved_gain = 0          # Sauvegarde du gain global a l'entree
 jsk_saved_exposure = 0      # Sauvegarde de l'exposition globale a l'entree
 jsk_crop_square = 0         # 0=OFF, 1=crop carré centré (min sensor dim)
 jsk_binning = 1             # 1=binning ON (défaut, 1928×1090), 0=natif (3856×2180)
+jsk_color_enabled = 0       # 0=OFF, 1=ON  — Correction couleur & contraste
+jsk_r_gain = 100            # 50-200 → 0.5x-2.0x (100 = neutre)
+jsk_g_gain = 100            # 50-200
+jsk_b_gain = 100            # 50-200
+jsk_contrast = 100          # 50-200 → 0.5x-2.0x (100 = neutre)
+jsk_settings_tab = 0        # 0=Image (HDR/Denoise/Stretch), 1=Couleur
 
 # MINERAL MOON Settings
 moon_mode = 0               # 0=OFF, 1=Active
@@ -1578,6 +1587,53 @@ moon_wb_r = 100             # /100 → 1.00 ColourGains rouge (50-250)
 moon_wb_g = 100             # /100 → 1.00 gain vert OpenCV   (50-250)
 moon_wb_b = 100             # /100 → 1.00 ColourGains bleu  (50-250)
 moon_preset = 1             # 0=Subtil, 1=Standard, 2=Intense
+
+# SOLAR (Sun White Light) Settings
+sun_mode = 0                # 0=OFF, 1=Active
+sun_settings_visible = 0    # 0=Masqué, 1=Affiché
+sun_histogram_visible = 1   # 0=Masqué, 1=Affiché
+sun_processor = None        # Instance SolarProcessor
+sun_recorder = None         # Instance JSKVideoRecorder (réutilisée)
+sun_rec_blink = 0           # Clignotement bouton REC
+_sun_last_surface = None    # Cache dernière surface valide
+_sun_last_frame_bgr = None  # Cache dernière frame BGR (pour SNAP)
+_sun_slider_rects = {}      # Rects des sliders settings
+_sun_slider_dragging = False
+_sun_ge_dragging = None     # 'gain' ou 'expo'
+# Sauvegarde paramètres à l'entrée
+sun_saved_vwidth = 1920
+sun_saved_vheight = 1080
+sun_saved_zoom = 0
+sun_saved_use_native = 0
+sun_saved_gain = 0
+sun_saved_exposure = 0
+# Gain / Expo Sun
+sun_gain = 80
+sun_exposure_us = 5000      # 5ms
+# Paramètres processor (entiers pour sliders)
+sun_lucky_frames = 0        # 0=OFF, 1-500
+sun_best_pct = 15           # 5-50 %
+sun_limb_correct = 1        # 1=ON, 0=OFF
+sun_limb_kernel = 101       # impair 51-201
+sun_mask_disk = 1           # 1=ON, 0=OFF
+sun_clahe_en = 1            # 1=ON, 0=OFF
+sun_clahe_str = 15          # /10 → 1.5  (plage 0-40)
+sun_clahe_tile = 8          # 4-32
+sun_usm_en = 1              # 1=ON, 0=OFF
+sun_usm_sigma = 12          # /10 → 1.2  (plage 5-50)
+sun_usm_amount = 20         # /10 → 2.0  (plage 5-50)
+sun_usm_adaptive = 1        # 1=ON, 0=OFF
+sun_usm_thresh = 120        # 0-255
+sun_lr_en = 0               # 1=ON, 0=OFF
+sun_lr_iter = 30            # 5-60
+sun_lr_sigma = 10           # /10 → 1.0  (plage 5-30)
+sun_lr_ringing = 1          # 1=ON, 0=OFF
+sun_false_color = 0         # 0=None, 1=Hot, 2=Viridis, 3=Inferno
+sun_preset = 0              # 0=Taches, 1=Granulation
+sun_align_mode = 0          # 0=Off, 1=Disque, 2=Surface
+sun_false_color_names = ['None', 'Hot', 'Viridis', 'Inferno']
+sun_align_names = ['Off', 'Disque', 'Surface']
+sun_settings_tab = 0        # 0=Acquisition/Disque, 1=Sharpening/Affichage
 
 # COLLIMATION Settings
 collimation_mode = 0              # 0=OFF, 1=Active
@@ -6204,7 +6260,7 @@ def is_click_on_jsk_binning(mousex, mousey, screen_width, screen_height):
 
 def draw_jsk_controls(screen_width, screen_height, image_array=None):
     """
-    Dessine le panneau de contrôle JSK LIVE sur le côté droit.
+    Dessine le panneau de contrôle JSK LIVE sur le côté droit, avec onglets.
 
     Args:
         screen_width: Largeur de l'écran
@@ -6220,6 +6276,8 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
     global jsk_hdr_methods, jsk_denoise_types, jsk_hdr_weights
     global stretch_preset, ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
     global stretch_factor
+    global jsk_color_enabled, jsk_r_gain, jsk_g_gain, jsk_b_gain, jsk_contrast
+    global jsk_settings_tab
 
     control_rects = {}
 
@@ -6235,12 +6293,18 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
     s.fill((20, 20, 30, 180))
     windowSurfaceObj.blit(s, (panel_x - 10, start_y - 20))
 
-    # Titre
+    # Fontes
     cache_key = 24
     if cache_key not in _font_cache:
         _font_cache[cache_key] = pygame.font.Font(None, cache_key)
     titleFont = _font_cache[cache_key]
 
+    cache_key_section = 18
+    if cache_key_section not in _font_cache:
+        _font_cache[cache_key_section] = pygame.font.Font(None, cache_key_section)
+    sectionFont = _font_cache[cache_key_section]
+
+    # Titre
     title = titleFont.render("JSK LIVE Settings", True, (200, 180, 100))
     windowSurfaceObj.blit(title, (panel_x, start_y - 15))
     start_y += 25
@@ -6249,110 +6313,172 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
     slider_height = 30
     margin = 4
 
-    cache_key_section = 18
-    if cache_key_section not in _font_cache:
-        _font_cache[cache_key_section] = pygame.font.Font(None, cache_key_section)
-    sectionFont = _font_cache[cache_key_section]
+    # ===== Onglets =====
+    tab_labels = ["Image", "Couleur"]
+    tab_count = len(tab_labels)
+    tab_gap = 4
+    tab_w = (slider_width - tab_gap * (tab_count - 1)) // tab_count
+    tab_h = 26
 
-    # ===== Section HDR =====
-    section = sectionFont.render("HDR Processing:", True, (150, 180, 200))
-    windowSurfaceObj.blit(section, (panel_x, start_y))
-    start_y += 16
+    for i, lbl in enumerate(tab_labels):
+        tx = panel_x + i * (tab_w + tab_gap)
+        ty = start_y
+        tab_rect = pygame.Rect(tx, ty, tab_w, tab_h)
+        control_rects[f'jsk_tab_{i}'] = tab_rect
 
-    # Stack Count (1-6)
-    control_rects['jsk_stack'] = draw_jsk_slider(
-        panel_x, start_y, slider_width, slider_height,
-        f"Stack: {jsk_stack_count}", jsk_stack_count, 1, 6, (100, 180, 140)
-    )
-    start_y += slider_height + margin
+        if jsk_settings_tab == i:
+            tab_bg = (55, 70, 95)
+            tab_border = (140, 170, 210)
+            text_col = (230, 235, 255)
+        else:
+            tab_bg = (28, 28, 38)
+            tab_border = (65, 65, 78)
+            text_col = (120, 125, 145)
 
-    # HDR Method (0-3) - OFF desactive le HDR, ne garde que le stretch
-    control_rects['jsk_hdr_method'] = draw_jsk_slider(
-        panel_x, start_y, slider_width, slider_height,
-        f"HDR: {jsk_hdr_methods[jsk_hdr_method]}", jsk_hdr_method, 0, 3, (140, 100, 180)
-    )
-    start_y += slider_height + margin
+        pygame.draw.rect(windowSurfaceObj, tab_bg, tab_rect, border_radius=4)
+        pygame.draw.rect(windowSurfaceObj, tab_border, tab_rect, 1, border_radius=4)
+        tab_surf = sectionFont.render(lbl, True, text_col)
+        windowSurfaceObj.blit(tab_surf, (
+            tx + (tab_w - tab_surf.get_width()) // 2,
+            ty + (tab_h - tab_surf.get_height()) // 2
+        ))
 
-    # HDR Bits Clip (0-3) - 0=pas de clipping, uniquement si HDR actif
-    if jsk_hdr_method > 0:
-        clip_label = "HDR Clip: OFF" if jsk_hdr_bits_clip == 0 else f"HDR Clip: {jsk_hdr_bits_clip} bits"
-        control_rects['jsk_hdr_clip'] = draw_jsk_slider(
+    start_y += tab_h + 10
+
+    # ===== Contenu selon l'onglet actif =====
+    if jsk_settings_tab == 0:
+        # ------ Onglet 0 : Image (HDR / Denoise / Stretch) ------
+
+        # Section HDR
+        section = sectionFont.render("HDR Processing:", True, (150, 180, 200))
+        windowSurfaceObj.blit(section, (panel_x, start_y))
+        start_y += 16
+
+        control_rects['jsk_stack'] = draw_jsk_slider(
             panel_x, start_y, slider_width, slider_height,
-            clip_label, jsk_hdr_bits_clip, 0, 3, (180, 140, 100)
+            f"Stack: {jsk_stack_count}", jsk_stack_count, 1, 6, (100, 180, 140)
         )
         start_y += slider_height + margin
 
-    start_y += 6
-
-    # ===== Section Denoise =====
-    section = sectionFont.render("Denoise:", True, (150, 180, 200))
-    windowSurfaceObj.blit(section, (panel_x, start_y))
-    start_y += 16
-
-    # Denoise Type (0-4)
-    control_rects['jsk_denoise_type'] = draw_jsk_slider(
-        panel_x, start_y, slider_width, slider_height,
-        f"Type: {jsk_denoise_types[jsk_denoise_type]}", jsk_denoise_type, 0, 4, (100, 140, 180)
-    )
-    start_y += slider_height + margin
-
-    # Denoise Strength (1-10)
-    control_rects['jsk_denoise_strength'] = draw_jsk_slider(
-        panel_x, start_y, slider_width, slider_height,
-        f"Strength: {jsk_denoise_strength}", jsk_denoise_strength, 1, 10, (180, 160, 100)
-    )
-    start_y += slider_height + margin + 6
-
-    # ===== Section Stretch =====
-    section = sectionFont.render("Stretch:", True, (150, 180, 200))
-    windowSurfaceObj.blit(section, (panel_x, start_y))
-    start_y += 16
-
-    # Stretch Preset
-    stretch_names = ['OFF', 'GHS', 'Arcsinh']
-    control_rects['jsk_stretch_preset'] = draw_jsk_slider(
-        panel_x, start_y, slider_width, slider_height,
-        f"Preset: {stretch_names[stretch_preset]}", stretch_preset, 0, 2, (160, 140, 180)
-    )
-    start_y += slider_height + margin
-
-    # Parametres GHS complets
-    if stretch_preset == 1:
-        control_rects['jsk_ghs_D'] = draw_jsk_slider(
+        control_rects['jsk_hdr_method'] = draw_jsk_slider(
             panel_x, start_y, slider_width, slider_height,
-            f"D (Stretch): {ghs_D/10:.1f}", ghs_D, -10, 100, (100, 180, 140)
+            f"HDR: {jsk_hdr_methods[jsk_hdr_method]}", jsk_hdr_method, 0, 3, (140, 100, 180)
         )
         start_y += slider_height + margin
 
-        control_rects['jsk_ghs_b'] = draw_jsk_slider(
+        if jsk_hdr_method > 0:
+            clip_label = "HDR Clip: OFF" if jsk_hdr_bits_clip == 0 else f"HDR Clip: {jsk_hdr_bits_clip} bits"
+            control_rects['jsk_hdr_clip'] = draw_jsk_slider(
+                panel_x, start_y, slider_width, slider_height,
+                clip_label, jsk_hdr_bits_clip, 0, 3, (180, 140, 100)
+            )
+            start_y += slider_height + margin
+
+        start_y += 6
+
+        # Section Denoise
+        section = sectionFont.render("Denoise:", True, (150, 180, 200))
+        windowSurfaceObj.blit(section, (panel_x, start_y))
+        start_y += 16
+
+        control_rects['jsk_denoise_type'] = draw_jsk_slider(
             panel_x, start_y, slider_width, slider_height,
-            f"b (Local Int): {ghs_b/10:.1f}", ghs_b, -300, 100, (100, 160, 180)
+            f"Type: {jsk_denoise_types[jsk_denoise_type]}", jsk_denoise_type, 0, 4, (100, 140, 180)
         )
         start_y += slider_height + margin
 
-        control_rects['jsk_ghs_SP'] = draw_jsk_slider(
+        control_rects['jsk_denoise_strength'] = draw_jsk_slider(
             panel_x, start_y, slider_width, slider_height,
-            f"SP (Symmetry): {ghs_SP/100:.2f}", ghs_SP, 0, 100, (180, 140, 100)
+            f"Strength: {jsk_denoise_strength}", jsk_denoise_strength, 1, 10, (180, 160, 100)
+        )
+        start_y += slider_height + margin + 6
+
+        # Section Stretch
+        section = sectionFont.render("Stretch:", True, (150, 180, 200))
+        windowSurfaceObj.blit(section, (panel_x, start_y))
+        start_y += 16
+
+        stretch_names = ['OFF', 'GHS', 'Arcsinh']
+        control_rects['jsk_stretch_preset'] = draw_jsk_slider(
+            panel_x, start_y, slider_width, slider_height,
+            f"Preset: {stretch_names[stretch_preset]}", stretch_preset, 0, 2, (160, 140, 180)
         )
         start_y += slider_height + margin
 
-        control_rects['jsk_ghs_LP'] = draw_jsk_slider(
-            panel_x, start_y, slider_width, slider_height,
-            f"LP (Shadows): {ghs_LP/100:.2f}", ghs_LP, 0, 100, (140, 100, 180)
-        )
-        start_y += slider_height + margin
+        if stretch_preset == 1:
+            control_rects['jsk_ghs_D'] = draw_jsk_slider(
+                panel_x, start_y, slider_width, slider_height,
+                f"D (Stretch): {ghs_D/10:.1f}", ghs_D, -10, 100, (100, 180, 140)
+            )
+            start_y += slider_height + margin
 
-        control_rects['jsk_ghs_HP'] = draw_jsk_slider(
-            panel_x, start_y, slider_width, slider_height,
-            f"HP (Highlights): {ghs_HP/100:.2f}", ghs_HP, 0, 100, (180, 100, 140)
-        )
+            control_rects['jsk_ghs_b'] = draw_jsk_slider(
+                panel_x, start_y, slider_width, slider_height,
+                f"b (Local Int): {ghs_b/10:.1f}", ghs_b, -300, 100, (100, 160, 180)
+            )
+            start_y += slider_height + margin
 
-    # Parametre Arcsinh
-    elif stretch_preset == 2:
-        control_rects['jsk_stretch_factor'] = draw_jsk_slider(
+            control_rects['jsk_ghs_SP'] = draw_jsk_slider(
+                panel_x, start_y, slider_width, slider_height,
+                f"SP (Symmetry): {ghs_SP/100:.2f}", ghs_SP, 0, 100, (180, 140, 100)
+            )
+            start_y += slider_height + margin
+
+            control_rects['jsk_ghs_LP'] = draw_jsk_slider(
+                panel_x, start_y, slider_width, slider_height,
+                f"LP (Shadows): {ghs_LP/100:.2f}", ghs_LP, 0, 100, (140, 100, 180)
+            )
+            start_y += slider_height + margin
+
+            control_rects['jsk_ghs_HP'] = draw_jsk_slider(
+                panel_x, start_y, slider_width, slider_height,
+                f"HP (Highlights): {ghs_HP/100:.2f}", ghs_HP, 0, 100, (180, 100, 140)
+            )
+
+        elif stretch_preset == 2:
+            control_rects['jsk_stretch_factor'] = draw_jsk_slider(
+                panel_x, start_y, slider_width, slider_height,
+                f"Factor: {stretch_factor/10:.1f}", stretch_factor, 0, 1000, (200, 160, 100)
+            )
+
+    else:
+        # ------ Onglet 1 : Couleur & Contraste ------
+        section = sectionFont.render("Color & Contrast:", True, (150, 180, 200))
+        windowSurfaceObj.blit(section, (panel_x, start_y))
+        start_y += 16
+
+        # Toggle ON/OFF
+        cc_label = "Couleur: ON" if jsk_color_enabled else "Couleur: OFF"
+        cc_color = (80, 200, 100) if jsk_color_enabled else (140, 80, 80)
+        control_rects['jsk_color_enabled'] = draw_jsk_slider(
             panel_x, start_y, slider_width, slider_height,
-            f"Factor: {stretch_factor/10:.1f}", stretch_factor, 0, 1000, (200, 160, 100)
+            cc_label, jsk_color_enabled, 0, 1, cc_color
         )
+        start_y += slider_height + margin + 6
+
+        if jsk_color_enabled:
+            control_rects['jsk_r'] = draw_jsk_slider(
+                panel_x, start_y, slider_width, slider_height,
+                f"R: {jsk_r_gain/100:.2f}x", jsk_r_gain, 50, 200, (200, 80, 80)
+            )
+            start_y += slider_height + margin
+
+            control_rects['jsk_g'] = draw_jsk_slider(
+                panel_x, start_y, slider_width, slider_height,
+                f"G: {jsk_g_gain/100:.2f}x", jsk_g_gain, 50, 200, (80, 200, 80)
+            )
+            start_y += slider_height + margin
+
+            control_rects['jsk_b'] = draw_jsk_slider(
+                panel_x, start_y, slider_width, slider_height,
+                f"B: {jsk_b_gain/100:.2f}x", jsk_b_gain, 50, 200, (80, 120, 220)
+            )
+            start_y += slider_height + margin
+
+            control_rects['jsk_contrast'] = draw_jsk_slider(
+                panel_x, start_y, slider_width, slider_height,
+                f"Contraste: {jsk_contrast/100:.2f}x", jsk_contrast, 50, 200, (200, 200, 80)
+            )
 
     # ===== Panneau gauche : HDR Weights (uniquement en mode Mean) =====
     if jsk_hdr_method == 2:
@@ -6563,9 +6689,16 @@ def handle_jsk_slider_click(mousex, mousey, control_rects):
     global stretch_preset, ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
     global stretch_factor
     global jsk_processor
+    global jsk_color_enabled, jsk_r_gain, jsk_g_gain, jsk_b_gain, jsk_contrast
+    global jsk_settings_tab
 
     for name, rect in control_rects.items():
         if rect.collidepoint(mousex, mousey):
+            # Changement d'onglet — pas de configure() processor
+            if name.startswith('jsk_tab_'):
+                jsk_settings_tab = int(name[-1])
+                return True
+
             # Position relative dans le slider
             rel_x = mousex - rect.x - 5
             slider_width = rect.width - 15
@@ -6611,6 +6744,21 @@ def handle_jsk_slider_click(mousex, mousey, control_rects):
                 idx = int(name[-1])
                 jsk_hdr_weights[idx] = int(ratio * 100)
                 jsk_hdr_weights[idx] = max(0, min(100, jsk_hdr_weights[idx]))
+            # --- Couleur & Contraste ---
+            elif name == 'jsk_color_enabled':
+                jsk_color_enabled = 1 if ratio >= 0.5 else 0
+            elif name == 'jsk_r':
+                jsk_r_gain = int(50 + ratio * 150)
+                jsk_r_gain = max(50, min(200, jsk_r_gain))
+            elif name == 'jsk_g':
+                jsk_g_gain = int(50 + ratio * 150)
+                jsk_g_gain = max(50, min(200, jsk_g_gain))
+            elif name == 'jsk_b':
+                jsk_b_gain = int(50 + ratio * 150)
+                jsk_b_gain = max(50, min(200, jsk_b_gain))
+            elif name == 'jsk_contrast':
+                jsk_contrast = int(50 + ratio * 150)
+                jsk_contrast = max(50, min(200, jsk_contrast))
 
             # Mettre à jour le processeur JSK
             if jsk_processor is not None:
@@ -6620,7 +6768,12 @@ def handle_jsk_slider_click(mousex, mousey, control_rects):
                     hdr_method=jsk_hdr_method,
                     denoise_type=jsk_denoise_type,
                     denoise_strength=jsk_denoise_strength,
-                    hdr_weights=jsk_hdr_weights
+                    hdr_weights=jsk_hdr_weights,
+                    color_enabled=jsk_color_enabled == 1,
+                    r_gain=jsk_r_gain / 100.0,
+                    g_gain=jsk_g_gain / 100.0,
+                    b_gain=jsk_b_gain / 100.0,
+                    contrast=jsk_contrast / 100.0
                 )
 
             return True
@@ -7144,6 +7297,714 @@ def handle_moon_slider_click(mx, my, control_rects):
 
 # ============================================================================
 # FIN MINERAL MOON FULLSCREEN CONTROLS
+# ============================================================================
+
+
+# ============================================================================
+# SOLAR WHITE LIGHT FULLSCREEN CONTROLS
+# ============================================================================
+
+def draw_sun_settings_icon(screen_width, screen_height, active=False):
+    """Icône Settings en haut à gauche — Solar mode."""
+    global windowSurfaceObj, _font_cache
+    icon_size = 50
+    margin = 15
+    bg     = (80, 70, 20) if active else (50, 45, 15)
+    border = (220, 180, 60) if active else (120, 100, 40)
+    icon_rect = pygame.Rect(margin, margin, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border, icon_rect, 2, border_radius=8)
+    ck = 22
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    s = _font_cache[ck].render("SET", True, (240, 220, 140))
+    windowSurfaceObj.blit(s, s.get_rect(center=icon_rect.center))
+    return icon_rect
+
+
+def draw_sun_rec_button(screen_width, screen_height, is_recording=False,
+                        elapsed_str="00:00", frame_count=0):
+    """Bouton REC en haut à droite — Solar mode."""
+    global windowSurfaceObj, _font_cache, sun_rec_blink
+    icon_size = 50
+    margin = 15
+    icon_x = screen_width - icon_size - margin
+    if is_recording:
+        sun_rec_blink = 1 - sun_rec_blink
+        bg = (180, 40, 40) if sun_rec_blink else (120, 30, 30)
+    else:
+        bg = (50, 60, 70)
+    border = (220, 80, 80) if is_recording else (80, 100, 110)
+    icon_rect = pygame.Rect(icon_x, margin, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border, icon_rect, 2, border_radius=8)
+    ck = 18
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    tc = (255, 200, 200) if is_recording else (160, 180, 190)
+    cx, cy = icon_rect.centerx, icon_rect.centery
+    lbl = "■ REC" if is_recording else "REC"
+    windowSurfaceObj.blit(f.render(lbl, True, tc),
+                          f.render(lbl, True, tc).get_rect(centerx=cx, centery=cy - 10))
+    windowSurfaceObj.blit(f.render(elapsed_str, True, tc),
+                          f.render(elapsed_str, True, tc).get_rect(centerx=cx, centery=cy + 2))
+    if is_recording and frame_count > 0:
+        fc = _font_cache.get(16) or pygame.font.Font(None, 16)
+        _font_cache[16] = fc
+        s = fc.render(f"{frame_count}fr", True, (200, 140, 140))
+        windowSurfaceObj.blit(s, s.get_rect(centerx=cx, centery=cy + 14))
+    return icon_rect
+
+
+def draw_sun_exit_button(screen_width, screen_height):
+    """Bouton EXIT en bas à gauche — Solar mode."""
+    global windowSurfaceObj, _font_cache
+    icon_size = 50
+    margin = 15
+    icon_rect = pygame.Rect(margin, screen_height - icon_size - margin,
+                            icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, (70, 60, 60), icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, (120, 100, 100), icon_rect, 2, border_radius=8)
+    ck = 22
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    windowSurfaceObj.blit(f.render("EXIT", True, (200, 180, 180)),
+                          f.render("EXIT", True, (200, 180, 180)).get_rect(center=icon_rect.center))
+    return icon_rect
+
+
+def draw_sun_hist_button(screen_width, screen_height, hist_visible=True):
+    """Bouton HIST en bas à gauche (à droite de EXIT) — Solar mode."""
+    global windowSurfaceObj, _font_cache
+    icon_size = 50
+    margin = 15
+    icon_rect = pygame.Rect(margin + icon_size + margin,
+                            screen_height - icon_size - margin,
+                            icon_size, icon_size)
+    bg     = (60, 70, 20) if hist_visible else (40, 45, 30)
+    border = (160, 180, 50) if hist_visible else (80, 90, 50)
+    tc     = (200, 220, 80) if hist_visible else (100, 110, 70)
+    pygame.draw.rect(windowSurfaceObj, bg, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border, icon_rect, 2, border_radius=8)
+    ck = 19
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    cx, cy = icon_rect.centerx, icon_rect.centery
+    windowSurfaceObj.blit(f.render("HIST", True, tc),
+                          f.render("HIST", True, tc).get_rect(centerx=cx, centery=cy - 8))
+    windowSurfaceObj.blit(f.render("ON" if hist_visible else "OFF", True, tc),
+                          f.render("ON" if hist_visible else "OFF", True, tc).get_rect(centerx=cx, centery=cy + 8))
+    return icon_rect
+
+
+def draw_sun_snap_button(screen_width, screen_height):
+    """Bouton SNAP en bas à droite — Solar mode."""
+    global windowSurfaceObj, _font_cache
+    icon_size = 50
+    margin = 15
+    icon_rect = pygame.Rect(screen_width - icon_size - margin,
+                            screen_height - icon_size - margin,
+                            icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, (50, 90, 70), icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, (80, 160, 120), icon_rect, 2, border_radius=8)
+    ck = 19
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    cx, cy = icon_rect.centerx, icon_rect.centery
+    windowSurfaceObj.blit(f.render("SNAP", True, (160, 240, 200)),
+                          f.render("SNAP", True, (160, 240, 200)).get_rect(centerx=cx, centery=cy - 8))
+    windowSurfaceObj.blit(f.render("JPG", True, (120, 200, 160)),
+                          f.render("JPG", True, (120, 200, 160)).get_rect(centerx=cx, centery=cy + 8))
+    return icon_rect
+
+
+def draw_sun_detect_button(screen_width, screen_height):
+    """Bouton DETECT (redétection disque) en bas à droite, à gauche de SNAP."""
+    global windowSurfaceObj, _font_cache
+    icon_size = 50
+    margin = 15
+    icon_x = screen_width - 2 * icon_size - 2 * margin
+    icon_y = screen_height - icon_size - margin
+    icon_rect = pygame.Rect(icon_x, icon_y, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, (50, 70, 80), icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, (100, 150, 180), icon_rect, 2, border_radius=8)
+    ck = 18
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    cx, cy = icon_rect.centerx, icon_rect.centery
+    windowSurfaceObj.blit(f.render("↺", True, (160, 210, 240)),
+                          f.render("↺", True, (160, 210, 240)).get_rect(centerx=cx, centery=cy - 8))
+    windowSurfaceObj.blit(f.render("DISC", True, (140, 190, 220)),
+                          f.render("DISC", True, (140, 190, 220)).get_rect(centerx=cx, centery=cy + 8))
+    return icon_rect
+
+
+# --- Helpers position sliders Gain/Expo ---
+
+def _sun_ge_slider_positions(screen_height, screen_width=1920):
+    """Positions des sliders Gain/Expo Solar (haut-centre)."""
+    slider_w = 300
+    slider_h = 30
+    sx = (screen_width - slider_w) // 2
+    sy_expo = 75
+    sy_gain = sy_expo + slider_h + 8
+    return sx, sy_gain, sy_expo, slider_w, slider_h
+
+
+def draw_sun_gain_exposure(screen_width, screen_height):
+    """Dessine les sliders Gain et Exposition en haut-centre — Solar mode."""
+    global windowSurfaceObj, _font_cache, sun_gain, sun_exposure_us
+    import math
+    sx, sy_gain, sy_expo, slider_w, slider_h = _sun_ge_slider_positions(
+        screen_height, screen_width)
+
+    min_exp_us, max_exp_us = 1000, 20000   # 1–20 ms
+
+    exp_c   = max(min_exp_us, min(sun_exposure_us, max_exp_us))
+    log_min = math.log10(min_exp_us)
+    log_max = math.log10(max_exp_us)
+    log_val = math.log10(exp_c)
+    expo_ratio = (log_val - log_min) / (log_max - log_min)
+
+    expo_ms = sun_exposure_us / 1000.0
+    expo_text = f"Expo: {expo_ms:.1f}ms" if expo_ms < 10 else f"Expo: {expo_ms:.0f}ms"
+
+    ck = 22
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    fontObj = _font_cache[ck]
+
+    for sy, label, ratio, color in [
+        (sy_expo, expo_text,            expo_ratio,            (180, 140, 40)),
+        (sy_gain, f"Gain: {sun_gain}",  (sun_gain - 0) / 400.0, (140, 110, 30)),
+    ]:
+        bg_rect = pygame.Rect(sx, sy, slider_w, slider_h)
+        pygame.draw.rect(windowSurfaceObj, (40, 40, 30), bg_rect, border_radius=5)
+        pygame.draw.rect(windowSurfaceObj, (90, 80, 40), bg_rect, 1, border_radius=5)
+        fill_w = int(min(1.0, ratio) * (slider_w - 10))
+        if fill_w > 0:
+            pygame.draw.rect(windowSurfaceObj, color,
+                             pygame.Rect(sx + 5, sy + 5, fill_w, slider_h - 10),
+                             border_radius=3)
+        lbl = fontObj.render(label, True, (230, 210, 150))
+        windowSurfaceObj.blit(lbl, lbl.get_rect(center=bg_rect.center))
+
+
+# --- Hit-test helpers ---
+
+def is_click_on_sun_settings(mx, my):
+    icon_size = 50; margin = 15
+    return margin <= mx <= margin + icon_size and margin <= my <= margin + icon_size
+
+
+def is_click_on_sun_rec(mx, my, screen_width):
+    icon_size = 50; margin = 15
+    ix = screen_width - icon_size - margin
+    return ix <= mx <= ix + icon_size and margin <= my <= margin + icon_size
+
+
+def is_click_on_sun_exit(mx, my, screen_height):
+    icon_size = 50; margin = 15
+    iy = screen_height - icon_size - margin
+    return margin <= mx <= margin + icon_size and iy <= my <= iy + icon_size
+
+
+def is_click_on_sun_hist(mx, my, screen_width, screen_height):
+    icon_size = 50; margin = 15
+    ix = margin + icon_size + margin
+    iy = screen_height - icon_size - margin
+    return ix <= mx <= ix + icon_size and iy <= my <= iy + icon_size
+
+
+def is_click_on_sun_snap(mx, my, screen_width, screen_height):
+    icon_size = 50; margin = 15
+    ix = screen_width - icon_size - margin
+    iy = screen_height - icon_size - margin
+    return ix <= mx <= ix + icon_size and iy <= my <= iy + icon_size
+
+
+def is_click_on_sun_detect(mx, my, screen_width, screen_height):
+    icon_size = 50; margin = 15
+    ix = screen_width - 2 * icon_size - 2 * margin
+    iy = screen_height - icon_size - margin
+    return ix <= mx <= ix + icon_size and iy <= my <= iy + icon_size
+
+
+def is_click_on_sun_gain_slider(mx, my, screen_width, screen_height):
+    """Retourne nouvelle valeur gain (0-400) ou None."""
+    sx, sy_gain, _, slider_w, slider_h = _sun_ge_slider_positions(screen_height, screen_width)
+    if sx <= mx <= sx + slider_w and sy_gain <= my <= sy_gain + slider_h:
+        return max(0, min(400, int((mx - sx) / slider_w * 400)))
+    return None
+
+
+def is_click_on_sun_exposure_slider(mx, my, screen_width, screen_height):
+    """Retourne nouvelle valeur expo en µs (1000–20000) ou None."""
+    import math
+    sx, _, sy_expo, slider_w, slider_h = _sun_ge_slider_positions(screen_height, screen_width)
+    if sx <= mx <= sx + slider_w and sy_expo <= my <= sy_expo + slider_h:
+        ratio   = max(0.0, min(1.0, (mx - sx) / slider_w))
+        log_min = math.log10(1000)
+        log_max = math.log10(20000)
+        return int(10 ** (log_min + ratio * (log_max - log_min)))
+    return None
+
+
+# --- Histogramme (niveaux de gris pour solar) ---
+
+def draw_sun_histogram(bgr_frame, sw, sh):
+    """Histogramme niveaux de gris en bas-centre — Solar mode."""
+    global windowSurfaceObj
+    bins = 128
+    h_w, h_h = 400, 70
+    hx = (sw - h_w) // 2
+    hy = sh - h_h - 10
+    inner_h = h_h - 8
+
+    surf = pygame.Surface((h_w, h_h), pygame.SRCALPHA)
+    surf.fill((20, 20, 15, 180))
+    windowSurfaceObj.blit(surf, (hx, hy))
+
+    gray = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY) \
+           if bgr_frame.ndim == 3 else bgr_frame
+    hist = cv2.calcHist([gray], [0], None, [bins], [0, 256]).flatten()
+    mx   = hist.max()
+    if mx > 0:
+        hist = hist / mx
+    pts = [(hx + int(i * h_w / bins),
+            hy + h_h - 4 - int(hist[i] * inner_h))
+           for i in range(bins)]
+    if len(pts) > 1:
+        pygame.draw.lines(windowSurfaceObj, (220, 200, 100), False, pts, 1)
+
+
+# --- Panneau de contrôle Solar (2 onglets) ---
+
+def _draw_sun_tab_bar(panel_x, panel_w, y):
+    """Dessine la barre d'onglets et retourne les rects des deux onglets."""
+    global windowSurfaceObj, _font_cache, sun_settings_tab
+    tab_h = 24
+    half = panel_w // 2
+    tabs = [
+        ("Acq / Disque", 0),
+        ("Sharp / Aff",  1),
+    ]
+    rects = {}
+    ck = 19
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    for i, (label, idx) in enumerate(tabs):
+        tx = panel_x + i * half
+        active = (sun_settings_tab == idx)
+        bg     = (80, 70, 20) if active else (40, 35, 10)
+        border = (220, 190, 80) if active else (100, 90, 40)
+        r = pygame.Rect(tx, y, half - 2, tab_h)
+        pygame.draw.rect(windowSurfaceObj, bg, r, border_radius=4)
+        pygame.draw.rect(windowSurfaceObj, border, r, 1, border_radius=4)
+        tc = (240, 220, 120) if active else (150, 130, 60)
+        lbl = f.render(label, True, tc)
+        windowSurfaceObj.blit(lbl, lbl.get_rect(center=r.center))
+        rects[f'sun_tab_{idx}'] = r
+    return rects, y + tab_h + 4
+
+
+def draw_sun_controls(screen_width, screen_height):
+    """
+    Panneau de contrôle Solar côté droit — 2 onglets.
+    Retourne dict des rects pour détection clics.
+    """
+    global windowSurfaceObj, _font_cache
+    global sun_lucky_frames, sun_best_pct, sun_limb_correct, sun_limb_kernel
+    global sun_mask_disk, sun_clahe_en, sun_clahe_str, sun_clahe_tile
+    global sun_usm_en, sun_usm_sigma, sun_usm_amount, sun_usm_adaptive, sun_usm_thresh
+    global sun_lr_en, sun_lr_iter, sun_lr_sigma, sun_lr_ringing
+    global sun_false_color, sun_preset, zoom, sun_processor, sun_false_color_names
+    global sun_align_mode, sun_align_names
+    global sun_settings_tab
+
+    panel_w  = 250
+    panel_m  = 10
+    panel_x  = screen_width - panel_w - panel_m
+    start_y  = 80
+    slider_w = panel_w - 10
+    slider_h = 26
+    margin   = 4
+    control_rects = {}
+
+    # Fond semi-transparent
+    panel_h = screen_height - start_y - 70
+    surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+    surf.fill((30, 25, 10, 200))
+    windowSurfaceObj.blit(surf, (panel_x, start_y - 10))
+
+    ck_title = 24
+    if ck_title not in _font_cache:
+        _font_cache[ck_title] = pygame.font.Font(None, ck_title)
+    ck_sect = 20
+    if ck_sect not in _font_cache:
+        _font_cache[ck_sect] = pygame.font.Font(None, ck_sect)
+
+    # Titre
+    windowSurfaceObj.blit(
+        _font_cache[ck_title].render("SOLAR", True, (240, 210, 100)),
+        (panel_x, start_y - 15))
+    start_y += 16
+
+    # Barre d'onglets
+    tab_rects, start_y = _draw_sun_tab_bar(panel_x, panel_w, start_y)
+    control_rects.update(tab_rects)
+
+    # =========================================================
+    # ONGLET 0 : Acquisition + Disque
+    # =========================================================
+    if sun_settings_tab == 0:
+
+        # --- Lucky Imaging ---
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Lucky Imaging", True, (180, 160, 80)),
+            (panel_x + 2, start_y))
+        start_y += 16
+
+        control_rects['sun_lucky_frames'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Frames: {sun_lucky_frames}{' (OFF)' if sun_lucky_frames==0 else ''}",
+            sun_lucky_frames, 0, 500, (160, 140, 60))
+        start_y += slider_h + margin
+
+        if sun_lucky_frames > 0:
+            control_rects['sun_best_pct'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Best: {sun_best_pct}%", sun_best_pct, 5, 50, (140, 120, 50))
+            start_y += slider_h + margin
+            cur_align = sun_align_names[sun_align_mode] if 0 <= sun_align_mode < len(sun_align_names) else "?"
+            control_rects['sun_align_mode'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Align: {cur_align}", sun_align_mode, 0, 2, (120, 140, 100))
+            start_y += slider_h + margin
+        start_y += 6
+
+        # --- Disque ---
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Disque solaire", True, (180, 160, 80)),
+            (panel_x + 2, start_y))
+        start_y += 16
+
+        control_rects['sun_limb_correct'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Limb Corr: {'ON' if sun_limb_correct else 'OFF'}",
+            sun_limb_correct, 0, 1, (160, 140, 60))
+        start_y += slider_h + margin
+
+        if sun_limb_correct:
+            control_rects['sun_limb_kernel'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Kernel: {sun_limb_kernel}px", sun_limb_kernel, 51, 201,
+                (140, 120, 50))
+            start_y += slider_h + margin
+
+        control_rects['sun_mask_disk'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Mask disk: {'ON' if sun_mask_disk else 'OFF'}",
+            sun_mask_disk, 0, 1, (160, 130, 50))
+        start_y += slider_h + margin + 6
+
+        # --- Gain / Expo (rappel) ---
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Acquisition", True, (180, 160, 80)),
+            (panel_x + 2, start_y))
+        start_y += 16
+
+        control_rects['sun_zoom'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Zoom: {zoom}x", zoom, 0, 5, (100, 160, 160))
+        start_y += slider_h + margin
+
+        preset_names = [p['name'] for p in SOLAR_PRESETS]
+        cur_name = preset_names[sun_preset] if 0 <= sun_preset < len(preset_names) else "?"
+        control_rects['sun_preset'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Preset: {cur_name}", sun_preset, 0, len(SOLAR_PRESETS) - 1,
+            (180, 160, 60))
+
+    # =========================================================
+    # ONGLET 1 : Sharpening + Affichage
+    # =========================================================
+    else:
+
+        # --- CLAHE ---
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("CLAHE", True, (180, 160, 80)),
+            (panel_x + 2, start_y))
+        start_y += 16
+
+        control_rects['sun_clahe_en'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"CLAHE: {'ON' if sun_clahe_en else 'OFF'}",
+            sun_clahe_en, 0, 1, (160, 140, 60))
+        start_y += slider_h + margin
+
+        if sun_clahe_en:
+            control_rects['sun_clahe_str'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Strength: {sun_clahe_str/10:.1f}", sun_clahe_str, 0, 40,
+                (140, 120, 50))
+            start_y += slider_h + margin
+            control_rects['sun_clahe_tile'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Tile: {sun_clahe_tile}px", sun_clahe_tile, 4, 32, (120, 100, 45))
+            start_y += slider_h + margin
+        start_y += 6
+
+        # --- Unsharp Mask ---
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Unsharp Mask", True, (180, 160, 80)),
+            (panel_x + 2, start_y))
+        start_y += 16
+
+        control_rects['sun_usm_en'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"USM: {'ON' if sun_usm_en else 'OFF'}",
+            sun_usm_en, 0, 1, (160, 140, 60))
+        start_y += slider_h + margin
+
+        if sun_usm_en:
+            control_rects['sun_usm_sigma'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Sigma: {sun_usm_sigma/10:.1f}", sun_usm_sigma, 5, 50,
+                (140, 120, 50))
+            start_y += slider_h + margin
+            control_rects['sun_usm_amount'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Amount: {sun_usm_amount/10:.1f}", sun_usm_amount, 5, 50,
+                (120, 100, 45))
+            start_y += slider_h + margin
+            control_rects['sun_usm_adaptive'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Adaptatif: {'ON' if sun_usm_adaptive else 'OFF'}",
+                sun_usm_adaptive, 0, 1, (140, 120, 50))
+            start_y += slider_h + margin
+            if sun_usm_adaptive:
+                control_rects['sun_usm_thresh'] = draw_jsk_slider(
+                    panel_x, start_y, slider_w, slider_h,
+                    f"Seuil: {sun_usm_thresh}", sun_usm_thresh, 0, 255,
+                    (120, 100, 45))
+                start_y += slider_h + margin
+        start_y += 6
+
+        # --- Lucy-Richardson ---
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Lucy-Richardson", True, (180, 160, 80)),
+            (panel_x + 2, start_y))
+        start_y += 16
+
+        control_rects['sun_lr_en'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"L-R: {'ON' if sun_lr_en else 'OFF'}",
+            sun_lr_en, 0, 1, (160, 140, 60))
+        start_y += slider_h + margin
+
+        if sun_lr_en:
+            control_rects['sun_lr_iter'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Iterations: {sun_lr_iter}", sun_lr_iter, 5, 60, (140, 120, 50))
+            start_y += slider_h + margin
+            control_rects['sun_lr_sigma'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Sigma: {sun_lr_sigma/10:.1f}", sun_lr_sigma, 5, 30, (120, 100, 45))
+            start_y += slider_h + margin
+            control_rects['sun_lr_ringing'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Anti-ring: {'ON' if sun_lr_ringing else 'OFF'}",
+                sun_lr_ringing, 0, 1, (140, 120, 50))
+            start_y += slider_h + margin
+        start_y += 6
+
+        # --- Affichage ---
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Affichage", True, (180, 160, 80)),
+            (panel_x + 2, start_y))
+        start_y += 16
+
+        control_rects['sun_false_color'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Color: {sun_false_color_names[sun_false_color]}",
+            sun_false_color, 0, 3, (160, 130, 50))
+
+    return control_rects
+
+
+def handle_sun_slider_click(mx, my, control_rects):
+    """
+    Gère le clic sur un slider du panneau Solar.
+    Retourne True si un contrôle a été modifié.
+    """
+    global sun_lucky_frames, sun_best_pct, sun_limb_correct, sun_limb_kernel
+    global sun_mask_disk, sun_clahe_en, sun_clahe_str, sun_clahe_tile
+    global sun_usm_en, sun_usm_sigma, sun_usm_amount, sun_usm_adaptive, sun_usm_thresh
+    global sun_lr_en, sun_lr_iter, sun_lr_sigma, sun_lr_ringing
+    global sun_false_color, sun_preset, zoom, sun_processor
+    global sun_align_mode
+    global sun_settings_tab, vwidth, vheight, capture_thread, picam2
+
+    for name, rect in control_rects.items():
+        if not rect.collidepoint(mx, my):
+            continue
+
+        # Changement d'onglet
+        if name == 'sun_tab_0':
+            sun_settings_tab = 0
+            return True
+        if name == 'sun_tab_1':
+            sun_settings_tab = 1
+            return True
+
+        rel_x = mx - rect.x - 7
+        ratio = max(0.0, min(1.0, rel_x / (rect.width - 15)))
+
+        if name == 'sun_lucky_frames':
+            sun_lucky_frames = int(ratio * 500)
+            if sun_processor is not None:
+                sun_processor.configure(lucky_frames=sun_lucky_frames)
+
+        elif name == 'sun_best_pct':
+            sun_best_pct = max(5, min(50, int(5 + ratio * 45)))
+            if sun_processor is not None:
+                sun_processor.configure(best_pct=float(sun_best_pct))
+
+        elif name == 'sun_align_mode':
+            sun_align_mode = max(0, min(2, int(ratio * 2 + 0.5)))
+            if sun_processor is not None:
+                sun_processor.configure(align_mode=sun_align_mode)
+
+        elif name == 'sun_limb_correct':
+            sun_limb_correct = 1 if ratio >= 0.5 else 0
+            if sun_processor is not None:
+                sun_processor.configure(limb_correct=sun_limb_correct == 1)
+
+        elif name == 'sun_limb_kernel':
+            k = int(51 + ratio * 150)
+            if k % 2 == 0:
+                k += 1
+            sun_limb_kernel = max(51, min(201, k))
+            if sun_processor is not None:
+                sun_processor.configure(limb_kernel=sun_limb_kernel)
+
+        elif name == 'sun_mask_disk':
+            sun_mask_disk = 1 if ratio >= 0.5 else 0
+            if sun_processor is not None:
+                sun_processor.configure(mask_disk=sun_mask_disk == 1)
+
+        elif name == 'sun_clahe_en':
+            sun_clahe_en = 1 if ratio >= 0.5 else 0
+            if sun_processor is not None:
+                sun_processor.configure(clahe_en=sun_clahe_en == 1)
+
+        elif name == 'sun_clahe_str':
+            sun_clahe_str = int(ratio * 40)
+            if sun_processor is not None:
+                sun_processor.configure(clahe_str=sun_clahe_str / 10.0)
+
+        elif name == 'sun_clahe_tile':
+            sun_clahe_tile = max(4, min(32, int(4 + ratio * 28)))
+            if sun_processor is not None:
+                sun_processor.configure(clahe_tile=sun_clahe_tile)
+
+        elif name == 'sun_usm_en':
+            sun_usm_en = 1 if ratio >= 0.5 else 0
+            if sun_processor is not None:
+                sun_processor.configure(usm_en=sun_usm_en == 1)
+
+        elif name == 'sun_usm_sigma':
+            sun_usm_sigma = max(5, min(50, int(5 + ratio * 45)))
+            if sun_processor is not None:
+                sun_processor.configure(usm_sigma=sun_usm_sigma / 10.0)
+
+        elif name == 'sun_usm_amount':
+            sun_usm_amount = max(5, min(50, int(5 + ratio * 45)))
+            if sun_processor is not None:
+                sun_processor.configure(usm_amount=sun_usm_amount / 10.0)
+
+        elif name == 'sun_usm_adaptive':
+            sun_usm_adaptive = 1 if ratio >= 0.5 else 0
+            if sun_processor is not None:
+                sun_processor.configure(usm_adaptive=sun_usm_adaptive == 1)
+
+        elif name == 'sun_usm_thresh':
+            sun_usm_thresh = max(0, min(255, int(ratio * 255)))
+            if sun_processor is not None:
+                sun_processor.configure(usm_thresh=sun_usm_thresh)
+
+        elif name == 'sun_lr_en':
+            sun_lr_en = 1 if ratio >= 0.5 else 0
+            if sun_processor is not None:
+                sun_processor.configure(lr_en=sun_lr_en == 1)
+
+        elif name == 'sun_lr_iter':
+            sun_lr_iter = max(5, min(60, int(5 + ratio * 55)))
+            if sun_processor is not None:
+                sun_processor.configure(lr_iter=sun_lr_iter)
+
+        elif name == 'sun_lr_sigma':
+            sun_lr_sigma = max(5, min(30, int(5 + ratio * 25)))
+            if sun_processor is not None:
+                sun_processor.configure(lr_sigma=sun_lr_sigma / 10.0)
+
+        elif name == 'sun_lr_ringing':
+            sun_lr_ringing = 1 if ratio >= 0.5 else 0
+            if sun_processor is not None:
+                sun_processor.configure(lr_ringing=sun_lr_ringing == 1)
+
+        elif name == 'sun_false_color':
+            sun_false_color = max(0, min(3, int(ratio * 3 + 0.5)))
+            if sun_processor is not None:
+                sun_processor.configure(false_color=sun_false_color)
+
+        elif name == 'sun_zoom':
+            new_zoom = max(0, min(5, int(ratio * 5 + 0.5)))
+            if new_zoom != zoom:
+                zoom = new_zoom
+                sync_video_resolution_with_zoom()
+                kill_preview_process()
+                preview()
+
+        elif name == 'sun_preset':
+            new_preset = max(0, min(len(SOLAR_PRESETS) - 1,
+                                    int(ratio * (len(SOLAR_PRESETS) - 1) + 0.5)))
+            if new_preset != sun_preset:
+                sun_preset = new_preset
+                if sun_processor is not None:
+                    sun_processor.apply_preset(sun_preset)
+                    p = SOLAR_PRESETS[sun_preset]
+                    sun_clahe_en     = 1 if p['clahe_en']     else 0
+                    sun_clahe_str    = int(p['clahe_str']  * 10)
+                    sun_clahe_tile   = p['clahe_tile']
+                    sun_usm_en       = 1 if p['usm_en']       else 0
+                    sun_usm_sigma    = int(p['usm_sigma']  * 10)
+                    sun_usm_amount   = int(p['usm_amount'] * 10)
+                    sun_usm_adaptive = 1 if p['usm_adaptive'] else 0
+                    sun_usm_thresh   = p['usm_thresh']
+                    sun_lr_en        = 1 if p['lr_en']         else 0
+                    sun_lr_iter      = p['lr_iter']
+                    sun_lr_sigma     = int(p['lr_sigma']   * 10)
+                    sun_lr_ringing   = 1 if p['lr_ringing']   else 0
+                    sun_limb_correct = 1 if p['limb_correct'] else 0
+                    sun_limb_kernel  = p['limb_kernel']
+                    sun_mask_disk    = 1 if p['mask_disk']    else 0
+                    sun_false_color  = p['false_color']
+
+        return True
+
+    return False
+
+
+# ============================================================================
+# FIN SOLAR WHITE LIGHT FULLSCREEN CONTROLS
 # ============================================================================
 
 
@@ -10475,8 +11336,11 @@ def Menu():
         button(0,3,10,4)
         text(0,3,6,0,1,"        MOON",ft,13)
 
-        # Boutons 4-7 vides pour futures extensions
-        button(0,4,0,4)
+        # Bouton 4 - SUN (même couleurs que LIVE STACK page 1)
+        button(0,4,9,4)
+        text(0,4,1,0,1,"           SUN",ft,5)
+
+        # Boutons 5-7 vides pour futures extensions
         button(0,5,0,4)
         button(0,6,0,4)
         button(0,7,0,4)
@@ -10799,6 +11663,59 @@ while True:
 
                 if moon_settings_visible == 1:
                     _moon_slider_rects = draw_moon_controls(max_width, max_height)
+
+            # === SOLAR MODE: Post-traitement sur flux ISP (main stream) ===
+            if sun_mode == 1 and sun_processor is not None:
+                display_modes = pygame.display.list_modes()
+                if display_modes and display_modes != -1:
+                    max_width, max_height = display_modes[0]
+                else:
+                    screen_info = pygame.display.Info()
+                    max_width, max_height = screen_info.current_w, screen_info.current_h
+
+                if frame_from_thread is not None and len(frame_from_thread.shape) == 3:
+                    # frame_from_thread est RGB888 (ISP main stream)
+                    sun_result_bgr = sun_processor.process(frame_from_thread)
+                    _sun_last_frame_bgr = sun_result_bgr  # pour SNAP
+                    sun_result_rgb = cv2.cvtColor(sun_result_bgr, cv2.COLOR_BGR2RGB)
+                    sun_surface = pygame.surfarray.make_surface(
+                        np.swapaxes(sun_result_rgb, 0, 1))
+                    sun_surface = pygame.transform.scale(sun_surface,
+                                                         (max_width, max_height))
+                    _sun_last_surface = sun_surface
+                    windowSurfaceObj.blit(sun_surface, (0, 0))
+                    if sun_recorder is not None and sun_recorder.is_recording:
+                        sun_recorder.write_frame(sun_result_rgb)
+                else:
+                    if _sun_last_surface is not None:
+                        windowSurfaceObj.blit(_sun_last_surface, (0, 0))
+                    else:
+                        windowSurfaceObj.fill((0, 0, 0))
+
+                frame_from_thread = None  # Empêcher le traitement normal
+
+                # Histogramme niveaux de gris (toggle via bouton HIST)
+                if sun_histogram_visible == 1 and _sun_last_frame_bgr is not None:
+                    draw_sun_histogram(_sun_last_frame_bgr, max_width, max_height)
+
+                # Boutons permanents
+                draw_sun_settings_icon(max_width, max_height, sun_settings_visible == 1)
+                elapsed_str = "00:00"
+                rec_count = 0
+                if sun_recorder is not None and sun_recorder.is_recording:
+                    elapsed_str = sun_recorder.get_elapsed_str()
+                    rec_count = sun_recorder.frame_count
+                draw_sun_rec_button(max_width, max_height,
+                                    sun_recorder is not None and sun_recorder.is_recording,
+                                    elapsed_str, rec_count)
+                draw_sun_detect_button(max_width, max_height)
+                draw_sun_snap_button(max_width, max_height)
+                draw_sun_exit_button(max_width, max_height)
+                draw_sun_hist_button(max_width, max_height, sun_histogram_visible == 1)
+                draw_sun_gain_exposure(max_width, max_height)
+
+                if sun_settings_visible == 1:
+                    _sun_slider_rects = draw_sun_controls(max_width, max_height)
 
             # === JSK LIVE MODE: Traitement dédié dans le chemin Picamera2 ===
             # Le pipeline JSK LIVE (HDR + Denoise) remplace le pipeline normal (debayer + ISP)
@@ -11627,7 +12544,7 @@ while True:
                     _jsk_slider_rects = draw_jsk_controls(max_width, max_height, None)
 
     # Ne pas afficher les overlays en mode stretch ou JSK LIVE
-    if (zoom > 0 or foc_man == 1 or focus_mode == 1 or histogram > 0) and stretch_mode == 0 and jsk_live_mode == 0 and collimation_mode == 0 and moon_mode == 0:
+    if (zoom > 0 or foc_man == 1 or focus_mode == 1 or histogram > 0) and stretch_mode == 0 and jsk_live_mode == 0 and collimation_mode == 0 and moon_mode == 0 and sun_mode == 0:
         # Utiliser array3d au lieu de pixels3d pour ne pas verrouiller la surface
         # Cela améliore grandement la fluidité de l'affichage en mode focus et histogram
         image2 = pygame.surfarray.array3d(image)
@@ -12058,6 +12975,30 @@ while True:
                 if handle_jsk_slider_click(mx, my, _jsk_slider_rects):
                     _jsk_slider_dragging = True
                     continue
+        if sun_mode == 1:
+            mx, my = event.pos
+            display_modes = pygame.display.list_modes()
+            if display_modes and display_modes != -1:
+                _fs_w, _fs_h = display_modes[0]
+            else:
+                _si = pygame.display.Info()
+                _fs_w, _fs_h = _si.current_w, _si.current_h
+            new_g = is_click_on_sun_gain_slider(mx, my, _fs_w, _fs_h)
+            if new_g is not None:
+                sun_gain = new_g
+                apply_controls_immediately(gain_value=sun_gain)
+                _sun_ge_dragging = 'gain'
+                continue
+            new_e = is_click_on_sun_exposure_slider(mx, my, _fs_w, _fs_h)
+            if new_e is not None:
+                sun_exposure_us = new_e
+                apply_controls_immediately(exposure_time=sun_exposure_us)
+                _sun_ge_dragging = 'expo'
+                continue
+            if sun_settings_visible == 1 and _sun_slider_rects:
+                if handle_sun_slider_click(mx, my, _sun_slider_rects):
+                    _sun_slider_dragging = True
+                    continue
       elif event.type == pygame.MOUSEMOTION:
         # Drag sliders gain/expo Moon
         if _moon_ge_dragging is not None and moon_mode == 1:
@@ -12123,6 +13064,38 @@ while True:
                 continue
             else:
                 _jsk_slider_dragging = False
+        # Drag sliders gain/expo Solar
+        if _sun_ge_dragging is not None and sun_mode == 1:
+            buttons = pygame.mouse.get_pressed()
+            if buttons[0]:
+                mx, my = event.pos
+                display_modes = pygame.display.list_modes()
+                if display_modes and display_modes != -1:
+                    _fs_w, _fs_h = display_modes[0]
+                else:
+                    _si = pygame.display.Info()
+                    _fs_w, _fs_h = _si.current_w, _si.current_h
+                if _sun_ge_dragging == 'gain':
+                    new_g = is_click_on_sun_gain_slider(mx, my, _fs_w, _fs_h)
+                    if new_g is not None:
+                        sun_gain = new_g
+                        apply_controls_immediately(gain_value=sun_gain)
+                else:
+                    new_e = is_click_on_sun_exposure_slider(mx, my, _fs_w, _fs_h)
+                    if new_e is not None:
+                        sun_exposure_us = new_e
+                        apply_controls_immediately(exposure_time=sun_exposure_us)
+                continue
+            else:
+                _sun_ge_dragging = None
+        if _sun_slider_dragging and sun_mode == 1 and sun_settings_visible == 1 and _sun_slider_rects:
+            buttons = pygame.mouse.get_pressed()
+            if buttons[0]:
+                mx, my = event.pos
+                handle_sun_slider_click(mx, my, _sun_slider_rects)
+                continue
+            else:
+                _sun_slider_dragging = False
       # MOVE HISTAREA
       elif (event.type == MOUSEBUTTONUP):
         mousex, mousey = event.pos
@@ -12145,6 +13118,15 @@ while True:
             # Appliquer la position finale du slider puis ignorer le reste
             if jsk_live_mode == 1 and jsk_settings_visible == 1 and _jsk_slider_rects:
                 handle_jsk_slider_click(mousex, mousey, _jsk_slider_rects)
+            continue
+        # Fin du drag Solar gain/expo
+        if _sun_ge_dragging is not None:
+            _sun_ge_dragging = None
+            continue
+        if _sun_slider_dragging:
+            _sun_slider_dragging = False
+            if sun_mode == 1 and sun_settings_visible == 1 and _sun_slider_rects:
+                handle_sun_slider_click(mousex, mousey, _sun_slider_rects)
             continue
 
         # Si on est en mode LiveStack actif, un clic quitte ce mode
@@ -12709,6 +13691,116 @@ while True:
                     continue
 
             continue  # Rester en mode Moon
+
+        # ===== GESTION DES CLICS EN MODE SOLAR =====
+        if sun_mode == 1:
+            display_modes = pygame.display.list_modes()
+            if display_modes and display_modes != -1:
+                fs_width, fs_height = display_modes[0]
+            else:
+                screen_info = pygame.display.Info()
+                fs_width, fs_height = screen_info.current_w, screen_info.current_h
+
+            # Settings
+            if is_click_on_sun_settings(mousex, mousey):
+                sun_settings_visible = 1 - sun_settings_visible
+                _sun_slider_rects = {}
+                _sun_slider_dragging = False
+                continue
+
+            # REC
+            if is_click_on_sun_rec(mousex, mousey, fs_width):
+                if sun_recorder is not None:
+                    if sun_recorder.is_recording:
+                        output_path = sun_recorder.stop()
+                        print(f"[SOLAR] Enregistrement arrêté: {output_path}")
+                    else:
+                        import datetime
+                        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                        out = pic_dir + "solar_" + ts + ".mp4"
+                        rw, rh = vwidth, vheight
+                        if sun_recorder.start(out, rw, rh, fps=25):
+                            print(f"[SOLAR] Enregistrement démarré: {out} ({rw}×{rh})")
+                        else:
+                            print(f"[SOLAR] Erreur démarrage enregistrement")
+                continue
+
+            # DETECT — redétection du disque solaire
+            if is_click_on_sun_detect(mousex, mousey, fs_width, fs_height):
+                if sun_processor is not None and _sun_last_frame_bgr is not None:
+                    gray_ref = cv2.cvtColor(_sun_last_frame_bgr, cv2.COLOR_BGR2GRAY)
+                    sun_processor.force_detect_disk(gray_ref)
+                    print("[SOLAR] Redétection disque forcée")
+                continue
+
+            # HIST
+            if is_click_on_sun_hist(mousex, mousey, fs_width, fs_height):
+                sun_histogram_visible = 1 - sun_histogram_visible
+                continue
+
+            # SNAP
+            if is_click_on_sun_snap(mousex, mousey, fs_width, fs_height):
+                if _sun_last_frame_bgr is not None:
+                    import datetime
+                    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    snap_path = pic_dir + "solar_" + ts + ".jpg"
+                    cv2.imwrite(snap_path, _sun_last_frame_bgr,
+                                [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    print(f"[SOLAR] SNAP sauvegardé: {snap_path}")
+                else:
+                    print("[SOLAR] SNAP: pas d'image disponible")
+                continue
+
+            # EXIT
+            if is_click_on_sun_exit(mousex, mousey, fs_height):
+                sun_mode = 0
+                sun_settings_visible = 0
+                _sun_slider_rects = {}
+                _sun_slider_dragging = False
+                _sun_ge_dragging = None
+                _sun_last_surface = None
+
+                if sun_recorder is not None and sun_recorder.is_recording:
+                    sun_recorder.stop()
+
+                # Restaurer paramètres caméra
+                vwidth = sun_saved_vwidth
+                vheight = sun_saved_vheight
+                zoom = sun_saved_zoom
+                use_native_sensor_mode = sun_saved_use_native
+                gain = sun_saved_gain
+                if sun_saved_exposure > 0:
+                    custom_sspeed = sun_saved_exposure
+
+                print("[SOLAR] Restauration configuration caméra")
+                kill_preview_process()
+                preview()
+
+                windowSurfaceObj.fill((0, 0, 0))
+                menu = 11
+                Menu()
+                pygame.display.update()
+                print("[SOLAR] Mode désactivé")
+                continue
+
+            # Sliders Gain/Expo
+            new_g = is_click_on_sun_gain_slider(mousex, mousey, fs_width, fs_height)
+            if new_g is not None:
+                sun_gain = new_g
+                apply_controls_immediately(gain_value=sun_gain)
+                continue
+            new_e = is_click_on_sun_exposure_slider(mousex, mousey, fs_width, fs_height)
+            if new_e is not None:
+                sun_exposure_us = new_e
+                apply_controls_immediately(exposure_time=sun_exposure_us)
+                continue
+
+            # Sliders settings panel
+            if sun_settings_visible == 1 and _sun_slider_rects:
+                if handle_sun_slider_click(mousex, mousey, _sun_slider_rects):
+                    continue
+
+            continue  # Rester en mode Solar
 
         # ===== GESTION DES CLICS EN MODE JSK LIVE =====
         if jsk_live_mode == 1:
@@ -19416,7 +20508,12 @@ while True:
                           hdr_method=jsk_hdr_method,
                           denoise_type=jsk_denoise_type,
                           denoise_strength=jsk_denoise_strength,
-                          hdr_weights=jsk_hdr_weights
+                          hdr_weights=jsk_hdr_weights,
+                          color_enabled=jsk_color_enabled == 1,
+                          r_gain=jsk_r_gain / 100.0,
+                          g_gain=jsk_g_gain / 100.0,
+                          b_gain=jsk_b_gain / 100.0,
+                          contrast=jsk_contrast / 100.0
                       )
 
                       # Initialiser le recorder (dimensions 1920x1080)
@@ -19503,6 +20600,83 @@ while True:
                   windowSurfaceObj.fill((0, 0, 0))
                   pygame.display.update()
                   print(f"[MOON] Mode activé — preset: {MOON_PRESETS[moon_preset]['name']}")
+
+              elif button_row == 4:
+                  # SUN - Mode Solar White Light
+                  sun_mode = 1
+                  sun_settings_visible = 0
+                  _sun_last_surface = None
+                  _sun_slider_rects = {}
+
+                  # Sauvegarder les paramètres actuels pour restauration à la sortie
+                  sun_saved_vwidth = vwidth
+                  sun_saved_vheight = vheight
+                  sun_saved_zoom = zoom
+                  sun_saved_use_native = use_native_sensor_mode
+                  sun_saved_gain = gain
+                  sun_saved_exposure = custom_sspeed if custom_sspeed > 0 else sspeed
+
+                  # Initialiser gain/expo depuis valeurs actuelles
+                  sun_gain = max(0, min(400, gain if gain > 0 else 80))
+                  _init_expo = custom_sspeed if custom_sspeed > 0 else sspeed
+                  sun_exposure_us = max(1000, min(20000, _init_expo if _init_expo > 0 else 5000))
+
+                  # Forcer binning 1920×1080 à l'entrée
+                  vwidth = 1920
+                  vheight = 1080
+                  zoom = 0
+                  use_native_sensor_mode = 0
+
+                  # Reconfigurer la caméra
+                  print("[SOLAR] Configuration caméra: binning 1920×1080")
+                  kill_preview_process()
+                  preview()
+
+                  # S'assurer que capture_thread est en mode main (ISP)
+                  if capture_thread is not None:
+                      capture_thread.set_capture_params({'type': 'main'})
+
+                  # Initialiser le processor avec le preset courant
+                  sun_processor = SolarProcessor()
+                  sun_processor.apply_preset(sun_preset)
+                  # Synchroniser paramètres globaux → processor
+                  sun_processor.configure(
+                      lucky_frames=sun_lucky_frames,
+                      best_pct=float(sun_best_pct),
+                      align_mode=sun_align_mode,
+                      limb_correct=sun_limb_correct == 1,
+                      limb_kernel=sun_limb_kernel,
+                      mask_disk=sun_mask_disk == 1,
+                      clahe_en=sun_clahe_en == 1,
+                      clahe_str=sun_clahe_str / 10.0,
+                      clahe_tile=sun_clahe_tile,
+                      usm_en=sun_usm_en == 1,
+                      usm_sigma=sun_usm_sigma / 10.0,
+                      usm_amount=sun_usm_amount / 10.0,
+                      usm_adaptive=sun_usm_adaptive == 1,
+                      usm_thresh=sun_usm_thresh,
+                      lr_en=sun_lr_en == 1,
+                      lr_iter=sun_lr_iter,
+                      lr_sigma=sun_lr_sigma / 10.0,
+                      lr_ringing=sun_lr_ringing == 1,
+                      false_color=sun_false_color,
+                  )
+
+                  # Initialiser le recorder
+                  sun_recorder = JSKVideoRecorder()
+
+                  # Passer en plein écran
+                  display_modes = pygame.display.list_modes()
+                  if display_modes and display_modes != -1:
+                      max_width, max_height = display_modes[0]
+                  else:
+                      screen_info = pygame.display.Info()
+                      max_width, max_height = screen_info.current_w, screen_info.current_h
+                  windowSurfaceObj = pygame.display.set_mode(
+                      (max_width, max_height), pygame.FULLSCREEN, 24)
+                  windowSurfaceObj.fill((0, 0, 0))
+                  pygame.display.update()
+                  print(f"[SOLAR] Mode activé — preset: {SOLAR_PRESETS[sun_preset]['name']}")
 
               elif button_row == 2:
                   # COLIM - Mode collimation Newton
