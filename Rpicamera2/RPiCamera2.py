@@ -61,7 +61,6 @@ from picamera2 import Picamera2
 from libcamera import controls, Transform
 
 # Import Live Stack modules (dans libastrostack/)
-from libastrostack.rpicamera_livestack import create_livestack_session
 from libastrostack.rpicamera_livestack_advanced import create_advanced_livestack_session
 
 # Import Allsky module (dans libastrostack/)
@@ -384,7 +383,7 @@ def apply_controls_immediately(exposure_time=None, gain_value=None):
 
                 # Recréer et redémarrer avec les mêmes paramètres de type
                 new_thread = AsyncCaptureThread(picam2)
-                if (livestack_active or luckystack_active) and raw_format >= 2:
+                if livestack_active and raw_format >= 2:
                     new_thread.set_capture_params({'type': 'raw'})
                 else:
                     new_thread.set_capture_params({'type': 'main'})
@@ -511,6 +510,10 @@ class AsyncCaptureThread:
     def set_capture_params(self, params):
         """Définit les paramètres pour la prochaine capture"""
         self.capture_params = params.copy()
+        # Vider la frame en attente pour éviter d'afficher une frame du mauvais mode
+        with self.frame_lock:
+            self.latest_frame = None
+            self.latest_metadata = None
 
     def is_capturing(self):
         """Retourne True si une capture est en cours"""
@@ -1576,8 +1579,9 @@ moon_exposure_us = 100000   # 100ms
 # Binning Moon
 moon_binning = 1            # 1=binning ON (défaut), 0=natif
 # Paramètres processor (entiers pour sliders)
-moon_sat_factor = 25        # /10 → 2.5  (plage 10-60)
+moon_sat_factor = 25        # /10 → 2.5  (plage 10-200, max x20.0)
 moon_sat_iter = 4           # 1-8
+moon_contrast = 10          # /10 → 1.0  (plage 10-40, 1.0=neutre)
 moon_lum_protect = 220      # 100-255
 moon_noise_enabled = 1      # 0=OFF, 1=ON
 moon_noise_strength = 7     # impair : 3,5,7,9,11
@@ -1601,6 +1605,7 @@ _sun_slider_rects = {}      # Rects des sliders settings
 _sun_slider_dragging = False
 _sun_ge_dragging = None     # 'gain' ou 'expo'
 # Sauvegarde paramètres à l'entrée
+sun_binning = 1             # 1=binning 2x2 (1920×1080), 0=natif (3856×2180)
 sun_saved_vwidth = 1920
 sun_saved_vheight = 1080
 sun_saved_zoom = 0
@@ -1615,7 +1620,7 @@ sun_lucky_frames = 0        # 0=OFF, 1-500
 sun_best_pct = 15           # 5-50 %
 sun_limb_correct = 1        # 1=ON, 0=OFF
 sun_limb_kernel = 101       # impair 51-201
-sun_mask_disk = 1           # 1=ON, 0=OFF
+sun_mask_disk = 0           # 1=ON, 0=OFF
 sun_clahe_en = 1            # 1=ON, 0=OFF
 sun_clahe_str = 15          # /10 → 1.5  (plage 0-40)
 sun_clahe_tile = 8          # 4-32
@@ -1699,6 +1704,7 @@ p = None  # Subprocess rpicam-vid (None en mode Picamera2)
 # Picamera2 variables
 picam2 = None  # Instance Picamera2
 capture_thread = None  # Thread de capture asynchrone
+mjpeg_extractor = None  # Extracteur MJPEG (rpicam-vid mode)
 use_picamera2 = True  # Flag pour activer Picamera2 (False = utiliser rpicam-vid)
 use_native_sensor_mode = 0  # 0=binning rapide (1080p), 1=résolution native complète du capteur
 
@@ -1707,6 +1713,58 @@ livestack = None  # Instance RPiCameraLiveStack
 livestack_active = False  # Mode Live Stack actif
 luckystack = None  # Instance RPiCameraLiveStackAdvanced (mode Lucky)
 luckystack_active = False  # Mode Lucky Stack actif
+
+# Live Stack Interface Mode (comme Moon/Sun - sans lancer le stack directement)
+ls_interface_mode = 0        # 0=OFF, 1=Interface LS active
+ls_settings_visible = 0      # 0=Masqué, 1=Affiché
+ls_settings_tab = 0          # 0=Capture, 1=Qualité, 2=Stacking, 3=Scheduler
+_ls_slider_rects = {}
+_ls_slider_dragging = False
+_ls_ge_dragging = None       # 'gain', 'expo', 'zoom' ou None
+# Lucky Stack Interface Mode (sans lancer le stack directement)
+lucky_interface_mode = 0     # 0=OFF, 1=Interface Lucky Stack active
+lucky_settings_visible = 0   # 0=Masqué, 1=Affiché
+lucky_settings_tab = 0       # 0=Lucky, 1=Save, 2=Image, 3=Filtre
+_lucky_slider_rects = {}
+_lucky_slider_dragging = False
+_lucky_ge_dragging = None    # 'gain', 'expo', 'zoom' ou None
+
+# Enregistrement vidéo de progression Lucky
+lucky_video_active = False   # True = enregistrement en cours
+lucky_video_writer = None    # cv2.VideoWriter instance
+lucky_video_path  = ""       # Chemin fichier en cours
+lucky_last_filtered_array = None  # Dernier résultat filtré (pour bouton SAVE PNG)
+
+# Filtres de netteté post-stack Lucky (onglet Filtre)
+ls_lucky_clahe_en    = 0     # 0=off, 1=on
+ls_lucky_clahe_str   = 15    # CLAHE clipLimit ×10  (10→1.0 … 40→4.0)
+ls_lucky_clahe_tile  = 8     # CLAHE tileGridSize (4–32)
+ls_lucky_usm_en      = 0     # 0=off, 1=on
+ls_lucky_usm_sigma   = 12    # USM sigma ×10  (5→0.5 … 50→5.0)
+ls_lucky_usm_amount  = 20    # USM amount ×10 (5→0.5 … 50→5.0)
+ls_lucky_lr_en       = 0     # 0=off, 1=on
+ls_lucky_lr_iter     = 10    # LR itérations (5–60)
+ls_lucky_lr_sigma    = 10    # LR sigma ×10  (5→0.5 … 30→3.0)
+# Gain/Expo/Zoom dédiés LS (affectent le preview en temps réel)
+ls_gain = 10                 # Gain caméra LS preview (0=AUTO)
+ls_exposure_us = 10000      # Temps d'exposition LS preview (10ms par défaut)
+ls_zoom = 0                  # Niveau de zoom LS (0-5)
+# Paramètres caméra sauvegardés avant entrée en mode LS
+ls_saved_gain = 0
+ls_saved_exposure = 0
+ls_saved_zoom = 0
+ls_saved_vwidth = 1920
+ls_saved_vheight = 1080
+# Scheduler Live Stack
+ls_scheduler_enabled = 0     # 0=OFF, 1=ON
+ls_sched_gain = 10           # Gain pour le scheduler (sans affecter preview)
+ls_sched_expo_us = 10000000  # Expo pour le scheduler (sans affecter preview)
+ls_sched_frames = 100        # Nombre de frames à stacker pour le scheduler
+ls_sched_frames_done = 0     # Compteur de frames stackées par le scheduler
+ls_save_dng_mode = 0    # 0=non, 1=acceptées seulement, 2=toutes frames
+ls_cam_brightness = 0   # Brightness hardware ISP LS: -100-100 → -1.0 à 1.0 (défaut 0)
+ls_cam_contrast = 100   # Contrast hardware ISP LS: 0-200 → 0.0-2.0 (défaut 1.0)
+ls_cam_saturation = 10  # Saturation hardware ISP LS: 0-20 → 0.0-2.0 (défaut 1.0)
 
 # Live Stack parameters
 ls_preview_refresh = 5  # Rafraîchir preview toutes les N images (1-10)
@@ -2100,7 +2158,7 @@ livestack_limits = [
     'ls_lucky_keep',1,50,
     'ls_lucky_score',0,3,
     'ls_lucky_stack',0,2,
-    'ls_lucky_align',0,1,
+    'ls_lucky_align',0,3,
     'ls_lucky_roi',20,100
 ]
 
@@ -2432,7 +2490,7 @@ ls_lucky_buffer = max(10, min(ls_lucky_buffer, 200))
 ls_lucky_keep = max(1, min(ls_lucky_keep, 50))
 ls_lucky_score = max(0, min(ls_lucky_score, 3))  # 0-3: laplacian/gradient/sobel/tenengrad
 ls_lucky_stack = max(0, min(ls_lucky_stack, 2))  # 0-2: mean/median/sigma_clip
-ls_lucky_align = max(0, min(ls_lucky_align, 1))
+ls_lucky_align = max(0, min(ls_lucky_align, 3))  # 0=off, 1=surface, 2=disk, 3=hybrid
 ls_lucky_roi = max(20, min(ls_lucky_roi, 100))
 ls_lucky_save_progress = max(0, min(ls_lucky_save_progress, 1))  # 0-1: off/on
 
@@ -5009,6 +5067,1282 @@ def is_click_on_livestack_button(mousex, mousey, screen_width):
 
 
 # ============================================================================
+# LIVE STACK INTERFACE - Boutons, sliders et panneau de réglages
+# Inspiré du modèle Moon/Sun : sliders Gain/Expo/Zoom en haut-centre,
+# bouton SET ouvrant un panneau multi-onglets à droite.
+# ============================================================================
+
+def draw_ls_settings_icon(screen_width, screen_height, active=False):
+    """Icône SET en haut à gauche — Live Stack interface."""
+    global windowSurfaceObj, _font_cache
+    icon_size = 50; margin = 15
+    bg = (40, 70, 50) if active else (30, 50, 35)
+    border = (80, 180, 100) if active else (50, 90, 60)
+    icon_rect = pygame.Rect(margin, margin, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border, icon_rect, 2, border_radius=8)
+    ck = 22
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    s = _font_cache[ck].render("SET", True, (140, 230, 160))
+    windowSurfaceObj.blit(s, s.get_rect(center=icon_rect.center))
+    return icon_rect
+
+
+def draw_ls_save_button(screen_width, screen_height, has_stack=False):
+    """Bouton SAVE en haut à droite — Live Stack interface."""
+    global windowSurfaceObj, _font_cache
+    icon_size = 50; margin = 15
+    icon_x = screen_width - icon_size - margin
+    bg = (40, 80, 50) if has_stack else (30, 40, 35)
+    border = (80, 180, 100) if has_stack else (55, 80, 60)
+    tc = (160, 255, 180) if has_stack else (90, 130, 100)
+    icon_rect = pygame.Rect(icon_x, margin, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border, icon_rect, 2, border_radius=8)
+    ck = 19
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    cx, cy = icon_rect.centerx, icon_rect.centery
+    windowSurfaceObj.blit(f.render("SAVE", True, tc),
+                          f.render("SAVE", True, tc).get_rect(centerx=cx, centery=cy - 8))
+    windowSurfaceObj.blit(f.render("FIT", True, tc),
+                          f.render("FIT", True, tc).get_rect(centerx=cx, centery=cy + 8))
+    return icon_rect
+
+
+def draw_ls_exit_button(screen_width, screen_height):
+    """Bouton EXIT en bas à gauche — Live Stack interface."""
+    global windowSurfaceObj, _font_cache
+    icon_size = 50; margin = 15
+    icon_rect = pygame.Rect(margin, screen_height - icon_size - margin, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, (70, 50, 50), icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, (120, 80, 80), icon_rect, 2, border_radius=8)
+    ck = 22
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    s = _font_cache[ck].render("EXIT", True, (200, 160, 160))
+    windowSurfaceObj.blit(s, s.get_rect(center=icon_rect.center))
+    return icon_rect
+
+
+def draw_ls_reset_button(screen_width, screen_height):
+    """Bouton RESET en bas à gauche+1 — Live Stack interface."""
+    global windowSurfaceObj, _font_cache
+    icon_size = 50; margin = 15
+    icon_rect = pygame.Rect(margin + icon_size + margin,
+                            screen_height - icon_size - margin, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, (45, 45, 70), icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, (75, 75, 130), icon_rect, 2, border_radius=8)
+    ck = 19
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    cx, cy = icon_rect.centerx, icon_rect.centery
+    windowSurfaceObj.blit(f.render("RST", True, (160, 160, 220)),
+                          f.render("RST", True, (160, 160, 220)).get_rect(centerx=cx, centery=cy - 8))
+    windowSurfaceObj.blit(f.render("STACK", True, (130, 130, 190)),
+                          f.render("STACK", True, (130, 130, 190)).get_rect(centerx=cx, centery=cy + 8))
+    return icon_rect
+
+
+def draw_ls_start_stop_button(screen_width, screen_height, is_running=False):
+    """Bouton START/STOP en bas à droite — Live Stack interface."""
+    global windowSurfaceObj, _font_cache
+    icon_size = 50; margin = 15
+    icon_rect = pygame.Rect(screen_width - icon_size - margin,
+                            screen_height - icon_size - margin, icon_size, icon_size)
+    if is_running:
+        bg, border, tc, label = (120, 40, 40), (220, 80, 80), (255, 180, 180), "STOP"
+    else:
+        bg, border, tc, label = (40, 100, 50), (80, 200, 100), (160, 255, 180), "START"
+    pygame.draw.rect(windowSurfaceObj, bg, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border, icon_rect, 2, border_radius=8)
+    ck = 20
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    s = _font_cache[ck].render(label, True, tc)
+    windowSurfaceObj.blit(s, s.get_rect(center=icon_rect.center))
+    return icon_rect
+
+
+def _ls_ge_slider_positions(screen_height, screen_width=1920):
+    """Positions des 3 sliders Gain/Expo/Zoom — Live Stack interface (haut-centre)."""
+    slider_w = 300
+    slider_h = 28
+    sx = (screen_width - slider_w) // 2
+    sy_expo = 75
+    sy_gain = sy_expo + slider_h + 6
+    sy_zoom = sy_gain + slider_h + 6
+    return sx, sy_gain, sy_expo, sy_zoom, slider_w, slider_h
+
+
+def draw_ls_gain_expo_zoom(screen_width, screen_height):
+    """Dessine les sliders Gain, Expo, Zoom en haut-centre — Live Stack interface."""
+    global windowSurfaceObj, _font_cache, ls_gain, ls_exposure_us, ls_zoom
+    import math
+    sx, sy_gain, sy_expo, sy_zoom, slider_w, slider_h = _ls_ge_slider_positions(screen_height, screen_width)
+
+    min_exp_us, max_exp_us = 1000, 100000  # 1ms – 100ms
+    exp_c = max(min_exp_us, min(ls_exposure_us, max_exp_us))
+    log_min = math.log10(min_exp_us)
+    log_max = math.log10(max_exp_us)
+    expo_ratio = (math.log10(exp_c) - log_min) / (log_max - log_min)
+
+    expo_ms = ls_exposure_us / 1000.0
+    expo_text = f"Expo: {expo_ms:.1f}ms" if expo_ms < 10 else f"Expo: {expo_ms:.0f}ms"
+    gain_ratio = ls_gain / 300.0 if ls_gain > 0 else 0.0
+    gain_text = f"Gain: {'AUTO' if ls_gain == 0 else ls_gain}"
+    zoom_ratio = ls_zoom / 5.0
+    zoom_text = f"Zoom: {ls_zoom}x"
+
+    ck = 22
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    fontObj = _font_cache[ck]
+
+    for sy, label, ratio, color in [
+        (sy_expo, expo_text, expo_ratio, (60, 110, 170)),
+        (sy_gain, gain_text, gain_ratio, (90, 150, 60)),
+        (sy_zoom, zoom_text, zoom_ratio, (70, 130, 140)),
+    ]:
+        bg_rect = pygame.Rect(sx, sy, slider_w, slider_h)
+        pygame.draw.rect(windowSurfaceObj, (30, 38, 30), bg_rect, border_radius=5)
+        pygame.draw.rect(windowSurfaceObj, (55, 80, 55), bg_rect, 1, border_radius=5)
+        fill_w = int(min(1.0, ratio) * (slider_w - 10))
+        if fill_w > 0:
+            pygame.draw.rect(windowSurfaceObj, color,
+                             pygame.Rect(sx + 5, sy + 5, fill_w, slider_h - 10), border_radius=3)
+        lbl = fontObj.render(label, True, (200, 235, 200))
+        windowSurfaceObj.blit(lbl, lbl.get_rect(center=bg_rect.center))
+
+
+def is_click_on_ls_gain_slider(mx, my, screen_width, screen_height):
+    """Retourne nouvelle valeur gain (0-300) ou None."""
+    sx, sy_gain, _, _, slider_w, slider_h = _ls_ge_slider_positions(screen_height, screen_width)
+    if sx <= mx <= sx + slider_w and sy_gain <= my <= sy_gain + slider_h:
+        return max(0, min(300, int((mx - sx) / slider_w * 300)))
+    return None
+
+
+def is_click_on_ls_expo_slider(mx, my, screen_width, screen_height):
+    """Retourne nouvelle valeur expo en µs (1000-100000) ou None."""
+    import math
+    sx, _, sy_expo, _, slider_w, slider_h = _ls_ge_slider_positions(screen_height, screen_width)
+    if sx <= mx <= sx + slider_w and sy_expo <= my <= sy_expo + slider_h:
+        ratio = max(0.0, min(1.0, (mx - sx) / slider_w))
+        log_min = math.log10(1000)
+        log_max = math.log10(100000)
+        return int(10 ** (log_min + ratio * (log_max - log_min)))
+    return None
+
+
+def is_click_on_ls_zoom_slider(mx, my, screen_width, screen_height):
+    """Retourne nouvelle valeur zoom (0-5) ou None."""
+    sx, _, _, sy_zoom, slider_w, slider_h = _ls_ge_slider_positions(screen_height, screen_width)
+    if sx <= mx <= sx + slider_w and sy_zoom <= my <= sy_zoom + slider_h:
+        return max(0, min(5, int((mx - sx) / slider_w * 5 + 0.5)))
+    return None
+
+
+def is_click_on_ls_settings(mx, my):
+    icon_size = 50; margin = 15
+    return margin <= mx <= margin + icon_size and margin <= my <= margin + icon_size
+
+
+def is_click_on_ls_save(mx, my, screen_width):
+    icon_size = 50; margin = 15
+    ix = screen_width - icon_size - margin
+    return ix <= mx <= ix + icon_size and margin <= my <= margin + icon_size
+
+
+def is_click_on_ls_save_png(mx, my, screen_width):
+    """Détecte un clic sur le bouton SAVE PNG (à gauche du bouton REC VIDEO)."""
+    icon_size = 50; margin = 15
+    ix = screen_width - 2 * icon_size - 2 * margin
+    return ix <= mx <= ix + icon_size and margin <= my <= margin + icon_size
+
+
+def is_click_on_ls_exit(mx, my, screen_height):
+    icon_size = 50; margin = 15
+    iy = screen_height - icon_size - margin
+    return margin <= mx <= margin + icon_size and iy <= my <= iy + icon_size
+
+
+def is_click_on_ls_reset(mx, my, screen_height):
+    icon_size = 50; margin = 15
+    ix = margin + icon_size + margin
+    iy = screen_height - icon_size - margin
+    return ix <= mx <= ix + icon_size and iy <= my <= iy + icon_size
+
+
+def is_click_on_ls_start_stop(mx, my, screen_width, screen_height):
+    icon_size = 50; margin = 15
+    ix = screen_width - icon_size - margin
+    iy = screen_height - icon_size - margin
+    return ix <= mx <= ix + icon_size and iy <= my <= iy + icon_size
+
+
+def draw_ls_stats_bar(screen_width, screen_height, stats, is_scheduler=False,
+                      sched_frames=100, sched_done=0):
+    """Barre de statistiques Live Stack — bas-centre."""
+    global windowSurfaceObj, _font_cache
+    if not stats:
+        return
+    ck = 20
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    accepted = stats.get('accepted_frames', 0)
+    total    = stats.get('total_frames', 0)
+    rejected = stats.get('rejected_frames', 0)
+    snr      = stats.get('snr_gain', 1.0)
+    sched_txt = f"  |  Scheduler: {sched_done}/{sched_frames}" if is_scheduler and sched_frames > 0 else ""
+    line = f"LiveStack: {accepted}/{total}  Rejetées: {rejected}  SNR: x{snr:.1f}{sched_txt}"
+    bar_w = min(len(line) * 8 + 20, screen_width - 100)
+    bar_h = 24
+    surf = pygame.Surface((bar_w, bar_h), pygame.SRCALPHA)
+    surf.fill((0, 0, 0, 160))
+    tx = (screen_width - bar_w) // 2
+    ty = screen_height - 95
+    windowSurfaceObj.blit(surf, (tx, ty))
+    lbl = f.render(line, True, (170, 255, 180))
+    windowSurfaceObj.blit(lbl, lbl.get_rect(centerx=screen_width // 2, centery=ty + 12))
+
+
+def _draw_ls_tab_bar(panel_x, panel_w, y):
+    """Dessine la barre d'onglets LS (5 onglets) et retourne les rects."""
+    global windowSurfaceObj, _font_cache, ls_settings_tab
+    tab_labels = ["Capture", "Qualité", "Stacking", "Scheduler", "Image"]
+    n = len(tab_labels)
+    tab_h = 24
+    tab_w = panel_w // n
+    rects = {}
+    ck = 17
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    for i, label in enumerate(tab_labels):
+        active = (ls_settings_tab == i)
+        bg     = (40, 80, 50)  if active else (22, 38, 26)
+        border = (80, 180, 100) if active else (45, 78, 52)
+        tc     = (180, 255, 200) if active else (95, 145, 105)
+        r = pygame.Rect(panel_x + i * tab_w, y, tab_w - 2, tab_h)
+        pygame.draw.rect(windowSurfaceObj, bg, r, border_radius=4)
+        pygame.draw.rect(windowSurfaceObj, border, r, 1, border_radius=4)
+        windowSurfaceObj.blit(f.render(label, True, tc), f.render(label, True, tc).get_rect(center=r.center))
+        rects[f'ls_tab_{i}'] = r
+    return rects, y + tab_h + 4
+
+
+def draw_ls_controls(screen_width, screen_height):
+    """
+    Panneau de réglages Live Stack — côté droit, 4 onglets.
+    Retourne dict des rects pour détection clics.
+    """
+    global windowSurfaceObj, _font_cache
+    global ls_preview_refresh, ls_alignment_mode
+    global ls_enable_qc, ls_max_fwhm, ls_min_sharpness, ls_max_drift, ls_min_stars
+    global ls_stack_method, ls_stack_kappa, ls_stack_iterations
+    global ls_save_progress, ls_save_final, ls_save_dng_mode
+    global ls_scheduler_enabled, ls_sched_gain, ls_sched_expo_us, ls_sched_frames
+    global ls_settings_tab, livestack_active, ls_sched_frames_done
+    global stretch_preset, isp_gamma, isp_brightness, isp_contrast, isp_saturation
+    global ls_cam_brightness, ls_cam_contrast, ls_cam_saturation, raw_format
+
+    panel_w  = 260
+    panel_m  = 10
+    panel_x  = screen_width - panel_w - panel_m
+    start_y  = 80
+    slider_w = panel_w - 10
+    slider_h = 26
+    margin   = 4
+    control_rects = {}
+
+    # Fond semi-transparent
+    panel_h = screen_height - start_y - 70
+    surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+    surf.fill((18, 32, 22, 205))
+    windowSurfaceObj.blit(surf, (panel_x, start_y - 10))
+
+    ck_title = 24
+    if ck_title not in _font_cache:
+        _font_cache[ck_title] = pygame.font.Font(None, ck_title)
+    ck_sect = 19
+    if ck_sect not in _font_cache:
+        _font_cache[ck_sect] = pygame.font.Font(None, ck_sect)
+
+    windowSurfaceObj.blit(
+        _font_cache[ck_title].render("LIVE STACK", True, (130, 220, 155)),
+        (panel_x, start_y - 15))
+    start_y += 16
+
+    # Barre d'onglets
+    tab_rects, start_y = _draw_ls_tab_bar(panel_x, panel_w, start_y)
+    control_rects.update(tab_rects)
+
+    # =====================================================
+    # ONGLET 0 : Capture
+    # =====================================================
+    if ls_settings_tab == 0:
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Alignement", True, (110, 195, 135)),
+            (panel_x + 2, start_y))
+        start_y += 16
+
+        align_names = ['OFF', 'Translation', 'Rotation', 'Affine']
+        cur_align = align_names[ls_alignment_mode] if 0 <= ls_alignment_mode < len(align_names) else "?"
+        control_rects['ls_alignment_mode'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Mode: {cur_align}", ls_alignment_mode, 0, 3, (75, 155, 95))
+        start_y += slider_h + margin
+
+        control_rects['ls_preview_refresh'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Refresh: /{ls_preview_refresh} img", ls_preview_refresh, 1, 10, (55, 125, 75))
+        start_y += slider_h + margin + 8
+
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Sauvegarde", True, (110, 195, 135)),
+            (panel_x + 2, start_y))
+        start_y += 16
+
+        control_rects['ls_save_progress'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"PNG progrès: {'ON' if ls_save_progress else 'OFF'}", ls_save_progress, 0, 1, (65, 135, 85))
+        start_y += slider_h + margin
+
+        control_rects['ls_save_final'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Save final: {'ON' if ls_save_final else 'OFF'}", ls_save_final, 0, 1, (65, 135, 85))
+        start_y += slider_h + margin
+
+        _dng_labels = ['OFF', 'Acc. seul', 'Toutes']
+        control_rects['ls_save_dng_mode'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Save RAW: {_dng_labels[ls_save_dng_mode]}", ls_save_dng_mode, 0, 2, (100, 110, 160))
+        start_y += slider_h + margin
+
+    # =====================================================
+    # ONGLET 1 : Qualité (QC)
+    # =====================================================
+    elif ls_settings_tab == 1:
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Contrôle Qualité", True, (110, 195, 135)),
+            (panel_x + 2, start_y))
+        start_y += 16
+
+        control_rects['ls_enable_qc'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"QC: {'ON' if ls_enable_qc else 'OFF'}", ls_enable_qc, 0, 1, (75, 155, 95))
+        start_y += slider_h + margin
+
+        if ls_enable_qc:
+            control_rects['ls_max_fwhm'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Max FWHM: {ls_max_fwhm/10:.1f}" + (" (off)" if ls_max_fwhm == 0 else ""),
+                ls_max_fwhm, 0, 250, (95, 165, 115))
+            start_y += slider_h + margin
+
+            control_rects['ls_min_sharpness'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Min Sharp: {ls_min_sharpness/1000:.3f}" + (" (off)" if ls_min_sharpness == 0 else ""),
+                ls_min_sharpness, 0, 150, (95, 165, 115))
+            start_y += slider_h + margin
+
+            control_rects['ls_max_drift'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Max Drift: {ls_max_drift}" + (" (off)" if ls_max_drift == 0 else "px"),
+                ls_max_drift, 0, 5000, (95, 165, 115))
+            start_y += slider_h + margin
+
+            control_rects['ls_min_stars'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Min Étoiles: {ls_min_stars}", ls_min_stars, 0, 20, (95, 165, 115))
+            start_y += slider_h + margin
+
+    # =====================================================
+    # ONGLET 2 : Stacking
+    # =====================================================
+    elif ls_settings_tab == 2:
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Méthode Stacking", True, (110, 195, 135)),
+            (panel_x + 2, start_y))
+        start_y += 16
+
+        stack_method_names = ['Mean', 'Median', 'Kappa-σ', 'Winsorized', 'Weighted']
+        cur_method = stack_method_names[ls_stack_method] if 0 <= ls_stack_method < len(stack_method_names) else "?"
+        control_rects['ls_stack_method'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Méthode: {cur_method}", ls_stack_method, 0, 4, (75, 155, 95))
+        start_y += slider_h + margin
+
+        if ls_stack_method in (2, 3):
+            control_rects['ls_stack_kappa'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Kappa: {ls_stack_kappa/10:.1f}", ls_stack_kappa, 10, 40, (95, 165, 115))
+            start_y += slider_h + margin
+
+            control_rects['ls_stack_iterations'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Itérations: {ls_stack_iterations}", ls_stack_iterations, 1, 10, (95, 165, 115))
+            start_y += slider_h + margin
+
+    # =====================================================
+    # ONGLET 3 : Scheduler
+    # =====================================================
+    elif ls_settings_tab == 3:
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Scheduler Live Stack", True, (110, 195, 135)),
+            (panel_x + 2, start_y))
+        start_y += 16
+
+        control_rects['ls_scheduler_enabled'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Scheduler: {'ON' if ls_scheduler_enabled else 'OFF'}",
+            ls_scheduler_enabled, 0, 1, (75, 155, 95))
+        start_y += slider_h + margin + 4
+
+        if ls_scheduler_enabled:
+            ck18 = 18
+            if ck18 not in _font_cache:
+                _font_cache[ck18] = pygame.font.Font(None, ck18)
+            windowSurfaceObj.blit(
+                _font_cache[ck18].render("Paramètres (sans affecter preview):", True, (130, 175, 145)),
+                (panel_x + 2, start_y))
+            start_y += 15
+
+            control_rects['ls_sched_gain'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Gain: {ls_sched_gain}", ls_sched_gain, 0, 300, (75, 145, 95))
+            start_y += slider_h + margin
+
+            import math as _math
+            _sexp_s = ls_sched_expo_us / 1000000.0
+            _sexp_text = f"Expo: {_sexp_s:.1f}s" if _sexp_s < 10 else f"Expo: {_sexp_s:.0f}s"
+            _sexp_c = max(100000, min(ls_sched_expo_us, 60000000))
+            _sratio = (_math.log10(_sexp_c) - _math.log10(100000)) / (_math.log10(60000000) - _math.log10(100000))
+            control_rects['ls_sched_expo'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                _sexp_text, int(_sratio * 1000), 0, 1000, (55, 120, 80))
+            start_y += slider_h + margin
+
+            control_rects['ls_sched_frames'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Nb frames: {ls_sched_frames}", ls_sched_frames, 10, 1000, (75, 145, 95))
+            start_y += slider_h + margin + 4
+
+            ck20 = 20
+            if ck20 not in _font_cache:
+                _font_cache[ck20] = pygame.font.Font(None, ck20)
+            if livestack_active and ls_sched_frames_done > 0:
+                prog = f"En cours: {ls_sched_frames_done}/{ls_sched_frames} frames"
+                windowSurfaceObj.blit(
+                    _font_cache[ck20].render(prog, True, (155, 255, 175)),
+                    (panel_x + 2, start_y))
+            else:
+                windowSurfaceObj.blit(
+                    _font_cache[ck20].render("Appuyer START pour lancer", True, (130, 175, 145)),
+                    (panel_x + 2, start_y))
+
+    # =====================================================
+    # ONGLET 4 : Image (Stretch + ISP)
+    # =====================================================
+    elif ls_settings_tab == 4:
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Stretch", True, (110, 195, 135)),
+            (panel_x + 2, start_y))
+        start_y += 16
+        _preset_names = ['OFF', 'GHS', 'Arcsinh']
+        control_rects['ls_img_stretch'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Stretch: {_preset_names[stretch_preset]}", stretch_preset, 0, 2, (95, 155, 115))
+        start_y += slider_h + margin
+
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Couleur", True, (110, 195, 135)),
+            (panel_x + 2, start_y))
+        start_y += 16
+        control_rects['ls_img_gamma'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Gamma: {isp_gamma/100:.2f}", isp_gamma, 50, 300, (200, 180, 100))
+        start_y += slider_h + margin
+        control_rects['ls_img_brightness'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Luminosité: {isp_brightness/100:+.2f}", isp_brightness, -50, 50, (160, 160, 200))
+        start_y += slider_h + margin
+        control_rects['ls_img_contrast'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Contraste: {isp_contrast/100:.1f}", isp_contrast, 50, 200, (140, 180, 160))
+        start_y += slider_h + margin
+        control_rects['ls_img_saturation'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Saturation: {isp_saturation/100:.1f}", isp_saturation, 0, 200, (180, 140, 180))
+        start_y += slider_h + margin
+
+        # Section ISP caméra (hardware) — uniquement en mode RGB/YUV
+        if raw_format < 2:
+            windowSurfaceObj.blit(
+                _font_cache[ck_sect].render("ISP Caméra", True, (110, 195, 135)),
+                (panel_x + 2, start_y))
+            start_y += 16
+            control_rects['ls_cam_brightness'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Bright cam: {ls_cam_brightness/100:+.2f}", ls_cam_brightness, -100, 100, (160, 160, 210))
+            start_y += slider_h + margin
+            control_rects['ls_cam_contrast'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Contraste cam: {ls_cam_contrast/100:.1f}x", ls_cam_contrast, 0, 200, (140, 190, 160))
+            start_y += slider_h + margin
+            control_rects['ls_cam_saturation'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Saturation cam: {ls_cam_saturation/10:.1f}", ls_cam_saturation, 0, 20, (190, 140, 190))
+            start_y += slider_h + margin
+
+    return control_rects
+
+
+def handle_ls_slider_click(mx, my, control_rects):
+    """Gère le clic sur un slider du panneau LS. Retourne True si géré."""
+    global ls_preview_refresh, ls_alignment_mode, ls_enable_qc
+    global ls_max_fwhm, ls_min_sharpness, ls_max_drift, ls_min_stars
+    global ls_stack_method, ls_stack_kappa, ls_stack_iterations
+    global ls_settings_tab, ls_save_progress, ls_save_final, ls_save_dng_mode
+    global ls_scheduler_enabled, ls_sched_gain, ls_sched_expo_us, ls_sched_frames
+    global stretch_preset, isp_gamma, isp_brightness, isp_contrast, isp_saturation
+    global ls_cam_brightness, ls_cam_contrast, ls_cam_saturation, picam2, use_picamera2
+    global livestack
+    import math as _math
+
+    for name, rect in control_rects.items():
+        if rect.collidepoint(mx, my):
+            ratio = max(0.0, min(1.0, (mx - rect.x) / rect.width))
+            if name.startswith('ls_tab_'):
+                ls_settings_tab = int(name[-1])
+            elif name == 'ls_alignment_mode':
+                ls_alignment_mode = max(0, min(3, int(ratio * 3 + 0.5)))
+            elif name == 'ls_preview_refresh':
+                ls_preview_refresh = max(1, min(10, int(ratio * 9) + 1))
+            elif name == 'ls_save_progress':
+                ls_save_progress = 1 if ratio > 0.5 else 0
+            elif name == 'ls_save_final':
+                ls_save_final = 1 if ratio > 0.5 else 0
+            elif name == 'ls_enable_qc':
+                ls_enable_qc = 1 if ratio > 0.5 else 0
+            elif name == 'ls_max_fwhm':
+                ls_max_fwhm = int(ratio * 250)
+            elif name == 'ls_min_sharpness':
+                ls_min_sharpness = int(ratio * 150)
+            elif name == 'ls_max_drift':
+                ls_max_drift = int(ratio * 5000)
+            elif name == 'ls_min_stars':
+                ls_min_stars = max(0, min(20, int(ratio * 20)))
+            elif name == 'ls_stack_method':
+                ls_stack_method = max(0, min(4, int(ratio * 4 + 0.5)))
+            elif name == 'ls_stack_kappa':
+                ls_stack_kappa = max(10, min(40, int(ratio * 30) + 10))
+            elif name == 'ls_stack_iterations':
+                ls_stack_iterations = max(1, min(10, int(ratio * 9) + 1))
+            elif name == 'ls_scheduler_enabled':
+                ls_scheduler_enabled = 1 if ratio > 0.5 else 0
+            elif name == 'ls_sched_gain':
+                ls_sched_gain = max(0, min(300, int(ratio * 300)))
+            elif name == 'ls_sched_expo':
+                _log_min = _math.log10(100000)
+                _log_max = _math.log10(60000000)
+                ls_sched_expo_us = int(10 ** (_log_min + ratio * (_log_max - _log_min)))
+            elif name == 'ls_sched_frames':
+                ls_sched_frames = max(10, min(1000, int(ratio * 990) + 10))
+            elif name == 'ls_save_dng_mode':
+                ls_save_dng_mode = max(0, min(2, int(ratio * 2 + 0.5)))
+            elif name == 'ls_img_stretch':
+                stretch_preset = max(0, min(2, int(ratio * 2 + 0.5)))
+            elif name == 'ls_img_gamma':
+                isp_gamma = int(50 + ratio * 250)       # 50-300
+            elif name == 'ls_img_brightness':
+                isp_brightness = int(-50 + ratio * 100) # -50-50
+            elif name == 'ls_img_contrast':
+                isp_contrast = int(50 + ratio * 150)    # 50-200
+            elif name == 'ls_img_saturation':
+                isp_saturation = int(ratio * 200)       # 0-200
+            elif name == 'ls_cam_brightness':
+                ls_cam_brightness = int(-100 + ratio * 200)  # -100 à 100
+                if use_picamera2 and picam2 is not None:
+                    if livestack is None or not livestack.is_running:
+                        picam2.set_controls({"Brightness": ls_cam_brightness / 100.0})
+            elif name == 'ls_cam_contrast':
+                ls_cam_contrast = int(ratio * 200)           # 0 à 200
+                if use_picamera2 and picam2 is not None:
+                    if livestack is None or not livestack.is_running:
+                        picam2.set_controls({"Contrast": ls_cam_contrast / 100.0})
+            elif name == 'ls_cam_saturation':
+                ls_cam_saturation = int(ratio * 20)          # 0 à 20
+                if use_picamera2 and picam2 is not None:
+                    if livestack is None or not livestack.is_running:
+                        picam2.set_controls({"Saturation": ls_cam_saturation / 10.0})
+
+            # Propager les paramètres stacking vers livestack.configure()
+            # (les paramètres UI-only ou caméra-directs sont déjà traités ci-dessus)
+            _stacking_params = {
+                'ls_alignment_mode', 'ls_preview_refresh', 'ls_enable_qc',
+                'ls_max_fwhm', 'ls_min_sharpness', 'ls_max_drift', 'ls_min_stars',
+                'ls_stack_method', 'ls_stack_kappa', 'ls_stack_iterations',
+                'ls_save_dng_mode',
+            }
+            if name in _stacking_params and livestack is not None:
+                _method_names = ['mean', 'median', 'kappa_sigma', 'winsorized', 'weighted']
+                _dng_names    = ['none', 'accepted', 'all']
+                livestack.configure(
+                    alignment_mode=ls_alignment_modes[ls_alignment_mode],
+                    enable_qc=bool(ls_enable_qc),
+                    max_fwhm=ls_max_fwhm / 10.0 if ls_max_fwhm > 0 else 999.0,
+                    min_sharpness=ls_min_sharpness / 1000.0 if ls_min_sharpness > 0 else 0.0,
+                    max_drift=float(ls_max_drift) if ls_max_drift > 0 else 999999.0,
+                    min_stars=int(ls_min_stars),
+                    stacking_method=_method_names[max(0, min(len(_method_names)-1, ls_stack_method))],
+                    kappa=ls_stack_kappa / 10.0,
+                    iterations=ls_stack_iterations,
+                    preview_refresh=ls_preview_refresh,
+                    save_dng=_dng_names[max(0, min(2, ls_save_dng_mode))],
+                )
+
+            return True
+    return False
+
+
+def draw_ls_interface(screen_width, screen_height):
+    """
+    Dessine tous les éléments de l'interface Live Stack au-dessus du preview/stack.
+    À appeler après blit du fond, avant pygame.display.update().
+    """
+    global _ls_slider_rects, ls_settings_visible, livestack_active, livestack
+    global ls_scheduler_enabled, ls_sched_frames_done, ls_sched_frames
+
+    has_stack = False
+    if livestack is not None and livestack.session is not None:
+        try:
+            _st = livestack.get_stats()
+            has_stack = _st.get('accepted_frames', 0) > 0
+        except Exception:
+            pass
+
+    draw_ls_settings_icon(screen_width, screen_height, ls_settings_visible == 1)
+    draw_ls_save_button(screen_width, screen_height, has_stack)
+    draw_ls_exit_button(screen_width, screen_height)
+    draw_ls_reset_button(screen_width, screen_height)
+    draw_ls_start_stop_button(screen_width, screen_height, livestack_active)
+    draw_ls_gain_expo_zoom(screen_width, screen_height)
+
+    if livestack_active and livestack is not None:
+        try:
+            stats = livestack.get_stats()
+            draw_ls_stats_bar(screen_width, screen_height, stats,
+                              is_scheduler=bool(ls_scheduler_enabled),
+                              sched_frames=ls_sched_frames,
+                              sched_done=ls_sched_frames_done)
+        except Exception:
+            pass
+
+    if ls_settings_visible == 1:
+        _ls_slider_rects = draw_ls_controls(screen_width, screen_height)
+    else:
+        _ls_slider_rects = {}
+
+
+# ============================================================================
+# LUCKY STACK INTERFACE
+# ============================================================================
+
+def apply_lucky_post_stack_filters(img):
+    """
+    Applique les filtres de netteté post-stack Lucky sur l'image résultante.
+
+    Pipeline : CLAHE → Unsharp Mask adaptatif → Déconvolution Lucy-Richardson
+    Travaille sur le canal luminance (YCrCb) pour préserver les couleurs.
+
+    Args:
+        img : uint8 ndarray, BGR (3 canaux) ou mono (2D)
+    Returns:
+        uint8 ndarray BGR ou mono filtré
+    """
+    global ls_lucky_clahe_en, ls_lucky_clahe_str, ls_lucky_clahe_tile
+    global ls_lucky_usm_en, ls_lucky_usm_sigma, ls_lucky_usm_amount
+    global ls_lucky_lr_en, ls_lucky_lr_iter, ls_lucky_lr_sigma
+
+    if img is None:
+        return img
+    # Rien à faire si tous les filtres sont OFF
+    if not ls_lucky_clahe_en and not ls_lucky_usm_en and not ls_lucky_lr_en:
+        return img
+
+    is_color = (img.ndim == 3)
+    if is_color:
+        ycrcb = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
+        y, cr, cb = cv2.split(ycrcb)
+        gray = y
+    else:
+        gray = img.copy()
+
+    # ── CLAHE ────────────────────────────────────────────────────────────────
+    if ls_lucky_clahe_en:
+        tile = max(2, int(ls_lucky_clahe_tile))
+        clahe_obj = cv2.createCLAHE(clipLimit=ls_lucky_clahe_str / 10.0,
+                                    tileGridSize=(tile, tile))
+        gray = clahe_obj.apply(gray)
+
+    # ── Unsharp Mask adaptatif ────────────────────────────────────────────────
+    if ls_lucky_usm_en:
+        sigma  = ls_lucky_usm_sigma  / 10.0
+        amount = ls_lucky_usm_amount / 10.0
+        k = max(3, int(sigma * 6) | 1)
+        blurred = cv2.GaussianBlur(gray.astype(np.float32), (k, k), sigma)
+        sharpened = gray.astype(np.float32) + (gray.astype(np.float32) - blurred) * (amount - 1.0)
+        gray = np.clip(sharpened, 0, 255).astype(np.uint8)
+
+    # ── Déconvolution Lucy-Richardson ────────────────────────────────────────
+    if ls_lucky_lr_en:
+        sigma  = ls_lucky_lr_sigma / 10.0
+        niters = int(ls_lucky_lr_iter)
+        k = max(3, int(sigma * 6) | 1)
+        psf_1d = cv2.getGaussianKernel(k, sigma)
+        psf_2d = (psf_1d @ psf_1d.T).astype(np.float32)
+        psf_2d /= psf_2d.sum()
+        img_f = gray.astype(np.float32) / 255.0
+        estimate = img_f.copy()
+        for _ in range(niters):
+            blurred_est = cv2.filter2D(estimate, -1, psf_2d,
+                                       borderType=cv2.BORDER_REFLECT)
+            blurred_est = np.clip(blurred_est, 1e-7, None)
+            ratio_conv  = cv2.filter2D(img_f / blurred_est, -1, psf_2d,
+                                       borderType=cv2.BORDER_REFLECT)
+            estimate    = np.clip(estimate * ratio_conv, 0.0, 1.0)
+        gray = np.clip(estimate * 255.0, 0, 255).astype(np.uint8)
+
+    if is_color:
+        ycrcb_out = cv2.merge([gray, cr, cb])
+        return cv2.cvtColor(ycrcb_out, cv2.COLOR_YCrCb2BGR)
+    return gray
+
+
+def draw_lucky_settings_icon(screen_width, screen_height, active=False):
+    """Icône SET en haut à gauche — Lucky Stack interface (bleu marine)."""
+    global windowSurfaceObj, _font_cache
+    icon_size = 50; margin = 15
+    bg = (20, 40, 100) if active else (15, 30, 80)
+    border = (60, 100, 200) if active else (40, 60, 140)
+    icon_rect = pygame.Rect(margin, margin, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border, icon_rect, 2, border_radius=8)
+    ck = 22
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    s = _font_cache[ck].render("SET", True, (140, 180, 255))
+    windowSurfaceObj.blit(s, s.get_rect(center=icon_rect.center))
+    return icon_rect
+
+
+def draw_lucky_rec_button(screen_width, screen_height, is_recording=False):
+    """Bouton REC VIDEO en haut à droite — Lucky Stack interface.
+    Rouge clignotant si enregistrement actif, bleu marine sinon."""
+    global windowSurfaceObj, _font_cache
+    icon_size = 50; margin = 15
+    icon_x = screen_width - icon_size - margin
+    if is_recording:
+        # Rouge vif quand actif
+        bg     = (120, 20, 20)
+        border = (255, 60, 60)
+        tc     = (255, 180, 180)
+        dot_c  = (255, 80, 80)
+    else:
+        bg     = (15, 25, 65)
+        border = (35, 50, 110)
+        tc     = (70, 100, 160)
+        dot_c  = (80, 50, 50)
+    icon_rect = pygame.Rect(icon_x, margin, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border, icon_rect, 2, border_radius=8)
+    # Petit cercle indicateur
+    pygame.draw.circle(windowSurfaceObj, dot_c,
+                       (icon_rect.centerx, icon_rect.top + 14), 5)
+    ck = 18
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    cx, cy = icon_rect.centerx, icon_rect.centery
+    lbl1 = "REC" if not is_recording else "■ REC"
+    windowSurfaceObj.blit(f.render(lbl1, True, tc),
+                          f.render(lbl1, True, tc).get_rect(centerx=cx, centery=cy + 4))
+    windowSurfaceObj.blit(f.render("VIDEO", True, tc),
+                          f.render("VIDEO", True, tc).get_rect(centerx=cx, centery=cy + 18))
+    return icon_rect
+
+
+def save_lucky_filtered_png(img_bgr, filename=None):
+    """Sauvegarde l'image Lucky filtrée (uint8 BGR) en PNG 8-bit.
+    Utilisée pour le bouton SAVE PNG et la sauvegarde finale.
+    Le FIT brut est géré séparément sans les filtres."""
+    global luckystack
+    import cv2 as _cv, time as _t
+    from pathlib import Path as _Path
+    try:
+        if luckystack is not None and hasattr(luckystack, 'output_dir'):
+            output_dir = luckystack.output_dir
+        else:
+            output_dir = _Path("/home/admin/stacks/lucky")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if filename is None:
+            ts = _t.strftime("%Y%m%d_%H%M%S")
+            filename = f"lucky_filtered_{ts}"
+        png_path = output_dir / f"{filename}.png"
+        _cv.imwrite(str(png_path), img_bgr)
+        print(f"[LUCKY PNG] Filtré sauvegardé : {png_path}")
+        return str(png_path)
+    except Exception as e:
+        print(f"[LUCKY PNG] Erreur sauvegarde : {e}")
+        return None
+
+
+def draw_lucky_save_png_button(screen_width, screen_height):
+    """Bouton SAVE PNG — à gauche du bouton REC VIDEO (haut droite).
+    Vert si une image filtrée est disponible, gris sinon."""
+    global windowSurfaceObj, _font_cache, lucky_last_filtered_array
+    icon_size = 50; margin = 15
+    icon_x = screen_width - 2 * icon_size - 2 * margin
+    has_img = lucky_last_filtered_array is not None
+    if has_img:
+        bg     = (15, 55, 25)
+        border = (40, 130, 60)
+        tc     = (90, 210, 110)
+    else:
+        bg     = (22, 22, 22)
+        border = (45, 45, 45)
+        tc     = (75, 75, 75)
+    icon_rect = pygame.Rect(icon_x, margin, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border, icon_rect, 2, border_radius=8)
+    ck = 18
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    cx, cy = icon_rect.centerx, icon_rect.centery
+    windowSurfaceObj.blit(f.render("SAVE", True, tc),
+                          f.render("SAVE", True, tc).get_rect(centerx=cx, centery=cy + 4))
+    windowSurfaceObj.blit(f.render("PNG", True, tc),
+                          f.render("PNG", True, tc).get_rect(centerx=cx, centery=cy + 18))
+    return icon_rect
+
+
+def draw_lucky_stats_bar(screen_width, screen_height, stats):
+    """Barre de statistiques Lucky Stack — bas-centre."""
+    global windowSurfaceObj, _font_cache
+    if not stats:
+        return
+    ck = 20
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    buffer_fill  = stats.get('lucky_buffer_fill', 0)
+    buffer_size  = stats.get('lucky_buffer_size', 0)
+    stacks_done  = stats.get('lucky_stacks_done', 0)
+    total_frames = stats.get('total_frames', 0)
+    avg_score    = stats.get('lucky_avg_score', 0)
+    line = f"Lucky: Buffer {buffer_fill}/{buffer_size} | Frames: {total_frames} | Stacks: {stacks_done} | Score: {avg_score:.1f}"
+    bar_w = min(len(line) * 8 + 20, screen_width - 100)
+    bar_h = 24
+    surf = pygame.Surface((bar_w, bar_h), pygame.SRCALPHA)
+    surf.fill((0, 0, 0, 160))
+    tx = (screen_width - bar_w) // 2
+    ty = screen_height - 95
+    windowSurfaceObj.blit(surf, (tx, ty))
+    lbl = f.render(line, True, (160, 200, 255))
+    windowSurfaceObj.blit(lbl, lbl.get_rect(centerx=screen_width // 2, centery=ty + 12))
+
+
+def _draw_lucky_tab_bar(panel_x, panel_w, y):
+    """Dessine la barre d'onglets Lucky (4 onglets) et retourne les rects."""
+    global windowSurfaceObj, _font_cache, lucky_settings_tab
+    tab_labels = ["Lucky", "Save", "Image", "Filtre"]
+    n = len(tab_labels)
+    tab_h = 24
+    tab_w = panel_w // n
+    rects = {}
+    ck = 17
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    for i, label in enumerate(tab_labels):
+        active = (lucky_settings_tab == i)
+        bg     = (20, 40, 110) if active else (12, 20, 60)
+        border = (60, 100, 200) if active else (30, 50, 110)
+        tc     = (160, 200, 255) if active else (80, 110, 180)
+        r = pygame.Rect(panel_x + i * tab_w, y, tab_w - 2, tab_h)
+        pygame.draw.rect(windowSurfaceObj, bg, r, border_radius=4)
+        pygame.draw.rect(windowSurfaceObj, border, r, 1, border_radius=4)
+        windowSurfaceObj.blit(f.render(label, True, tc), f.render(label, True, tc).get_rect(center=r.center))
+        rects[f'lucky_tab_{i}'] = r
+    return rects, y + tab_h + 4
+
+
+def draw_lucky_controls(screen_width, screen_height):
+    """
+    Panneau de réglages Lucky Stack — côté droit, 3 onglets.
+    Retourne dict des rects pour détection clics.
+    """
+    global windowSurfaceObj, _font_cache
+    global ls_lucky_buffer, ls_lucky_keep, ls_lucky_score, ls_lucky_stack
+    global ls_lucky_align, ls_lucky_roi
+    global ls_lucky_save_progress, ls_lucky_save_final
+    global lucky_settings_tab, luckystack_active
+    global stretch_preset, isp_gamma, isp_brightness, isp_contrast, isp_saturation
+    global raw_format
+
+    panel_w  = 260
+    panel_m  = 10
+    panel_x  = screen_width - panel_w - panel_m
+    start_y  = 80
+    slider_w = panel_w - 10
+    slider_h = 26
+    margin   = 4
+    control_rects = {}
+
+    # Fond semi-transparent (bleu marine)
+    panel_h = screen_height - start_y - 70
+    surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+    surf.fill((10, 20, 55, 205))
+    windowSurfaceObj.blit(surf, (panel_x, start_y - 10))
+
+    ck_title = 24
+    if ck_title not in _font_cache:
+        _font_cache[ck_title] = pygame.font.Font(None, ck_title)
+    ck_sect = 19
+    if ck_sect not in _font_cache:
+        _font_cache[ck_sect] = pygame.font.Font(None, ck_sect)
+
+    windowSurfaceObj.blit(
+        _font_cache[ck_title].render("LUCKY STACK", True, (130, 180, 255)),
+        (panel_x, start_y - 15))
+    start_y += 16
+
+    # Barre d'onglets
+    tab_rects, start_y = _draw_lucky_tab_bar(panel_x, panel_w, start_y)
+    control_rects.update(tab_rects)
+
+    # =====================================================
+    # ONGLET 0 : Lucky Imaging
+    # =====================================================
+    if lucky_settings_tab == 0:
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Sélection des frames", True, (100, 160, 255)),
+            (panel_x + 2, start_y))
+        start_y += 16
+
+        control_rects['ls_lucky_buffer'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Buffer: {ls_lucky_buffer} imgs", ls_lucky_buffer, 10, 200, (60, 100, 180))
+        start_y += slider_h + margin
+
+        control_rects['ls_lucky_keep'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Garder: {ls_lucky_keep}%", ls_lucky_keep, 1, 50, (60, 100, 180))
+        start_y += slider_h + margin + 8
+
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Qualité & Alignement", True, (100, 160, 255)),
+            (panel_x + 2, start_y))
+        start_y += 16
+
+        score_names = ['Laplacian', 'Gradient', 'Sobel', 'Tenengrad']
+        cur_score = score_names[ls_lucky_score] if 0 <= ls_lucky_score < len(score_names) else "?"
+        control_rects['ls_lucky_score'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Score: {cur_score}", ls_lucky_score, 0, 3, (80, 120, 200))
+        start_y += slider_h + margin
+
+        stack_names = ['Mean', 'Median', 'Sigma-Clip']
+        cur_stack = stack_names[ls_lucky_stack] if 0 <= ls_lucky_stack < len(stack_names) else "?"
+        control_rects['ls_lucky_stack'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Stack: {cur_stack}", ls_lucky_stack, 0, 2, (80, 120, 200))
+        start_y += slider_h + margin
+
+        _align_names = ['OFF', 'Surface', 'Disque', 'Hybride']
+        cur_align = _align_names[ls_lucky_align] if 0 <= ls_lucky_align < len(_align_names) else "?"
+        control_rects['ls_lucky_align'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Alignement: {cur_align}", ls_lucky_align, 0, 3, (80, 120, 200))
+        start_y += slider_h + margin
+
+        control_rects['ls_lucky_roi'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"ROI score: {ls_lucky_roi}%", ls_lucky_roi, 20, 100, (80, 120, 200))
+        start_y += slider_h + margin
+
+    # =====================================================
+    # ONGLET 1 : Sauvegarde
+    # =====================================================
+    elif lucky_settings_tab == 1:
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Sauvegarde", True, (100, 160, 255)),
+            (panel_x + 2, start_y))
+        start_y += 16
+
+        control_rects['ls_lucky_save_progress'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"PNG progrès: {'ON' if ls_lucky_save_progress else 'OFF'}",
+            ls_lucky_save_progress, 0, 1, (70, 110, 190))
+        start_y += slider_h + margin
+
+        control_rects['ls_lucky_save_final'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Save final: {'ON' if ls_lucky_save_final else 'OFF'}",
+            ls_lucky_save_final, 0, 1, (70, 110, 190))
+        start_y += slider_h + margin
+
+    # =====================================================
+    # ONGLET 2 : Image (Stretch)
+    # =====================================================
+    elif lucky_settings_tab == 2:
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Stretch", True, (100, 160, 255)),
+            (panel_x + 2, start_y))
+        start_y += 16
+        _preset_names = ['OFF', 'GHS', 'Arcsinh']
+        control_rects['ls_img_stretch'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Stretch: {_preset_names[stretch_preset]}", stretch_preset, 0, 2, (80, 120, 200))
+        start_y += slider_h + margin
+
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Couleur", True, (100, 160, 255)),
+            (panel_x + 2, start_y))
+        start_y += 16
+        control_rects['ls_img_gamma'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Gamma: {isp_gamma/100:.2f}", isp_gamma, 50, 300, (180, 160, 80))
+        start_y += slider_h + margin
+        control_rects['ls_img_brightness'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Luminosité: {isp_brightness/100:+.2f}", isp_brightness, -50, 50, (140, 140, 180))
+        start_y += slider_h + margin
+        control_rects['ls_img_contrast'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Contraste: {isp_contrast/100:.1f}", isp_contrast, 50, 200, (120, 160, 140))
+        start_y += slider_h + margin
+        control_rects['ls_img_saturation'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Saturation: {isp_saturation/100:.1f}", isp_saturation, 0, 200, (160, 120, 160))
+        start_y += slider_h + margin
+
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Balance des blancs", True, (100, 160, 255)),
+            (panel_x + 2, start_y))
+        start_y += 16
+        control_rects['ls_img_red'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Rouge: {red/10:.1f}", red, 5, 25, (200, 80, 80))
+        start_y += slider_h + margin
+        control_rects['ls_img_blue'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Bleu: {blue/10:.1f}", blue, 5, 25, (80, 120, 220))
+        start_y += slider_h + margin
+
+    # =====================================================
+    # ONGLET 3 : Filtres de netteté post-stack
+    # =====================================================
+    elif lucky_settings_tab == 3:
+        # ── CLAHE ──────────────────────────────────────
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("CLAHE (contraste local)", True, (100, 200, 160)),
+            (panel_x + 2, start_y))
+        start_y += 16
+        control_rects['ls_lucky_clahe_en'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"CLAHE: {'ON' if ls_lucky_clahe_en else 'OFF'}",
+            ls_lucky_clahe_en, 0, 1, (60, 160, 120))
+        start_y += slider_h + margin
+        control_rects['ls_lucky_clahe_str'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Force: {ls_lucky_clahe_str/10:.1f}",
+            ls_lucky_clahe_str, 5, 40, (60, 160, 120))
+        start_y += slider_h + margin
+        control_rects['ls_lucky_clahe_tile'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Tile: {ls_lucky_clahe_tile}px",
+            ls_lucky_clahe_tile, 4, 32, (60, 160, 120))
+        start_y += slider_h + margin + 2
+
+        # ── Unsharp Mask ────────────────────────────────
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Unsharp Mask", True, (200, 160, 80)),
+            (panel_x + 2, start_y))
+        start_y += 16
+        control_rects['ls_lucky_usm_en'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"USM: {'ON' if ls_lucky_usm_en else 'OFF'}",
+            ls_lucky_usm_en, 0, 1, (180, 140, 60))
+        start_y += slider_h + margin
+        control_rects['ls_lucky_usm_sigma'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Sigma: {ls_lucky_usm_sigma/10:.1f}",
+            ls_lucky_usm_sigma, 5, 50, (180, 140, 60))
+        start_y += slider_h + margin
+        control_rects['ls_lucky_usm_amount'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Amount: {ls_lucky_usm_amount/10:.1f}",
+            ls_lucky_usm_amount, 5, 50, (180, 140, 60))
+        start_y += slider_h + margin + 2
+
+        # ── Lucy-Richardson ─────────────────────────────
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Lucy-Richardson (lent)", True, (200, 120, 80)),
+            (panel_x + 2, start_y))
+        start_y += 16
+        control_rects['ls_lucky_lr_en'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"LR: {'ON' if ls_lucky_lr_en else 'OFF'}",
+            ls_lucky_lr_en, 0, 1, (180, 100, 60))
+        start_y += slider_h + margin
+        control_rects['ls_lucky_lr_iter'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Iter: {ls_lucky_lr_iter}",
+            ls_lucky_lr_iter, 5, 60, (180, 100, 60))
+        start_y += slider_h + margin
+        control_rects['ls_lucky_lr_sigma'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Sigma: {ls_lucky_lr_sigma/10:.1f}",
+            ls_lucky_lr_sigma, 5, 30, (180, 100, 60))
+        start_y += slider_h + margin
+
+    return control_rects
+
+
+def handle_lucky_slider_click(mx, my, control_rects):
+    """Gère le clic sur un slider du panneau Lucky. Retourne True si géré."""
+    global ls_lucky_buffer, ls_lucky_keep, ls_lucky_score, ls_lucky_stack
+    global ls_lucky_align, ls_lucky_roi, ls_lucky_save_progress, ls_lucky_save_final
+    global lucky_settings_tab
+    global stretch_preset, isp_gamma, isp_brightness, isp_contrast, isp_saturation
+    global red, blue, use_picamera2, picam2
+    global ls_lucky_clahe_en, ls_lucky_clahe_str, ls_lucky_clahe_tile
+    global ls_lucky_usm_en, ls_lucky_usm_sigma, ls_lucky_usm_amount
+    global ls_lucky_lr_en, ls_lucky_lr_iter, ls_lucky_lr_sigma
+
+    _needs_isp = False
+
+    for name, rect in control_rects.items():
+        if rect.collidepoint(mx, my):
+            ratio = max(0.0, min(1.0, (mx - rect.x) / rect.width))
+            if name.startswith('lucky_tab_'):
+                lucky_settings_tab = int(name[-1])
+            elif name == 'ls_lucky_buffer':
+                ls_lucky_buffer = max(10, min(200, int(10 + ratio * 190)))
+            elif name == 'ls_lucky_keep':
+                ls_lucky_keep = max(1, min(50, int(1 + ratio * 49)))
+            elif name == 'ls_lucky_score':
+                ls_lucky_score = max(0, min(3, int(ratio * 3 + 0.5)))
+            elif name == 'ls_lucky_stack':
+                ls_lucky_stack = max(0, min(2, int(ratio * 2 + 0.5)))
+            elif name == 'ls_lucky_align':
+                ls_lucky_align = max(0, min(3, int(ratio * 3 + 0.5)))
+            elif name == 'ls_lucky_roi':
+                ls_lucky_roi = max(20, min(100, int(20 + ratio * 80)))
+            elif name == 'ls_lucky_save_progress':
+                ls_lucky_save_progress = 1 if ratio > 0.5 else 0
+            elif name == 'ls_lucky_save_final':
+                ls_lucky_save_final = 1 if ratio > 0.5 else 0
+            elif name == 'ls_img_stretch':
+                stretch_preset = max(0, min(2, int(ratio * 2 + 0.5)))
+            elif name == 'ls_img_gamma':
+                isp_gamma = int(50 + ratio * 250)
+                _needs_isp = True
+            elif name == 'ls_img_brightness':
+                isp_brightness = int(-50 + ratio * 100)
+                if use_picamera2 and picam2 is not None:
+                    picam2.set_controls({"Brightness": isp_brightness / 100.0})
+                _needs_isp = True
+            elif name == 'ls_img_contrast':
+                isp_contrast = int(50 + ratio * 150)
+                if use_picamera2 and picam2 is not None:
+                    picam2.set_controls({"Contrast": isp_contrast / 100.0})
+                _needs_isp = True
+            elif name == 'ls_img_saturation':
+                isp_saturation = int(ratio * 200)
+                if use_picamera2 and picam2 is not None:
+                    picam2.set_controls({"Saturation": isp_saturation / 100.0})
+                _needs_isp = True
+            elif name == 'ls_img_red':
+                red = max(5, min(25, int(5 + ratio * 20)))
+                if use_picamera2 and picam2 is not None:
+                    picam2.set_controls({"AwbEnable": False,
+                                         "ColourGains": (red / 10.0, blue / 10.0)})
+            elif name == 'ls_img_blue':
+                blue = max(5, min(25, int(5 + ratio * 20)))
+                if use_picamera2 and picam2 is not None:
+                    picam2.set_controls({"AwbEnable": False,
+                                         "ColourGains": (red / 10.0, blue / 10.0)})
+            # ── Onglet Filtre ─────────────────────────────────────────────────
+            elif name == 'ls_lucky_clahe_en':
+                ls_lucky_clahe_en = 1 if ratio > 0.5 else 0
+            elif name == 'ls_lucky_clahe_str':
+                ls_lucky_clahe_str = max(5, min(40, int(5 + ratio * 35)))
+            elif name == 'ls_lucky_clahe_tile':
+                ls_lucky_clahe_tile = max(4, min(32, int(4 + ratio * 28)))
+            elif name == 'ls_lucky_usm_en':
+                ls_lucky_usm_en = 1 if ratio > 0.5 else 0
+            elif name == 'ls_lucky_usm_sigma':
+                ls_lucky_usm_sigma = max(5, min(50, int(5 + ratio * 45)))
+            elif name == 'ls_lucky_usm_amount':
+                ls_lucky_usm_amount = max(5, min(50, int(5 + ratio * 45)))
+            elif name == 'ls_lucky_lr_en':
+                ls_lucky_lr_en = 1 if ratio > 0.5 else 0
+            elif name == 'ls_lucky_lr_iter':
+                ls_lucky_lr_iter = max(5, min(60, int(5 + ratio * 55)))
+            elif name == 'ls_lucky_lr_sigma':
+                ls_lucky_lr_sigma = max(5, min(30, int(5 + ratio * 25)))
+            if _needs_isp:
+                apply_isp_to_session()
+            return True
+    return False
+
+
+def draw_lucky_interface(screen_width, screen_height):
+    """
+    Dessine tous les éléments de l'interface Lucky Stack au-dessus du preview/stack.
+    À appeler après blit du fond, avant pygame.display.update().
+    """
+    global _lucky_slider_rects, lucky_settings_visible, luckystack_active, luckystack
+
+    has_stack = False
+    if luckystack is not None:
+        try:
+            _st = luckystack.get_stats()
+            has_stack = _st.get('lucky_stacks_done', 0) > 0
+        except Exception:
+            pass
+
+    draw_lucky_settings_icon(screen_width, screen_height, lucky_settings_visible == 1)
+    draw_lucky_save_png_button(screen_width, screen_height)
+    draw_lucky_rec_button(screen_width, screen_height, lucky_video_active)
+    draw_ls_exit_button(screen_width, screen_height)
+    draw_ls_reset_button(screen_width, screen_height)
+    draw_ls_start_stop_button(screen_width, screen_height, luckystack_active)
+    draw_ls_gain_expo_zoom(screen_width, screen_height)
+
+    if luckystack_active and luckystack is not None:
+        try:
+            stats = luckystack.get_stats()
+            draw_lucky_stats_bar(screen_width, screen_height, stats)
+        except Exception:
+            pass
+
+    if lucky_settings_visible == 1:
+        _lucky_slider_rects = draw_lucky_controls(screen_width, screen_height)
+    else:
+        _lucky_slider_rects = {}
+
+
+# ============================================================================
 # RAW FULLSCREEN CONTROLS - Mode ajustement ISP/Stretch en temps réel
 # ============================================================================
 
@@ -7097,12 +8431,13 @@ def draw_moon_controls(screen_width, screen_height):
     Retourne dict des rects de sliders pour détection clics.
     """
     global windowSurfaceObj, _font_cache
-    global moon_sat_factor, moon_sat_iter, moon_lum_protect
+    global moon_sat_factor, moon_sat_iter, moon_lum_protect, moon_contrast
     global moon_noise_enabled, moon_noise_strength
     global moon_lrgb_enabled, moon_lrgb_weight
     global moon_wb_r, moon_wb_g, moon_wb_b, moon_preset, moon_processor
 
     panel_w   = 230
+
     panel_m   = 10
     panel_x   = screen_width - panel_w - panel_m
     start_y   = 80
@@ -7125,7 +8460,15 @@ def draw_moon_controls(screen_width, screen_height):
     windowSurfaceObj.blit(title, (panel_x, start_y - 15))
     start_y += 20
 
-    # Boost par passe (info)
+    # --- Preset (mode de traitement) ---
+    preset_name = MOON_PRESETS[moon_preset]['name'] if moon_preset < len(MOON_PRESETS) else '?'
+    control_rects['moon_preset'] = draw_jsk_slider(
+        panel_x, start_y, slider_w, slider_h,
+        f"Mode: {preset_name}", moon_preset, 0, len(MOON_PRESETS) - 1,
+        (100, 140, 200))
+    start_y += slider_h + margin
+
+    # Info mode actuel (boost/passe ou nom du mode)
     ck2 = 18
     if ck2 not in _font_cache:
         _font_cache[ck2] = pygame.font.Font(None, ck2)
@@ -7137,7 +8480,12 @@ def draw_moon_controls(screen_width, screen_height):
     # --- Saturation ---
     control_rects['moon_sat_factor'] = draw_jsk_slider(
         panel_x, start_y, slider_w, slider_h,
-        f"Sat: x{moon_sat_factor/10:.1f}", moon_sat_factor, 10, 60, (140, 100, 180))
+        f"Sat: x{moon_sat_factor/10:.1f}", moon_sat_factor, 10, 200, (140, 100, 180))
+    start_y += slider_h + margin
+
+    control_rects['moon_contrast'] = draw_jsk_slider(
+        panel_x, start_y, slider_w, slider_h,
+        f"Contraste: x{moon_contrast/10:.1f}", moon_contrast, 10, 40, (160, 120, 200))
     start_y += slider_h + margin
 
     control_rects['moon_sat_iter'] = draw_jsk_slider(
@@ -7215,7 +8563,7 @@ def handle_moon_slider_click(mx, my, control_rects):
     Gère le clic sur un slider du panneau Moon.
     Retourne True si un contrôle a été modifié.
     """
-    global moon_sat_factor, moon_sat_iter, moon_lum_protect
+    global moon_sat_factor, moon_sat_iter, moon_lum_protect, moon_contrast
     global moon_noise_enabled, moon_noise_strength
     global moon_lrgb_enabled, moon_lrgb_weight
     global moon_wb_r, moon_wb_g, moon_wb_b, moon_preset, moon_processor
@@ -7229,7 +8577,9 @@ def handle_moon_slider_click(mx, my, control_rects):
         ratio = max(0.0, min(1.0, rel_x / (rect.width - 15)))
 
         if name == 'moon_sat_factor':
-            moon_sat_factor = int(10 + ratio * 50)
+            moon_sat_factor = int(10 + ratio * 190)
+        elif name == 'moon_contrast':
+            moon_contrast = max(10, min(40, int(10 + ratio * 30)))
         elif name == 'moon_sat_iter':
             moon_sat_iter = max(1, min(8, int(1 + ratio * 7)))
         elif name == 'moon_lum_protect':
@@ -7261,6 +8611,25 @@ def handle_moon_slider_click(mx, my, control_rects):
                     picam2.set_controls({"ColourGains": (moon_wb_b / 100.0, moon_wb_r / 100.0)})
                 except Exception:
                     pass
+        elif name == 'moon_preset':
+            new_preset = max(0, min(len(MOON_PRESETS) - 1,
+                                    int(ratio * (len(MOON_PRESETS) - 1) + 0.5)))
+            if new_preset != moon_preset:
+                moon_preset = new_preset
+                if moon_processor is not None:
+                    moon_processor.apply_preset(moon_preset)
+                # Synchroniser les variables globales depuis le preset
+                p = MOON_PRESETS[moon_preset]
+                moon_sat_factor    = int(p.get('sat_factor',  2.5) * 10)
+                moon_sat_iter      = p.get('sat_iter',    4)
+                moon_lum_protect   = p.get('lum_protect', 220)
+                moon_contrast      = 10   # 1.0 = neutre (pas de clé dans les presets)
+                moon_noise_enabled = 1 if p.get('noise', True) else 0
+                moon_noise_strength = p.get('noise_s', 7)
+                moon_lrgb_enabled  = 1 if p.get('lrgb', False) else 0
+                moon_lrgb_weight   = int(p.get('lrgb_w', 0.6) * 100)
+                print(f"[MOON] Preset → {p['name']} ({p.get('processing_mode','classic')})")
+
         elif name == 'moon_zoom':
             new_zoom = max(0, min(5, int(ratio * 5 + 0.5)))
             if new_zoom != zoom:
@@ -7278,13 +8647,14 @@ def handle_moon_slider_click(mx, my, control_rects):
                     except Exception:
                         pass
 
-        # Mettre à jour le processor (sauf zoom qui gère lui-même)
-        if name != 'moon_zoom':
+        # Mettre à jour le processor (sauf zoom et preset qui gèrent eux-mêmes)
+        if name not in ('moon_zoom', 'moon_preset'):
             if moon_processor is not None:
                 moon_processor.configure(
                     saturation_factor=moon_sat_factor / 10.0,
                     saturation_iterations=moon_sat_iter,
                     luminance_protect=moon_lum_protect,
+                    contrast_factor=moon_contrast / 10.0,
                     noise_reduction=moon_noise_enabled == 1,
                     noise_strength=moon_noise_strength,
                     lrgb_composite=moon_lrgb_enabled == 1,
@@ -7531,6 +8901,37 @@ def is_click_on_sun_snap(mx, my, screen_width, screen_height):
 def is_click_on_sun_detect(mx, my, screen_width, screen_height):
     icon_size = 50; margin = 15
     ix = screen_width - 2 * icon_size - 2 * margin
+    iy = screen_height - icon_size - margin
+    return ix <= mx <= ix + icon_size and iy <= my <= iy + icon_size
+
+
+def draw_sun_binning_button(screen_width, screen_height, binning_active=True):
+    """Bouton BIN en bas à droite, 3e depuis la droite (après DETECT et SNAP) — Solar mode."""
+    global windowSurfaceObj, _font_cache
+    icon_size = 50; margin = 15
+    icon_x = screen_width - 3 * icon_size - 3 * margin
+    icon_y = screen_height - icon_size - margin
+    bg     = (60, 100, 150) if binning_active else (50, 60, 70)
+    border = (100, 160, 220) if binning_active else (80, 100, 110)
+    tc     = (180, 220, 255) if binning_active else (160, 180, 190)
+    icon_rect = pygame.Rect(icon_x, icon_y, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border, icon_rect, 2, border_radius=8)
+    ck = 19
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    cx, cy = icon_rect.centerx, icon_rect.centery
+    windowSurfaceObj.blit(f.render("BIN", True, tc),
+                          f.render("BIN", True, tc).get_rect(centerx=cx, centery=cy - 8))
+    windowSurfaceObj.blit(f.render("2x2" if binning_active else "OFF", True, tc),
+                          f.render("2x2" if binning_active else "OFF", True, tc).get_rect(centerx=cx, centery=cy + 8))
+    return icon_rect
+
+
+def is_click_on_sun_binning(mx, my, screen_width, screen_height):
+    icon_size = 50; margin = 15
+    ix = screen_width - 3 * icon_size - 3 * margin
     iy = screen_height - icon_size - margin
     return ix <= mx <= ix + icon_size and iy <= my <= iy + icon_size
 
@@ -9714,6 +11115,11 @@ def preview():
     global saturation,meters,meter,flickers,flicker,sharpnesss,sharpness,rotate,v3_hdrs,mjpeg_extractor
     global picam2, capture_thread, use_picamera2, Pi_Cam, camera, v3_af, v5_af, vflip, hflip, denoise, denoises, quality, use_native_sensor_mode, zfs
     global livestack_active, luckystack_active, raw_format, raw_stream_size, capture_size, jsk_live_mode
+    global lucky_video_active, lucky_video_writer, lucky_video_path
+    global lucky_last_filtered_array
+    global ls_lucky_clahe_en, ls_lucky_clahe_str, ls_lucky_clahe_tile
+    global ls_lucky_usm_en, ls_lucky_usm_sigma, ls_lucky_usm_amount
+    global ls_lucky_lr_en, ls_lucky_lr_iter, ls_lucky_lr_sigma
 
     # Variables statiques pour mémoriser la configuration précédente
     if not hasattr(preview, 'prev_config'):
@@ -9797,10 +11203,6 @@ def preview():
             preview.prev_config.get('v3_hdr') != v3_hdr or  # Changement mode HDR nécessite recréation
             (raw_format >= 2 and prev_stacking_active != current_stacking_active)  # Changement mode stacking avec RAW
         )
-
-        # Debug: afficher si le changement de mode stacking force la recréation
-        if raw_format >= 2 and prev_stacking_active != current_stacking_active:
-            print(f"  [STACKING MODE CHANGE] {prev_stacking_active} -> {current_stacking_active}, forcing full recreation")
 
         # Calculer speed2 et autres paramètres (avant le if/else)
         speed2 = sspeed
@@ -9890,7 +11292,7 @@ def preview():
                 # *** IMPORTANT: Mettre à jour capture_thread pour le mode stacking ***
                 # Même en fast path, on doit s'assurer que le capture_thread est configuré correctement
                 if capture_thread is not None:
-                    if (livestack_active or luckystack_active or jsk_live_mode == 1) and raw_format >= 2:
+                    if (livestack_active or jsk_live_mode == 1) and raw_format >= 2:
                         capture_thread.set_capture_params({'type': 'raw'})
                         if show_cmds == 1:
                             print(f"  → Capture thread configuré en mode RAW (stacking/JSK actif)")
@@ -10394,7 +11796,7 @@ def preview():
 
         capture_thread = AsyncCaptureThread(picam2)
         # Définir les paramètres de capture selon le format RAW
-        if (livestack_active or luckystack_active or jsk_live_mode == 1) and raw_format >= 2:
+        if (livestack_active or jsk_live_mode == 1) and raw_format >= 2:
             capture_thread.set_capture_params({'type': 'raw'})
         else:
             capture_thread.set_capture_params({'type': 'main'})
@@ -11254,10 +12656,8 @@ def Menu():
 
         # Ligne 5 - Lucky Align
         text(0,5,5,0,1,"Align Images",ft,7)
-        if ls_lucky_align == 0:
-            text(0,5,3,1,1,"OFF",fv,7)
-        else:
-            text(0,5,3,1,1,"ON",fv,7)
+        _aln = ['OFF','Surface','Disque','Hybrid']
+        text(0,5,3,1,1,_aln[ls_lucky_align] if 0<=ls_lucky_align<4 else "?",fv,7)
         draw_Vbar(0,5,greyColor,'ls_lucky_align',ls_lucky_align)
 
         # Ligne 6 - Lucky ROI %
@@ -11708,6 +13108,7 @@ while True:
                 draw_sun_rec_button(max_width, max_height,
                                     sun_recorder is not None and sun_recorder.is_recording,
                                     elapsed_str, rec_count)
+                draw_sun_binning_button(max_width, max_height, sun_binning == 1)
                 draw_sun_detect_button(max_width, max_height)
                 draw_sun_snap_button(max_width, max_height)
                 draw_sun_exit_button(max_width, max_height)
@@ -11825,7 +13226,7 @@ while True:
             if frame_from_thread is not None:
                 # Si (livestack/luckystack actif OU mode stretch preview) ET format RAW Bayer sélectionné → débayériser en uint16
                 # Le mode stretch_mode == 1 permet de prévisualiser les images RAW avant de lancer le stacking
-                if ((livestack_active or luckystack_active) or stretch_mode == 1) and raw_format >= 2:
+                if (livestack_active or stretch_mode == 1) and raw_format >= 2:
                     # Utiliser la frame RAW capturée par le thread
                     raw_array = frame_from_thread
 
@@ -11991,8 +13392,49 @@ while True:
                 # ===== LIVE STACK PROCESSING =====
                 livestack_display_done = False
                 if livestack_active and livestack is not None:
+                    # Capturer frame RAW si mode save DNG activé
+                    _raw_frame_to_save = None
+                    if ls_save_dng_mode > 0:
+                        _raw_frame_to_save = array.copy()
+                    _ls_prev_accepted_count = getattr(pygame, '_ls_prev_accepted', 0)
+
                     # Traiter la frame avec LiveStack (module avancé)
                     livestack.process_frame(array)
+
+                    # Sauvegarder frame RAW individuelle si demandé
+                    if ls_save_dng_mode > 0 and _raw_frame_to_save is not None:
+                        _cur_acc = livestack.get_stats().get('accepted_frames', 0)
+                        _should_save = (ls_save_dng_mode == 2) or \
+                                       (ls_save_dng_mode == 1 and _cur_acc > _ls_prev_accepted_count)
+                        if _should_save:
+                            if not hasattr(pygame, '_ls_raw_save_queue'):
+                                import queue as _queue_mod
+                                import threading as _threading_mod
+                                pygame._ls_raw_save_queue = _queue_mod.Queue()
+                                def _ls_raw_worker():
+                                    try:
+                                        from astropy.io import fits as _fits
+                                        _use_fits = True
+                                    except ImportError:
+                                        _use_fits = False
+                                    _raw_dir = os.path.expanduser("~/stacks/raw_frames")
+                                    os.makedirs(_raw_dir, exist_ok=True)
+                                    while True:
+                                        item = pygame._ls_raw_save_queue.get()
+                                        if item is None:
+                                            break
+                                        _arr, _n = item
+                                        try:
+                                            if _use_fits:
+                                                _fits.writeto(f"{_raw_dir}/frame_{_n:04d}.fit", _arr, overwrite=True)
+                                            else:
+                                                np.save(f"{_raw_dir}/frame_{_n:04d}.npy", _arr)
+                                        except Exception as _e:
+                                            print(f"[LS RAW SAVE] Erreur: {_e}")
+                                _t = _threading_mod.Thread(target=_ls_raw_worker, daemon=True)
+                                _t.start()
+                            pygame._ls_raw_save_queue.put((_raw_frame_to_save, _cur_acc))
+                        pygame._ls_prev_accepted = _cur_acc
 
                     # Récupérer le master stack pour affichage
                     try:
@@ -12021,11 +13463,16 @@ while True:
                                     print(f"  → IDENTIQUE au preview stretch")
                                     pygame._livestack_display_info_shown = True
                             else:
-                                # MODE RGB/YUV: libastrostack a déjà appliqué le stretch
+                                # MODE RGB/YUV: appliquer contraste/saturation logiciel si non-défaut
+                                stacked_array = apply_isp_to_preview(stacked_array)
+                                if stretch_preset != 0:
+                                    stacked_array = astro_stretch(stacked_array)
+                                if stacked_array.dtype != np.uint8:
+                                    stacked_array = np.clip(stacked_array, 0, 255).astype(np.uint8)
                                 if not hasattr(pygame, '_livestack_display_info_shown'):
-                                    print(f"\n[LIVESTACK DISPLAY RGB/YUV] Pipeline libastrostack:")
-                                    print(f"  ✓ Stretch configuré (méthode: {livestack.session.config.png_stretch_method if livestack.session else 'N/A'})")
-                                    print(f"  ✓ Conversion uint8 pour pygame")
+                                    print(f"\n[LIVESTACK DISPLAY RGB/YUV] Pipeline libastrostack + ISP:")
+                                    print(f"  ✓ apply_isp_to_preview() (contraste/saturation)")
+                                    print(f"  ✓ astro_stretch() si activé")
                                     pygame._livestack_display_info_shown = True
 
                             # Convertir en surface pygame
@@ -12053,12 +13500,28 @@ while True:
 
                             # Afficher
                             windowSurfaceObj.blit(image, (0, 0))
+                            # Interface LS au-dessus du stack (boutons, sliders, stats)
+                            if ls_interface_mode == 1:
+                                draw_ls_interface(max_width, max_height)
                             pygame.display.update()
 
-                            # Afficher les statistiques Live Stack
+                            # Afficher les statistiques Live Stack (mode texte classique si pas interface LS)
                             stats = livestack.get_stats()
-                            stats_text = f"LiveStack: {stats['accepted_frames']}/{stats['total_frames']} | Rejected: {stats['rejected_frames']}"
-                            text(0, 0, 2, 2, 1, stats_text, ft, 1)  # top=2 pour position absolue à gauche
+                            if not ls_interface_mode:
+                                stats_text = f"LiveStack: {stats['accepted_frames']}/{stats['total_frames']} | Rejected: {stats['rejected_frames']}"
+                                text(0, 0, 2, 2, 1, stats_text, ft, 1)
+                            # Vérifier arrêt automatique scheduler
+                            if ls_scheduler_enabled and ls_sched_frames > 0:
+                                ls_sched_frames_done = stats.get('accepted_frames', 0)
+                                if ls_sched_frames_done >= ls_sched_frames:
+                                    livestack_active = False
+                                    livestack.stop()
+                                    if hasattr(pygame, '_ls_raw_save_queue'):
+                                        pygame._ls_raw_save_queue.put(None)
+                                        del pygame._ls_raw_save_queue
+                                        if hasattr(pygame, '_ls_prev_accepted'):
+                                            del pygame._ls_prev_accepted
+                                    print(f"[SCHEDULER] {ls_sched_frames} frames stackées — arrêt automatique")
 
                             # Sauvegarder PNG intermédiaire (si activé)
                             accepted = stats['accepted_frames']
@@ -12151,6 +13614,12 @@ while True:
                             # Détecter un nouveau stack seulement pour les sauvegardes PNG
                             is_new_stack = (stacks_done > pygame._lucky_last_displayed)
 
+                            # ── Filtres post-stack (CLAHE / USM / LR) ────────
+                            stacked_array = apply_lucky_post_stack_filters(stacked_array)
+
+                            # Conserver pour le bouton SAVE PNG
+                            lucky_last_filtered_array = stacked_array.copy()
+
                             if is_new_stack:
                                 # Afficher les infos de traitement une fois au premier stack
                                 if not hasattr(pygame, '_luckystack_display_info_shown'):
@@ -12166,6 +13635,32 @@ while True:
 
                                 # Mettre à jour le compteur
                                 pygame._lucky_last_displayed = stacks_done
+
+                                # ── Vidéo de progression ──────────────────────
+                                if lucky_video_active:
+                                    try:
+                                        # BGR uint8 pour cv2.VideoWriter
+                                        if stacked_array.ndim == 2:
+                                            frame_vid = cv2.cvtColor(stacked_array, cv2.COLOR_GRAY2BGR)
+                                        elif stacked_array.shape[2] == 3:
+                                            # stacked_array est BGR (déjà swappé par le pipeline)
+                                            frame_vid = stacked_array
+                                        else:
+                                            frame_vid = stacked_array[:, :, :3]
+                                        h_v, w_v = frame_vid.shape[:2]
+                                        if lucky_video_writer is None:
+                                            import time as _t, os as _os
+                                            ts = _t.strftime("%Y%m%d_%H%M%S")
+                                            vdir = "/home/admin/stacks/lucky"
+                                            _os.makedirs(vdir, exist_ok=True)
+                                            lucky_video_path = f"{vdir}/lucky_progress_{ts}.mp4"
+                                            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                                            lucky_video_writer = cv2.VideoWriter(
+                                                lucky_video_path, fourcc, 5, (w_v, h_v))
+                                            print(f"[LUCKY VIDEO] Création: {lucky_video_path}")
+                                        lucky_video_writer.write(frame_vid)
+                                    except Exception as _ve:
+                                        print(f"[LUCKY VIDEO] Erreur frame: {_ve}")
 
                             # Convertir en surface pygame
                             if len(stacked_array.shape) == 3:
@@ -12192,6 +13687,8 @@ while True:
 
                             # Afficher
                             windowSurfaceObj.blit(image, (0, 0))
+                            if lucky_interface_mode == 1:
+                                draw_lucky_interface(max_width, max_height)
                             pygame.display.update()
 
                             # Marquer que l'affichage Lucky est fait
@@ -12224,10 +13721,10 @@ while True:
                     # Si aucun stack n'est disponible, le flux vidéo sera affiché par le code normal
                     # (livestack_display_done reste False)
 
-                    # Afficher les stats Lucky par-dessus avec fond noir stable (évite le clignotement)
-                    # Le paramètre top=2 dessine à la position absolue, bkgnd_Color=1 dessine fond noir
-                    text(0, 0, 2, 2, 1, stats_text1, ft, 1)  # top=2 position absolue, bkgnd_Color=1 fond noir
-                    text(0, 1, 2, 2, 1, stats_text2, ft, 1)  # upd=1 force update
+                    # Afficher les stats Lucky par-dessus (seulement si pas en mode interface)
+                    if not lucky_interface_mode:
+                        text(0, 0, 2, 2, 1, stats_text1, ft, 1)
+                        text(0, 1, 2, 2, 1, stats_text2, ft, 1)
 
                 # Traitement normal seulement si LiveStack/LuckyStack n'a pas déjà affiché
                 if not livestack_display_done:
@@ -12291,22 +13788,29 @@ while True:
                     windowSurfaceObj.blit(image, (0, 0))
 
                     # Afficher les contrôles de réglage stretch si en mode stretch
-                    # Ne PAS afficher pendant le stacking (livestack ou luckystack)
-                    if stretch_mode == 1 and not livestack_active and not luckystack_active:
-                        # Icône unique: ISP en mode RAW, ADJ en mode RGB/YUV
-                        is_raw = (raw_format >= 2)
-                        draw_stretch_hand_icon(max_width, max_height, stretch_adjust_mode == 1, is_raw_mode=is_raw)
-                        # Bouton STACK pour lancer le live stacking (pas en mode lucky)
-                        draw_livestack_button(max_width, max_height, is_raw_mode=is_raw)
+                    # Ne PAS afficher pendant le stacking (livestack ou luckystack) ni pendant l'interface Lucky
+                    if stretch_mode == 1 and not livestack_active and not luckystack_active and not lucky_interface_mode:
+                        if ls_interface_mode == 1:
+                            # Mode interface LS : boutons/sliders LS au-dessus du preview
+                            draw_ls_interface(max_width, max_height)
+                        else:
+                            # Mode normal : icône ADJ/ISP et bouton STACK
+                            is_raw = (raw_format >= 2)
+                            draw_stretch_hand_icon(max_width, max_height, stretch_adjust_mode == 1, is_raw_mode=is_raw)
+                            draw_livestack_button(max_width, max_height, is_raw_mode=is_raw)
 
-                        # Afficher le panneau approprié selon le mode
-                        if stretch_adjust_mode == 1:
-                            if is_raw:
-                                # Mode RAW: panneau ISP complet (ISP + stretch)
-                                _raw_slider_rects = draw_raw_controls(max_width, max_height, array)
-                            else:
-                                # Mode RGB/YUV: panneau stretch uniquement
-                                _stretch_slider_rects = draw_stretch_controls(max_width, max_height, array)
+                            # Afficher le panneau approprié selon le mode
+                            if stretch_adjust_mode == 1:
+                                if is_raw:
+                                    _raw_slider_rects = draw_raw_controls(max_width, max_height, array)
+                                else:
+                                    _stretch_slider_rects = draw_stretch_controls(max_width, max_height, array)
+                    elif ls_interface_mode == 1:
+                        # Interface LS visible même quand le stack est actif (Picamera2 path)
+                        draw_ls_interface(max_width, max_height)
+                    elif lucky_interface_mode == 1:
+                        # Interface Lucky visible même quand le stack est actif (Picamera2 path)
+                        draw_lucky_interface(max_width, max_height)
 
         except Exception as e:
             # En cas d'erreur, afficher dans la console
@@ -12387,22 +13891,25 @@ while True:
             windowSurfaceObj.blit(image, (0,0))
 
             # Afficher les contrôles de réglage stretch si en mode stretch (rpicam-vid)
-            # Ne PAS afficher pendant le stacking (livestack ou luckystack)
-            if stretch_mode == 1 and not livestack_active and not luckystack_active:
-                # Icône unique: ISP en mode RAW, ADJ en mode RGB/YUV
-                is_raw = (raw_format >= 2)
-                draw_stretch_hand_icon(max_width, max_height, stretch_adjust_mode == 1, is_raw_mode=is_raw)
-                # Bouton STACK pour lancer le live stacking (pas en mode lucky)
-                draw_livestack_button(max_width, max_height, is_raw_mode=is_raw)
-
-                # Afficher le panneau approprié selon le mode
-                if stretch_adjust_mode == 1 and img_array is not None:
-                    if is_raw:
-                        # Mode RAW: panneau ISP complet (ISP + stretch)
-                        _raw_slider_rects = draw_raw_controls(max_width, max_height, img_array)
-                    else:
-                        # Mode RGB/YUV: panneau stretch uniquement
-                        _stretch_slider_rects = draw_stretch_controls(max_width, max_height, img_array)
+            # Ne PAS afficher pendant le stacking (livestack ou luckystack) ni pendant l'interface Lucky
+            if stretch_mode == 1 and not livestack_active and not luckystack_active and not lucky_interface_mode:
+                if ls_interface_mode == 1:
+                    draw_ls_interface(max_width, max_height)
+                else:
+                    is_raw = (raw_format >= 2)
+                    draw_stretch_hand_icon(max_width, max_height, stretch_adjust_mode == 1, is_raw_mode=is_raw)
+                    draw_livestack_button(max_width, max_height, is_raw_mode=is_raw)
+                    if stretch_adjust_mode == 1 and img_array is not None:
+                        if is_raw:
+                            _raw_slider_rects = draw_raw_controls(max_width, max_height, img_array)
+                        else:
+                            _stretch_slider_rects = draw_stretch_controls(max_width, max_height, img_array)
+            elif ls_interface_mode == 1:
+                # Interface LS visible même quand le stack est actif
+                draw_ls_interface(max_width, max_height)
+            elif lucky_interface_mode == 1:
+                # Interface Lucky visible même quand le stack est actif
+                draw_lucky_interface(max_width, max_height)
 
             # ===== COLLIMATION MODE (rpicam-vid) =====
             if collimation_mode == 1 and collimation_detector is not None:
@@ -12999,6 +14506,60 @@ while True:
                 if handle_sun_slider_click(mx, my, _sun_slider_rects):
                     _sun_slider_dragging = True
                     continue
+        if ls_interface_mode == 1:
+            mx, my = event.pos
+            display_modes = pygame.display.list_modes()
+            if display_modes and display_modes != -1:
+                _fs_w, _fs_h = display_modes[0]
+            else:
+                _si = pygame.display.Info()
+                _fs_w, _fs_h = _si.current_w, _si.current_h
+            new_g = is_click_on_ls_gain_slider(mx, my, _fs_w, _fs_h)
+            if new_g is not None:
+                ls_gain = new_g
+                if not livestack_active:
+                    apply_controls_immediately(gain_value=ls_gain if ls_gain > 0 else None)
+                _ls_ge_dragging = 'gain'
+                continue
+            new_e = is_click_on_ls_expo_slider(mx, my, _fs_w, _fs_h)
+            if new_e is not None:
+                ls_exposure_us = new_e
+                if not livestack_active:
+                    apply_controls_immediately(exposure_time=ls_exposure_us)
+                _ls_ge_dragging = 'expo'
+                continue
+            new_z = is_click_on_ls_zoom_slider(mx, my, _fs_w, _fs_h)
+            if new_z is not None:
+                ls_zoom = new_z
+                _ls_ge_dragging = 'zoom'
+                continue
+        if lucky_interface_mode == 1:
+            mx, my = event.pos
+            display_modes = pygame.display.list_modes()
+            if display_modes and display_modes != -1:
+                _fs_w, _fs_h = display_modes[0]
+            else:
+                _si = pygame.display.Info()
+                _fs_w, _fs_h = _si.current_w, _si.current_h
+            new_g = is_click_on_ls_gain_slider(mx, my, _fs_w, _fs_h)
+            if new_g is not None:
+                ls_gain = new_g
+                if not luckystack_active:
+                    apply_controls_immediately(gain_value=ls_gain if ls_gain > 0 else None)
+                _lucky_ge_dragging = 'gain'
+                continue
+            new_e = is_click_on_ls_expo_slider(mx, my, _fs_w, _fs_h)
+            if new_e is not None:
+                ls_exposure_us = new_e
+                if not luckystack_active:
+                    apply_controls_immediately(exposure_time=ls_exposure_us)
+                _lucky_ge_dragging = 'expo'
+                continue
+            new_z = is_click_on_ls_zoom_slider(mx, my, _fs_w, _fs_h)
+            if new_z is not None:
+                ls_zoom = new_z
+                _lucky_ge_dragging = 'zoom'
+                continue
       elif event.type == pygame.MOUSEMOTION:
         # Drag sliders gain/expo Moon
         if _moon_ge_dragging is not None and moon_mode == 1:
@@ -13096,9 +14657,138 @@ while True:
                 continue
             else:
                 _sun_slider_dragging = False
+        # Drag sliders Gain/Expo/Zoom LS interface
+        if _ls_ge_dragging is not None and ls_interface_mode == 1:
+            buttons = pygame.mouse.get_pressed()
+            if buttons[0]:
+                mx, my = event.pos
+                display_modes = pygame.display.list_modes()
+                if display_modes and display_modes != -1:
+                    _fs_w, _fs_h = display_modes[0]
+                else:
+                    _si = pygame.display.Info()
+                    _fs_w, _fs_h = _si.current_w, _si.current_h
+                if _ls_ge_dragging == 'gain':
+                    new_g = is_click_on_ls_gain_slider(mx, my, _fs_w, _fs_h)
+                    if new_g is not None:
+                        ls_gain = new_g
+                        if not livestack_active:
+                            apply_controls_immediately(gain_value=ls_gain if ls_gain > 0 else None)
+                elif _ls_ge_dragging == 'expo':
+                    new_e = is_click_on_ls_expo_slider(mx, my, _fs_w, _fs_h)
+                    if new_e is not None:
+                        ls_exposure_us = new_e
+                        if not livestack_active:
+                            apply_controls_immediately(exposure_time=ls_exposure_us)
+                elif _ls_ge_dragging == 'zoom':
+                    new_z = is_click_on_ls_zoom_slider(mx, my, _fs_w, _fs_h)
+                    if new_z is not None:
+                        ls_zoom = new_z
+                        # Ne pas appliquer zoom immédiatement (évite recréation caméra)
+                continue
+            # Bouton relâché pendant MOUSEMOTION : ne PAS réinitialiser ici (même raison que Lucky).
+        if _ls_slider_dragging and ls_interface_mode == 1 and ls_settings_visible == 1 and _ls_slider_rects:
+            buttons = pygame.mouse.get_pressed()
+            if buttons[0]:
+                mx, my = event.pos
+                handle_ls_slider_click(mx, my, _ls_slider_rects)
+                continue
+            else:
+                _ls_slider_dragging = False
+        # Drag sliders Gain/Expo/Zoom Lucky interface
+        if _lucky_ge_dragging is not None and lucky_interface_mode == 1:
+            buttons = pygame.mouse.get_pressed()
+            if buttons[0]:
+                mx, my = event.pos
+                display_modes = pygame.display.list_modes()
+                if display_modes and display_modes != -1:
+                    _fs_w, _fs_h = display_modes[0]
+                else:
+                    _si = pygame.display.Info()
+                    _fs_w, _fs_h = _si.current_w, _si.current_h
+                if _lucky_ge_dragging == 'gain':
+                    new_g = is_click_on_ls_gain_slider(mx, my, _fs_w, _fs_h)
+                    if new_g is not None:
+                        ls_gain = new_g
+                        if not luckystack_active:
+                            apply_controls_immediately(gain_value=ls_gain if ls_gain > 0 else None)
+                elif _lucky_ge_dragging == 'expo':
+                    new_e = is_click_on_ls_expo_slider(mx, my, _fs_w, _fs_h)
+                    if new_e is not None:
+                        ls_exposure_us = new_e
+                        if not luckystack_active:
+                            apply_controls_immediately(exposure_time=ls_exposure_us)
+                elif _lucky_ge_dragging == 'zoom':
+                    new_z = is_click_on_ls_zoom_slider(mx, my, _fs_w, _fs_h)
+                    if new_z is not None:
+                        ls_zoom = new_z
+                        # Ne pas appliquer zoom immédiatement (évite recréation caméra)
+                        # zoom sera appliqué lors du START
+                continue
+            # Bouton relâché pendant MOUSEMOTION : ne PAS réinitialiser ici.
+            # Sur RPi/SDL2, MOUSEMOTION(buttons=0) peut arriver avant MOUSEBUTTONUP
+            # dans le même batch. MOUSEBUTTONUP se chargera du nettoyage et de l'application zoom.
+        if _lucky_slider_dragging and lucky_interface_mode == 1 and lucky_settings_visible == 1 and _lucky_slider_rects:
+            buttons = pygame.mouse.get_pressed()
+            if buttons[0]:
+                mx, my = event.pos
+                handle_lucky_slider_click(mx, my, _lucky_slider_rects)
+                continue
+            else:
+                _lucky_slider_dragging = False
       # MOVE HISTAREA
       elif (event.type == MOUSEBUTTONUP):
         mousex, mousey = event.pos
+        # Fin du drag LS gain/expo/zoom
+        if _ls_ge_dragging is not None:
+            _prev_ls_drag = _ls_ge_dragging
+            _ls_ge_dragging = None
+            # Appliquer le zoom si le slider zoom a été relâché (hors stack actif)
+            if _prev_ls_drag == 'zoom' and not livestack_active and zoom != ls_zoom:
+                zoom = ls_zoom
+                sync_video_resolution_with_zoom()
+                display_modes = pygame.display.list_modes()
+                _dw, _dh = display_modes[0] if display_modes and display_modes != -1 else (fs_width, fs_height)
+                windowSurfaceObj.fill((0, 0, 0))
+                _ck_r = 36
+                if _ck_r not in _font_cache:
+                    _font_cache[_ck_r] = pygame.font.Font(None, _ck_r)
+                _msg_r = _font_cache[_ck_r].render("Reconfiguration caméra...", True, (200, 200, 200))
+                windowSurfaceObj.blit(_msg_r, _msg_r.get_rect(center=(_dw // 2, _dh // 2)))
+                pygame.display.update()
+                kill_preview_process()
+                preview()
+            continue
+        if _ls_slider_dragging:
+            _ls_slider_dragging = False
+            if ls_interface_mode == 1 and ls_settings_visible == 1 and _ls_slider_rects:
+                handle_ls_slider_click(mousex, mousey, _ls_slider_rects)
+            continue
+        # Fin du drag Lucky gain/expo/zoom
+        if _lucky_ge_dragging is not None:
+            _prev_lucky_drag = _lucky_ge_dragging
+            _lucky_ge_dragging = None
+            # Appliquer le zoom si le slider zoom a été relâché (hors stack actif)
+            if _prev_lucky_drag == 'zoom' and not luckystack_active and zoom != ls_zoom:
+                zoom = ls_zoom
+                sync_video_resolution_with_zoom()
+                display_modes = pygame.display.list_modes()
+                _dw, _dh = display_modes[0] if display_modes and display_modes != -1 else (fs_width, fs_height)
+                windowSurfaceObj.fill((0, 0, 0))
+                _ck_r = 36
+                if _ck_r not in _font_cache:
+                    _font_cache[_ck_r] = pygame.font.Font(None, _ck_r)
+                _msg_r = _font_cache[_ck_r].render("Reconfiguration caméra...", True, (200, 200, 200))
+                windowSurfaceObj.blit(_msg_r, _msg_r.get_rect(center=(_dw // 2, _dh // 2)))
+                pygame.display.update()
+                kill_preview_process()
+                preview()
+            continue
+        if _lucky_slider_dragging:
+            _lucky_slider_dragging = False
+            if lucky_interface_mode == 1 and lucky_settings_visible == 1 and _lucky_slider_rects:
+                handle_lucky_slider_click(mousex, mousey, _lucky_slider_rects)
+            continue
         # Fin du drag Moon
         if _moon_ge_dragging is not None:
             _moon_ge_dragging = None
@@ -13129,8 +14819,9 @@ while True:
                 handle_sun_slider_click(mousex, mousey, _sun_slider_rects)
             continue
 
-        # Si on est en mode LiveStack actif, un clic quitte ce mode
-        if livestack_active:
+        # Si on est en mode LiveStack actif ET PAS en mode interface LS,
+        # un clic quitte ce mode (comportement legacy)
+        if livestack_active and not ls_interface_mode:
             livestack_active = False
             stretch_mode = 0  # Désactiver aussi le stretch
             if livestack is not None:
@@ -13148,6 +14839,11 @@ while True:
                 else:
                     print("[LIVESTACK] Sauvegarde finale désactivée (ls_save_final=0)")
                 livestack.stop()
+            if hasattr(pygame, '_ls_raw_save_queue'):
+                pygame._ls_raw_save_queue.put(None)
+                del pygame._ls_raw_save_queue
+                if hasattr(pygame, '_ls_prev_accepted'):
+                    del pygame._ls_prev_accepted
             print("[LIVESTACK] Mode désactivé (clic)")
             # Restaurer le mode d'affichage normal (avec l'interface)
             if frame == 1:
@@ -13172,8 +14868,9 @@ while True:
 
             continue
 
-        # Si on est en mode LuckyStack actif, un clic quitte ce mode
-        if luckystack_active:
+        # Si on est en mode LuckyStack actif ET PAS en mode interface Lucky,
+        # un clic quitte ce mode (comportement legacy)
+        if luckystack_active and not lucky_interface_mode:
             luckystack_active = False
             stretch_mode = 0  # Désactiver aussi le stretch
             if luckystack is not None:
@@ -13185,9 +14882,14 @@ while True:
                             save_with_external_processing(luckystack, raw_format_name=raw_formats[raw_format])
                         else:
                             luckystack.save(raw_format_name=raw_formats[raw_format])
-                        print("[LUCKYSTACK] Image finale sauvegardée")
+                        print("[LUCKYSTACK] Image finale sauvegardée (FIT brut)")
                     except Exception as e:
                         print(f"[LUCKYSTACK] Erreur sauvegarde: {e}")
+                    # PNG filtré séparé (filtres CLAHE/USM/LR appliqués)
+                    if lucky_last_filtered_array is not None:
+                        import time as _tsave
+                        _ts = _tsave.strftime("%Y%m%d_%H%M%S")
+                        save_lucky_filtered_png(lucky_last_filtered_array, filename=f"lucky_final_filtered_{_ts}")
                 else:
                     print("[LUCKYSTACK] Sauvegarde finale désactivée (ls_lucky_save_final=0)")
                 luckystack.stop()
@@ -13215,9 +14917,8 @@ while True:
 
             continue
 
-        # Si on est en mode stretch, gérer les clics selon le mode d'ajustement
-        if stretch_mode == 1:
-            # Obtenir les dimensions de l'écran fullscreen
+        # ===== GESTION DES CLICS EN MODE LS INTERFACE =====
+        if ls_interface_mode == 1:
             display_modes = pygame.display.list_modes()
             if display_modes and display_modes != -1:
                 fs_width, fs_height = display_modes[0]
@@ -13225,45 +14926,118 @@ while True:
                 screen_info = pygame.display.Info()
                 fs_width, fs_height = screen_info.current_w, screen_info.current_h
 
-            # Vérifier si clic sur le bouton STACK (lance le live stacking)
-            # Ne s'applique pas si livestack ou luckystack déjà actif
-            if not livestack_active and not luckystack_active and is_click_on_livestack_button(mousex, mousey, fs_width):
-                # Activer Live Stack
-                livestack_active = True
+            # SET → toggle panneau réglages
+            if is_click_on_ls_settings(mousex, mousey):
+                ls_settings_visible = 1 - ls_settings_visible
+                _ls_slider_rects = {}
+                _ls_slider_dragging = False
+                continue
 
-                # *** IMPORTANT: Reconfigurer caméra pour mode RAW ***
-                if raw_format >= 2:
-                    print(f"[LIVESTACK] Mode RAW - reconfiguration caméra...")
-                    kill_preview_process()
-                    preview()
-                    print(f"[LIVESTACK] Caméra reconfigurée pour capture RAW")
+            # SAVE → sauvegarder le stack courant
+            if is_click_on_ls_save(mousex, mousey, fs_width):
+                if livestack is not None and livestack.session is not None:
+                    try:
+                        if raw_format >= 2:
+                            save_with_external_processing(livestack, raw_format_name=raw_formats[raw_format])
+                        else:
+                            livestack.save(raw_format_name=raw_formats[raw_format])
+                        print("[LS INTERFACE] Stack sauvegardé")
+                    except Exception as e:
+                        print(f"[LS INTERFACE] Erreur sauvegarde: {e}")
+                else:
+                    print("[LS INTERFACE] Rien à sauvegarder")
+                continue
 
-                # Réinitialiser les compteurs de session Live Stack
-                if hasattr(pygame, '_livestack_last_saved'):
-                    delattr(pygame, '_livestack_last_saved')
-                if hasattr(pygame, '_livestack_stretch_info_shown'):
-                    delattr(pygame, '_livestack_stretch_info_shown')
-                if hasattr(pygame, '_livestack_stretch_applied_shown'):
-                    delattr(pygame, '_livestack_stretch_applied_shown')
-                if hasattr(pygame, '_livestack_no_stretch_shown'):
-                    delattr(pygame, '_livestack_no_stretch_shown')
-                if hasattr(pygame, '_raw_format_mismatch_warning'):
-                    delattr(pygame, '_raw_format_mismatch_warning')
-                if hasattr(pygame, '_raw_resolution_mismatch_warning'):
-                    delattr(pygame, '_raw_resolution_mismatch_warning')
-                if hasattr(pygame, '_stacking_mode_shown'):
-                    delattr(pygame, '_stacking_mode_shown')
+            # RESET → réinitialiser la session de stacking
+            if is_click_on_ls_reset(mousex, mousey, fs_height):
+                if livestack_active:
+                    livestack_active = False
+                    if livestack is not None:
+                        livestack.stop()
+                if hasattr(pygame, '_ls_raw_save_queue'):
+                    pygame._ls_raw_save_queue.put(None)
+                    del pygame._ls_raw_save_queue
+                if livestack is not None:
+                    livestack.reset()
+                ls_sched_frames_done = 0
+                for _attr in ['_livestack_last_saved', '_livestack_display_info_shown', '_ls_prev_accepted']:
+                    if hasattr(pygame, _attr):
+                        delattr(pygame, _attr)
+                print("[LS INTERFACE] Session réinitialisée")
+                continue
 
-                # Créer l'instance livestack si nécessaire
-                if livestack is None:
-                    camera_params = {
-                        'exposure': sspeed,
-                        'gain': gain,
+            # START/STOP → démarrer ou arrêter le stacking
+            if is_click_on_ls_start_stop(mousex, mousey, fs_width, fs_height):
+                if livestack_active:
+                    # STOP
+                    livestack_active = False
+                    if livestack is not None:
+                        livestack.stop()
+                    # Arrêter le worker de sauvegarde RAW si actif
+                    if hasattr(pygame, '_ls_raw_save_queue'):
+                        pygame._ls_raw_save_queue.put(None)
+                        del pygame._ls_raw_save_queue
+                        if hasattr(pygame, '_ls_prev_accepted'):
+                            del pygame._ls_prev_accepted
+                    # Restaurer gain/expo du preview LS
+                    apply_controls_immediately(
+                        gain_value=ls_gain if ls_gain > 0 else None,
+                        exposure_time=ls_exposure_us)
+                    print("[LS INTERFACE] Stack arrêté")
+                else:
+                    # START : si scheduler ON → appliquer paramètres scheduler à la caméra
+                    if ls_scheduler_enabled:
+                        apply_controls_immediately(
+                            gain_value=ls_sched_gain if ls_sched_gain > 0 else None,
+                            exposure_time=ls_sched_expo_us)
+                        _cam_expo = ls_sched_expo_us
+                        _cam_gain = ls_sched_gain
+                    else:
+                        _cam_expo = ls_exposure_us
+                        _cam_gain = ls_gain
+
+                    # Appliquer le zoom sélectionné (différé depuis le slider)
+                    if zoom != ls_zoom:
+                        zoom = ls_zoom
+                        sync_video_resolution_with_zoom()
+
+                    # Reconfigurer caméra pour mode RAW ou zoom IMX585 changé
+                    _ls_prev_cs = getattr(preview, 'prev_config', {}).get('capture_size')
+                    _ls_new_cs = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1) if Pi_Cam == 10 else None
+                    _ls_zoom_changed = Pi_Cam == 10 and _ls_new_cs is not None and _ls_new_cs != _ls_prev_cs
+                    if raw_format >= 2 or _ls_zoom_changed:
+                        display_modes = pygame.display.list_modes()
+                        _dw, _dh = display_modes[0] if display_modes and display_modes != -1 else (fs_width, fs_height)
+                        windowSurfaceObj.fill((0, 0, 0))
+                        _ck_r = 36
+                        if _ck_r not in _font_cache:
+                            _font_cache[_ck_r] = pygame.font.Font(None, _ck_r)
+                        _msg_r = _font_cache[_ck_r].render("Reconfiguration caméra...", True, (200, 200, 200))
+                        windowSurfaceObj.blit(_msg_r, _msg_r.get_rect(center=(_dw // 2, _dh // 2)))
+                        pygame.display.update()
+                        # Marquer livestack actif AVANT preview() pour que le thread soit configuré en mode RAW
+                        livestack_active = True
+                        kill_preview_process()
+                        preview()
+
+                    ls_sched_frames_done = 0
+                    for _attr in ['_livestack_last_saved', '_livestack_display_info_shown',
+                                  '_stacking_mode_shown']:
+                        if hasattr(pygame, _attr):
+                            delattr(pygame, _attr)
+
+                    # Créer/reconfigurer session livestack
+                    _cam_params = {
+                        'exposure': _cam_expo,
+                        'gain': _cam_gain,
                         'red': red / 10,
                         'blue': blue / 10,
                         'raw_format': raw_formats[raw_format]
                     }
-                    livestack = create_advanced_livestack_session(camera_params)
+                    if livestack is None:
+                        livestack = create_advanced_livestack_session(_cam_params)
+                    else:
+                        livestack.camera_params = _cam_params
 
                     livestack.configure(
                         stacking_method=['mean', 'median', 'kappa_sigma', 'winsorized', 'weighted'][ls_stack_method],
@@ -13294,6 +15068,274 @@ while True:
                         lucky_score_method=['laplacian', 'gradient', 'sobel', 'tenengrad'][ls_lucky_score],
                         lucky_stack_method=['mean', 'median', 'sigma_clip'][ls_lucky_stack],
                         lucky_align_enabled=bool(ls_lucky_align),
+                        lucky_align_mode=ls_lucky_align,
+                        lucky_score_roi_percent=float(ls_lucky_roi),
+                        png_stretch='off' if raw_format >= 2 else ['off', 'ghs', 'asinh'][stretch_preset],
+                        png_factor=stretch_factor / 10.0,
+                        png_clip_low=0.0 if stretch_preset == 1 else stretch_p_low / 10.0,
+                        png_clip_high=100.0 if stretch_preset == 1 else stretch_p_high / 100.0,
+                        ghs_D=ghs_D / 10.0,
+                        ghs_b=ghs_b / 10.0,
+                        ghs_SP=ghs_SP / 100.0,
+                        ghs_LP=ghs_LP / 100.0,
+                        ghs_HP=ghs_HP / 100.0,
+                        preview_refresh=ls_preview_refresh,
+                    )
+                    _vfmt_map = {0: 'yuv420', 1: 'xrgb8888', 2: 'raw12', 3: 'raw16'}
+                    livestack.configure(
+                        isp_enable=False,
+                        isp_config_path=None,
+                        video_format=_vfmt_map.get(raw_format, 'yuv420'),
+                    )
+                    livestack.camera_params['raw_format'] = raw_formats[raw_format]
+                    livestack.reset()
+                    livestack.start()
+                    livestack_active = True
+                    pygame._livestack_last_saved = 0
+                    _sched_str = f" [Scheduler: {ls_sched_frames} frames]" if ls_scheduler_enabled else ""
+                    print(f"[LS INTERFACE] Stack démarré{_sched_str}")
+                continue
+
+            # EXIT → quitter le mode interface LS
+            if is_click_on_ls_exit(mousex, mousey, fs_height):
+                if livestack_active:
+                    livestack_active = False
+                    if livestack is not None:
+                        if ls_save_final == 1:
+                            try:
+                                if raw_format >= 2:
+                                    save_with_external_processing(livestack, raw_format_name=raw_formats[raw_format])
+                                else:
+                                    livestack.save(raw_format_name=raw_formats[raw_format])
+                                print("[LS INTERFACE] Stack final sauvegardé à la sortie")
+                            except Exception as e:
+                                print(f"[LS INTERFACE] Erreur sauvegarde: {e}")
+                        livestack.stop()
+                    # Arrêter le worker de sauvegarde RAW si actif
+                    if hasattr(pygame, '_ls_raw_save_queue'):
+                        pygame._ls_raw_save_queue.put(None)
+                        del pygame._ls_raw_save_queue
+                        if hasattr(pygame, '_ls_prev_accepted'):
+                            del pygame._ls_prev_accepted
+
+                ls_interface_mode = 0
+                ls_settings_visible = 0
+                _ls_slider_rects = {}
+                _ls_slider_dragging = False
+                _ls_ge_dragging = None
+                ls_sched_frames_done = 0
+
+                # Restaurer ISP hardware caméra (Brightness/Contrast/Saturation)
+                if use_picamera2 and picam2 is not None and raw_format < 2:
+                    picam2.set_controls({
+                        "Brightness": brightness / 100.0,
+                        "Contrast":   contrast / 100.0,
+                        "Saturation": saturation / 10.0,
+                    })
+
+                # Reconfigurer la caméra si mode RAW
+                if raw_format >= 2:
+                    kill_preview_process()
+                    preview()
+
+                print("[LS INTERFACE] Mode interface LS désactivé")
+                continue
+
+            # Sliders Gain / Expo / Zoom (preview en temps réel, seulement si pas en train de stacker)
+            new_g = is_click_on_ls_gain_slider(mousex, mousey, fs_width, fs_height)
+            if new_g is not None:
+                ls_gain = new_g
+                if not livestack_active:
+                    apply_controls_immediately(gain_value=ls_gain if ls_gain > 0 else None)
+                _ls_ge_dragging = 'gain'
+                continue
+            new_e = is_click_on_ls_expo_slider(mousex, mousey, fs_width, fs_height)
+            if new_e is not None:
+                ls_exposure_us = new_e
+                if not livestack_active:
+                    apply_controls_immediately(exposure_time=ls_exposure_us)
+                _ls_ge_dragging = 'expo'
+                continue
+            new_z = is_click_on_ls_zoom_slider(mousex, mousey, fs_width, fs_height)
+            if new_z is not None:
+                ls_zoom = new_z
+                # zoom sera appliqué lors du START (évite recréation caméra immédiate)
+                _ls_ge_dragging = 'zoom'
+                continue
+
+            # Sliders panneau réglages
+            if ls_settings_visible == 1 and _ls_slider_rects:
+                if handle_ls_slider_click(mousex, mousey, _ls_slider_rects):
+                    _ls_slider_dragging = True
+                    continue
+
+            continue  # Rester en mode LS interface
+
+        # ===== GESTION DES CLICS EN MODE LUCKY INTERFACE =====
+        if lucky_interface_mode == 1:
+            display_modes = pygame.display.list_modes()
+            if display_modes and display_modes != -1:
+                fs_width, fs_height = display_modes[0]
+            else:
+                screen_info = pygame.display.Info()
+                fs_width, fs_height = screen_info.current_w, screen_info.current_h
+
+            # SET → toggle panneau réglages Lucky
+            if is_click_on_ls_settings(mousex, mousey):
+                lucky_settings_visible = 1 - lucky_settings_visible
+                _lucky_slider_rects = {}
+                _lucky_slider_dragging = False
+                continue
+
+            # SAVE PNG → sauvegarder l'image filtrée courante en PNG
+            if is_click_on_ls_save_png(mousex, mousey, fs_width):
+                if lucky_last_filtered_array is not None:
+                    save_lucky_filtered_png(lucky_last_filtered_array)
+                else:
+                    print("[LUCKY PNG] Aucune image disponible (pas encore de stack)")
+                continue
+
+            # REC VIDEO → démarrer ou arrêter l'enregistrement vidéo de progression
+            if is_click_on_ls_save(mousex, mousey, fs_width):
+                if lucky_video_active:
+                    # Arrêter l'enregistrement
+                    lucky_video_active = False
+                    if lucky_video_writer is not None:
+                        lucky_video_writer.release()
+                        lucky_video_writer = None
+                        print(f"[LUCKY VIDEO] Enregistrement terminé : {lucky_video_path}")
+                    else:
+                        print("[LUCKY VIDEO] Enregistrement arrêté (aucune frame écrite)")
+                else:
+                    # Démarrer — le VideoWriter sera créé à la première frame
+                    lucky_video_active = True
+                    lucky_video_writer = None
+                    lucky_video_path   = ""
+                    print("[LUCKY VIDEO] Enregistrement démarré (en attente du prochain stack)")
+                continue
+
+            # RESET → réinitialiser la session Lucky
+            if is_click_on_ls_reset(mousex, mousey, fs_height):
+                if luckystack_active:
+                    luckystack_active = False
+                    if luckystack is not None:
+                        luckystack.stop()
+                if luckystack is not None:
+                    luckystack.reset()
+                # Fermer la vidéo si enregistrement actif
+                if lucky_video_writer is not None:
+                    lucky_video_writer.release()
+                    lucky_video_writer = None
+                lucky_video_active = False
+                for _attr in ['_lucky_last_displayed', '_lucky_cached_image', '_lucky_last_saved',
+                              '_lucky_resolution_check', '_lucky_stack_resolution_debug']:
+                    if hasattr(pygame, _attr):
+                        delattr(pygame, _attr)
+                print("[LUCKY INTERFACE] Session réinitialisée")
+                continue
+
+            # START/STOP → démarrer ou arrêter le stacking Lucky
+            if is_click_on_ls_start_stop(mousex, mousey, fs_width, fs_height):
+                if luckystack_active:
+                    # STOP
+                    luckystack_active = False
+                    if luckystack is not None:
+                        if ls_lucky_save_final == 1:
+                            try:
+                                if raw_format >= 2:
+                                    save_with_external_processing(luckystack, raw_format_name=raw_formats[raw_format])
+                                else:
+                                    luckystack.save(raw_format_name=raw_formats[raw_format])
+                                print("[LUCKY INTERFACE] Sauvegarde finale FIT effectuée")
+                            except Exception as _e:
+                                print(f"[LUCKY INTERFACE] Erreur sauvegarde finale: {_e}")
+                            # PNG filtré séparé (filtres CLAHE/USM/LR)
+                            if lucky_last_filtered_array is not None:
+                                import time as _tsave
+                                _ts = _tsave.strftime("%Y%m%d_%H%M%S")
+                                save_lucky_filtered_png(lucky_last_filtered_array, filename=f"lucky_final_filtered_{_ts}")
+                        luckystack.stop()
+                    # Fermer la vidéo si enregistrement actif
+                    if lucky_video_active and lucky_video_writer is not None:
+                        lucky_video_writer.release()
+                        lucky_video_writer = None
+                        lucky_video_active = False
+                        print(f"[LUCKY VIDEO] Vidéo finalisée : {lucky_video_path}")
+                    apply_controls_immediately(
+                        gain_value=ls_gain if ls_gain > 0 else None,
+                        exposure_time=ls_exposure_us)
+                    print("[LUCKY INTERFACE] Stack arrêté")
+                else:
+                    # START
+                    # Appliquer le zoom sélectionné (différé depuis le slider)
+                    if zoom != ls_zoom:
+                        zoom = ls_zoom
+                        sync_video_resolution_with_zoom()
+
+                    # Reconfigurer caméra si nécessaire (zoom IMX585 changé)
+                    _lucky_prev_cs = getattr(preview, 'prev_config', {}).get('capture_size')
+                    _lucky_new_cs = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1) if Pi_Cam == 10 else None
+                    _lucky_zoom_changed = Pi_Cam == 10 and _lucky_new_cs is not None and _lucky_new_cs != _lucky_prev_cs
+                    if _lucky_zoom_changed:
+                        # Afficher message à l'écran pendant la reconfiguration
+                        display_modes = pygame.display.list_modes()
+                        _dw, _dh = display_modes[0] if display_modes and display_modes != -1 else (fs_width, fs_height)
+                        windowSurfaceObj.fill((0, 0, 0))
+                        _ck_r = 36
+                        if _ck_r not in _font_cache:
+                            _font_cache[_ck_r] = pygame.font.Font(None, _ck_r)
+                        _msg_r = _font_cache[_ck_r].render("Reconfiguration caméra...", True, (200, 200, 200))
+                        windowSurfaceObj.blit(_msg_r, _msg_r.get_rect(center=(_dw // 2, _dh // 2)))
+                        pygame.display.update()
+                        # Marquer luckystack actif AVANT preview() pour configurer le thread correctement
+                        luckystack_active = True
+                        kill_preview_process()
+                        preview()
+
+                    for _attr in ['_lucky_last_displayed', '_lucky_cached_image', '_lucky_last_saved',
+                                  '_lucky_resolution_check', '_lucky_stack_resolution_debug',
+                                  '_lucky_stretch_info_shown', '_lucky_stretch_applied_shown',
+                                  '_lucky_no_stretch_shown', '_stacking_mode_shown']:
+                        if hasattr(pygame, _attr):
+                            delattr(pygame, _attr)
+
+                    _cam_params = {
+                        'exposure': ls_exposure_us,
+                        'gain': ls_gain,
+                        'red': red / 10,
+                        'blue': blue / 10,
+                        'raw_format': raw_formats[raw_format]
+                    }
+                    if luckystack is None:
+                        luckystack = create_advanced_livestack_session(_cam_params)
+                    else:
+                        luckystack.camera_params = _cam_params
+
+                    luckystack.configure(
+                        stacking_method=['mean', 'median', 'kappa_sigma', 'winsorized', 'weighted'][ls_stack_method],
+                        kappa=ls_stack_kappa / 10.0,
+                        iterations=ls_stack_iterations,
+                        enable_qc=False,
+                        planetary_enable=bool(ls_planetary_enable),
+                        planetary_mode=ls_planetary_mode,
+                        planetary_disk_min=ls_planetary_disk_min,
+                        planetary_disk_max=ls_planetary_disk_max,
+                        planetary_disk_threshold=ls_planetary_threshold,
+                        planetary_disk_margin=ls_planetary_margin,
+                        planetary_disk_ellipse=bool(ls_planetary_ellipse),
+                        planetary_window=planetary_windows[ls_planetary_window],
+                        planetary_upsample=ls_planetary_upsample,
+                        planetary_highpass=bool(ls_planetary_highpass),
+                        planetary_roi_center=bool(ls_planetary_roi_center),
+                        planetary_corr=ls_planetary_corr / 100.0,
+                        planetary_max_shift=float(ls_planetary_max_shift),
+                        lucky_enable=True,
+                        lucky_buffer_size=ls_lucky_buffer,
+                        lucky_keep_percent=float(ls_lucky_keep),
+                        lucky_score_method=['laplacian', 'gradient', 'sobel', 'tenengrad'][ls_lucky_score],
+                        lucky_stack_method=['mean', 'median', 'sigma_clip'][ls_lucky_stack],
+                        lucky_align_enabled=bool(ls_lucky_align),
+                        lucky_align_mode=ls_lucky_align,
                         lucky_score_roi_percent=float(ls_lucky_roi),
                         png_stretch=['off', 'ghs', 'asinh'][stretch_preset],
                         png_factor=stretch_factor / 10.0,
@@ -13305,34 +15347,153 @@ while True:
                         ghs_LP=ghs_LP / 100.0,
                         ghs_HP=ghs_HP / 100.0,
                         preview_refresh=ls_preview_refresh,
-                        save_dng="none",
                     )
+                    luckystack.configure(
+                        isp_enable=False,
+                        isp_config_path=None,
+                        video_format='yuv420' if raw_format == 0 else 'xrgb8888',
+                        lucky_stack_method=['mean', 'median', 'sigma_clip'][ls_lucky_stack],
+                        lucky_buffer_size=ls_lucky_buffer,
+                        lucky_keep_percent=float(ls_lucky_keep),
+                        lucky_score_method=['laplacian', 'gradient', 'sobel', 'tenengrad'][ls_lucky_score],
+                        lucky_align_enabled=bool(ls_lucky_align),
+                        lucky_align_mode=ls_lucky_align,
+                        lucky_score_roi_percent=float(ls_lucky_roi),
+                        ghs_D=ghs_D / 10.0,
+                        ghs_b=ghs_b / 10.0,
+                        ghs_SP=ghs_SP / 100.0,
+                        ghs_LP=ghs_LP / 100.0,
+                        ghs_HP=ghs_HP / 100.0,
+                    )
+                    luckystack.camera_params['raw_format'] = raw_formats[raw_format]
+                    luckystack.reset()
+                    luckystack.start()
+                    luckystack_active = True
+                    pygame._lucky_last_displayed = 0
+                    pygame._lucky_cached_image = None
+                    pygame._lucky_last_saved = 0
+                    print("[LUCKY INTERFACE] Stack démarré")
+                continue
 
-                is_raw_mode = (raw_format >= 2)
-                video_format_map = {0: 'yuv420', 1: 'xrgb8888', 2: 'raw12', 3: 'raw16'}
-                livestack.configure(
-                    isp_enable=False,
-                    isp_config_path=None,
-                    video_format=video_format_map.get(raw_format, 'yuv420'),
-                    png_stretch='off' if is_raw_mode else ['off', 'ghs', 'asinh'][stretch_preset],  # Respecter le choix utilisateur
-                    ghs_D=ghs_D / 10.0,
-                    ghs_b=ghs_b / 10.0,
-                    ghs_SP=ghs_SP / 100.0,
-                    ghs_LP=ghs_LP / 100.0,
-                    ghs_HP=ghs_HP / 100.0,
-                )
+            # EXIT → quitter le mode interface Lucky
+            if is_click_on_ls_exit(mousex, mousey, fs_height):
+                if luckystack_active:
+                    luckystack_active = False
+                    if luckystack is not None:
+                        if ls_lucky_save_final == 1:
+                            try:
+                                if raw_format >= 2:
+                                    save_with_external_processing(luckystack, raw_format_name=raw_formats[raw_format])
+                                else:
+                                    luckystack.save(raw_format_name=raw_formats[raw_format])
+                                print("[LUCKY INTERFACE] Stack final sauvegardé à la sortie")
+                            except Exception as e:
+                                print(f"[LUCKY INTERFACE] Erreur sauvegarde: {e}")
+                        luckystack.stop()
 
-                livestack.camera_params['raw_format'] = raw_formats[raw_format]
-                livestack.reset()
-                livestack.start()
-                pygame._livestack_last_saved = 0
+                lucky_interface_mode = 0
+                lucky_settings_visible = 0
+                _lucky_slider_rects = {}
+                _lucky_slider_dragging = False
+                _lucky_ge_dragging = None
+                stretch_mode = 0
 
-                qc_status = "ON" if ls_enable_qc else "OFF"
-                print(f"[LIVESTACK] Mode activé depuis STRETCH (QC: {qc_status})")
-                # Désactiver le mode ajustement
+                # Fermer la vidéo si enregistrement actif
+                if lucky_video_writer is not None:
+                    lucky_video_writer.release()
+                    lucky_video_writer = None
+                    print(f"[LUCKY VIDEO] Vidéo finalisée à la sortie : {lucky_video_path}")
+                lucky_video_active = False
+
+                # Restaurer ISP hardware caméra
+                if use_picamera2 and picam2 is not None and raw_format < 2:
+                    picam2.set_controls({
+                        "Brightness": brightness / 100.0,
+                        "Contrast":   contrast / 100.0,
+                        "Saturation": saturation / 10.0,
+                    })
+
+                # Reconfigurer la caméra si mode RAW
+                if raw_format >= 2:
+                    kill_preview_process()
+                    preview()
+
+                # Restaurer le mode d'affichage normal
+                if frame == 1:
+                    if fullscreen == 1:
+                        windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.FULLSCREEN, 24)
+                    else:
+                        windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), 0, 24)
+                else:
+                    windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.NOFRAME, 24)
+                windowSurfaceObj.fill((0, 0, 0))
+                Menu()
+                pygame.display.update()
+                print("[LUCKY INTERFACE] Mode interface Lucky désactivé")
+                continue
+
+            # Sliders Gain / Expo / Zoom (preview en temps réel, seulement si pas en train de stacker)
+            new_g = is_click_on_ls_gain_slider(mousex, mousey, fs_width, fs_height)
+            if new_g is not None:
+                ls_gain = new_g
+                if not luckystack_active:
+                    apply_controls_immediately(gain_value=ls_gain if ls_gain > 0 else None)
+                _lucky_ge_dragging = 'gain'
+                continue
+            new_e = is_click_on_ls_expo_slider(mousex, mousey, fs_width, fs_height)
+            if new_e is not None:
+                ls_exposure_us = new_e
+                if not luckystack_active:
+                    apply_controls_immediately(exposure_time=ls_exposure_us)
+                _lucky_ge_dragging = 'expo'
+                continue
+            new_z = is_click_on_ls_zoom_slider(mousex, mousey, fs_width, fs_height)
+            if new_z is not None:
+                ls_zoom = new_z
+                # Ne pas appliquer zoom = ls_zoom ici : évite recréation caméra immédiate
+                # zoom sera appliqué lors du START avec reconfiguration contrôlée
+                _lucky_ge_dragging = 'zoom'
+                continue
+
+            # Sliders panneau réglages Lucky
+            if lucky_settings_visible == 1 and _lucky_slider_rects:
+                if handle_lucky_slider_click(mousex, mousey, _lucky_slider_rects):
+                    _lucky_slider_dragging = True
+                    continue
+
+            continue  # Rester en mode Lucky interface
+
+        # Si on est en mode stretch, gérer les clics selon le mode d'ajustement
+        if stretch_mode == 1:
+            # Obtenir les dimensions de l'écran fullscreen
+            display_modes = pygame.display.list_modes()
+            if display_modes and display_modes != -1:
+                fs_width, fs_height = display_modes[0]
+            else:
+                screen_info = pygame.display.Info()
+                fs_width, fs_height = screen_info.current_w, screen_info.current_h
+
+            # Vérifier si clic sur le bouton STACK (entre dans le mode interface LS)
+            # Ne s'applique pas si livestack ou luckystack déjà actif
+            if not livestack_active and not luckystack_active and is_click_on_livestack_button(mousex, mousey, fs_width):
+                # Entrer dans le mode interface LS (sans lancer le stack directement)
+                ls_interface_mode = 1
+                ls_settings_visible = 0
+                ls_sched_frames_done = 0
+
+                # Initialiser les sliders Gain/Expo/Zoom depuis les valeurs caméra actuelles
+                ls_gain = max(0, gain if gain > 0 else 10)
+                _init_expo = custom_sspeed if custom_sspeed > 0 else sspeed
+                ls_exposure_us = max(1000, min(100000, _init_expo if _init_expo > 0 else 10000))
+                ls_zoom = zoom
+
+                # Fermer les panneaux de réglage stretch
                 stretch_adjust_mode = 0
                 _stretch_slider_rects = {}
                 _raw_slider_rects = {}
+                _ls_slider_rects = {}
+
+                print("[LS INTERFACE] Mode interface Live Stack activé")
                 continue
 
             # Vérifier si clic sur l'icône unique (ISP en mode RAW, ADJ en mode RGB/YUV)
@@ -13723,6 +15884,46 @@ while True:
                             print(f"[SOLAR] Enregistrement démarré: {out} ({rw}×{rh})")
                         else:
                             print(f"[SOLAR] Erreur démarrage enregistrement")
+                continue
+
+            # BIN — basculer binning 2x2 ↔ natif 4K
+            if is_click_on_sun_binning(mousex, mousey, fs_width, fs_height):
+                if sun_recorder is not None and sun_recorder.is_recording:
+                    sun_recorder.stop()
+                sun_binning = 1 - sun_binning
+                if sun_binning == 1:
+                    vwidth = 1920; vheight = 1080; use_native_sensor_mode = 0
+                    print("[SOLAR] Binning 2x2 activé → 1920×1080")
+                else:
+                    vwidth = igw; vheight = igh; use_native_sensor_mode = 1
+                    print(f"[SOLAR] Natif activé → {igw}×{igh}")
+                # ── Auto-scaling des paramètres pixel-dépendants ─────────────
+                # Binning→Natif : ×2  |  Natif→Binning : ×0.5
+                # clahe_tile, usm_sigma, lr_sigma, limb_kernel sont exprimés
+                # en pixels et doivent suivre le facteur d'échelle du capteur.
+                # Les paramètres d'intensité (amount, clip, iter) restent inchangés.
+                _s = 2.0 if sun_binning == 0 else 0.5
+                sun_clahe_tile  = max(4,  min(32,  int(sun_clahe_tile * _s)))
+                sun_usm_sigma   = max(5,  min(50,  int(sun_usm_sigma  * _s)))
+                sun_lr_sigma    = max(5,  min(30,  int(sun_lr_sigma   * _s)))
+                _lk = int(sun_limb_kernel * _s)
+                sun_limb_kernel = max(51, min(201, _lk | 1))  # conserver impair
+                print(f"[SOLAR] Params scalés ×{_s:.1f} → tile={sun_clahe_tile} "
+                      f"usm_σ={sun_usm_sigma/10:.1f} lr_σ={sun_lr_sigma/10:.1f} "
+                      f"limb={sun_limb_kernel}px")
+                if sun_processor is not None:
+                    sun_processor.configure(
+                        clahe_tile=sun_clahe_tile,
+                        usm_sigma=sun_usm_sigma / 10.0,
+                        lr_sigma=sun_lr_sigma   / 10.0,
+                        limb_kernel=sun_limb_kernel,
+                    )
+                _sun_last_surface = None
+                _sun_last_frame_bgr = None
+                if sun_processor is not None:
+                    sun_processor._disk_center = None  # Force re-détection
+                kill_preview_process()
+                preview()
                 continue
 
             # DETECT — redétection du disque solaire
@@ -16083,39 +18284,12 @@ while True:
                         if luckystack is not None:
                             luckystack.stop()
 
-                    if not livestack_active:
-                        # Activer Live Stack
-                        livestack_active = True
-
-                        # *** IMPORTANT: Reconfigurer caméra pour mode RAW ***
-                        # preview() vérifiera livestack_active et configurera le capture_thread en mode 'raw'
-                        if raw_format >= 2:
-                            print(f"[LIVESTACK] Mode RAW - reconfiguration caméra...")
-                            kill_preview_process()
-                            preview()  # Reconfigure avec stream RAW et capture_thread en mode 'raw'
-                            print(f"[LIVESTACK] Caméra reconfigurée pour capture RAW")
-
-                        # Réinitialiser les compteurs de session Live Stack
-                        if hasattr(pygame, '_livestack_last_saved'):
-                            delattr(pygame, '_livestack_last_saved')
-                        if hasattr(pygame, '_livestack_stretch_info_shown'):
-                            delattr(pygame, '_livestack_stretch_info_shown')
-                        if hasattr(pygame, '_livestack_stretch_applied_shown'):
-                            delattr(pygame, '_livestack_stretch_applied_shown')
-                        if hasattr(pygame, '_livestack_no_stretch_shown'):
-                            delattr(pygame, '_livestack_no_stretch_shown')
-                        # Réinitialiser les flags de validation RAW
-                        if hasattr(pygame, '_raw_format_mismatch_warning'):
-                            delattr(pygame, '_raw_format_mismatch_warning')
-                        if hasattr(pygame, '_raw_resolution_mismatch_warning'):
-                            delattr(pygame, '_raw_resolution_mismatch_warning')
-                        if hasattr(pygame, '_stacking_mode_shown'):
-                            delattr(pygame, '_stacking_mode_shown')
-
+                    if not livestack_active and ls_interface_mode == 0:
+                        # Entrer dans le mode interface LS (sans lancer le stack directement)
                         # Activer le mode stretch pour affichage fullscreen
                         stretch_mode = 1
 
-                        # Passer en mode fullscreen (comme pour STRETCH)
+                        # Passer en mode fullscreen
                         display_modes = pygame.display.list_modes()
                         if display_modes and display_modes != -1:
                             max_width, max_height = display_modes[0]
@@ -16124,138 +18298,31 @@ while True:
                             max_width, max_height = screen_info.current_w, screen_info.current_h
                         windowSurfaceObj = pygame.display.set_mode((max_width, max_height), pygame.FULLSCREEN, 24)
 
-                        # Créer l'instance livestack si nécessaire
-                        if livestack is None:
-                            # Récupérer les paramètres actuels de la caméra
-                            camera_params = {
-                                'exposure': sspeed,  # Déjà en microsecondes
-                                'gain': gain,
-                                'red': red / 10,  # Divisé par 10 pour ColourGains
-                                'blue': blue / 10,
-                                'raw_format': raw_formats[raw_format]  # YUV420/XRGB8888/SRGGB12/SRGGB16
-                            }
-                            # Utiliser le module avancé
-                            livestack = create_advanced_livestack_session(camera_params)
+                        # Activer l'interface LS
+                        ls_interface_mode = 1
+                        ls_settings_visible = 0
+                        ls_sched_frames_done = 0
 
-                            # Configurer avec paramètres utilisateur
-                            livestack.configure(
-                                # Stacking method
-                                stacking_method=['mean', 'median', 'kappa_sigma', 'winsorized', 'weighted'][ls_stack_method],
-                                kappa=ls_stack_kappa / 10.0,
-                                iterations=ls_stack_iterations,
+                        # Initialiser les sliders Gain/Expo/Zoom depuis les valeurs caméra actuelles
+                        ls_gain = max(0, gain if gain > 0 else 10)
+                        _init_expo = custom_sspeed if custom_sspeed > 0 else sspeed
+                        ls_exposure_us = max(1000, min(100000, _init_expo if _init_expo > 0 else 10000))
+                        ls_zoom = zoom
 
-                                # Alignement
-                                alignment_mode=ls_alignment_modes[ls_alignment_mode],
+                        # Réinitialiser les drags
+                        _ls_slider_rects = {}
+                        _ls_slider_dragging = False
+                        _ls_ge_dragging = None
 
-                                # Contrôle qualité
-                                enable_qc=bool(ls_enable_qc),
-                                max_fwhm=ls_max_fwhm / 10.0 if ls_max_fwhm > 0 else 999.0,
-                                min_sharpness=ls_min_sharpness / 1000.0 if ls_min_sharpness > 0 else 0.0,
-                                max_drift=float(ls_max_drift) if ls_max_drift > 0 else 999999.0,
-                                min_stars=int(ls_min_stars),  # 0 = désactivé pour microscopie
-
-                                # Planétaire (optionnel)
-                                planetary_enable=bool(ls_planetary_enable),
-                                planetary_mode=ls_planetary_mode,
-                                planetary_disk_min=ls_planetary_disk_min,
-                                planetary_disk_max=ls_planetary_disk_max,
-                                planetary_disk_threshold=ls_planetary_threshold,
-                                planetary_disk_margin=ls_planetary_margin,
-                                planetary_disk_ellipse=bool(ls_planetary_ellipse),
-                                planetary_window=planetary_windows[ls_planetary_window],
-                                planetary_upsample=ls_planetary_upsample,
-                                planetary_highpass=bool(ls_planetary_highpass),
-                                planetary_roi_center=bool(ls_planetary_roi_center),
-                                planetary_corr=ls_planetary_corr / 100.0,
-                                planetary_max_shift=float(ls_planetary_max_shift),
-
-                                # Lucky Imaging (désactivé en mode LIVE STACK)
-                                lucky_enable=False,
-                                lucky_buffer_size=ls_lucky_buffer,
-                                lucky_keep_percent=float(ls_lucky_keep),
-                                lucky_score_method=['laplacian', 'gradient', 'sobel', 'tenengrad'][ls_lucky_score],
-                                lucky_stack_method=['mean', 'median', 'sigma_clip'][ls_lucky_stack],
-                                lucky_align_enabled=bool(ls_lucky_align),
-                                lucky_score_roi_percent=float(ls_lucky_roi),
-
-                                # PNG avec stretch selon paramètres interface
-                                png_stretch=['off', 'ghs', 'asinh'][stretch_preset],
-                                png_factor=stretch_factor / 10.0,
-                                # Pour GHS: pas de normalisation par percentiles (clip 0-100 = désactivé)
-                                # Pour Arcsinh: normalisation active (stretch_p_low/high)
-                                png_clip_low=0.0 if stretch_preset == 1 else stretch_p_low / 10.0,
-                                png_clip_high=100.0 if stretch_preset == 1 else stretch_p_high / 100.0,
-                                ghs_D=ghs_D / 10.0,
-                                ghs_b=ghs_b / 10.0,
-                                ghs_SP=ghs_SP / 100.0,
-                                ghs_LP=ghs_LP / 100.0,
-                                ghs_HP=ghs_HP / 100.0,
-                                preview_refresh=ls_preview_refresh,
-                                save_dng="none",
-
-                                # ISP (Image Signal Processor)
-                            )
-
-                        # Debug ISP avant passage à configure (EN DEHORS du if pour être toujours exécuté)
-                        print(f"[DEBUG AVANT CONFIGURE] isp_enable variable = {isp_enable} (type: {type(isp_enable)})")
-                        print(f"[DEBUG AVANT CONFIGURE] isp_config_path variable = {isp_config_path}")
-                        print(f"[DEBUG AVANT CONFIGURE] raw_format variable = {raw_format} ({raw_formats[raw_format]})")
-
-                        # === NOUVELLE APPROCHE RAW: ISP/Stretch appliqué EXTERNE pour cohérence preview/stacking ===
-                        # Pour RAW (raw_format >= 2): libastrostack empile les frames BRUTES
-                        # L'ISP + stretch est appliqué dans RPiCamera2.py avec apply_isp_to_preview() + astro_stretch()
-                        # Ceci garantit que le preview et le résultat stacké sont IDENTIQUES
-                        #
-                        # Pour RGB/YUV (raw_format < 2): pas de traitement ISP (déjà fait par ISP matériel)
-
-                        is_raw_mode = (raw_format >= 2)
-
-                        if is_raw_mode:
-                            print(f"[LIVESTACK RAW] Mode RAW détecté - ISP/stretch seront appliqués EXTERNE")
-                            print(f"  → libastrostack: stacking brut uniquement (isp_enable=False, stretch=none)")
-                            print(f"  → RPiCamera2: appliquera apply_isp_to_preview() + astro_stretch()")
-                        else:
-                            if isp_enable == 1:
-                                print(f"[INFO] ISP logiciel ignoré pour {raw_formats[raw_format]} (déjà traité par ISP matériel)")
-
-                        # Passer les paramètres à libastrostack
-                        # Pour RAW: désactiver ISP et stretch interne (traitement externe)
-                        # Pour RGB/YUV: pas d'ISP software nécessaire
-                        video_format_map = {0: 'yuv420', 1: 'xrgb8888', 2: 'raw12', 3: 'raw16'}
-                        livestack.configure(
-                            isp_enable=False,  # ISP externe pour RAW, pas nécessaire pour RGB/YUV
-                            isp_config_path=None,
-                            video_format=video_format_map.get(raw_format, 'yuv420'),
-                            png_stretch='off' if is_raw_mode else ['off', 'ghs', 'asinh'][stretch_preset],  # Respecter le choix utilisateur
-                            # Paramètres GHS pour mode RGB/YUV (libastrostack les applique)
-                            ghs_D=ghs_D / 10.0,
-                            ghs_b=ghs_b / 10.0,
-                            ghs_SP=ghs_SP / 100.0,
-                            ghs_LP=ghs_LP / 100.0,
-                            ghs_HP=ghs_HP / 100.0,
-                        )
-
-                        # Mettre à jour le format RAW actuel avant de démarrer
-                        livestack.camera_params['raw_format'] = raw_formats[raw_format]
-
-                        # Réinitialiser les compteurs avant de redémarrer
-                        livestack.reset()
-
-                        # Démarrer la session
-                        livestack.start()
-
-                        # Pour RAW mode, l'ISP/stretch sera appliqué externe (dans le code d'affichage)
-                        # Plus besoin de apply_isp_to_session() car libastrostack n'a pas d'ISP actif
-
-                        # Réinitialiser compteur de sauvegarde PNG
-                        pygame._livestack_last_saved = 0
-
-                        # Afficher le mode activé
-                        qc_status = "ON" if ls_enable_qc else "OFF"
-                        print(f"[LIVESTACK] Mode activé (QC: {qc_status})")
+                        print("[LS INTERFACE] Mode interface Live Stack activé depuis le menu")
                     else:
-                        # Désactiver Live Stack
+                        # Désactiver Live Stack / quitter interface LS
                         livestack_active = False
+                        ls_interface_mode = 0
+                        ls_settings_visible = 0
+                        _ls_slider_rects = {}
+                        _ls_slider_dragging = False
+                        _ls_ge_dragging = None
                         stretch_mode = 0  # Désactiver aussi le stretch
 
                         if livestack is not None:
@@ -16274,6 +18341,11 @@ while True:
                             else:
                                 print("[LIVESTACK] Sauvegarde finale désactivée (ls_save_final=0)")
                             livestack.stop()
+                        if hasattr(pygame, '_ls_raw_save_queue'):
+                            pygame._ls_raw_save_queue.put(None)
+                            del pygame._ls_raw_save_queue
+                            if hasattr(pygame, '_ls_prev_accepted'):
+                                del pygame._ls_prev_accepted
 
                         # Restaurer le mode d'affichage normal (avec l'interface)
                         if frame == 1:
@@ -16304,52 +18376,14 @@ while True:
                         livestack_active = False
                         if livestack is not None:
                             livestack.stop()
+                        if hasattr(pygame, '_ls_raw_save_queue'):
+                            pygame._ls_raw_save_queue.put(None)
+                            del pygame._ls_raw_save_queue
+                            if hasattr(pygame, '_ls_prev_accepted'):
+                                del pygame._ls_prev_accepted
 
-                    if not luckystack_active:
-                        # Vérifier compatibilité RAW pour IMX585
-                        if Pi_Cam == 10 and raw_format >= 2:  # Mode RAW Bayer
-                            sensor_mode = get_imx585_sensor_mode(zoom, use_native_sensor_mode == 1)
-                            if sensor_mode not in imx585_validated_raw_modes:
-                                print(f"\n⚠️  AVERTISSEMENT: Résolution {sensor_mode} non validée en mode RAW")
-                                print(f"  Résolutions RAW validées:")
-                                for res, desc in imx585_validated_raw_modes.items():
-                                    print(f"    • {res[0]}x{res[1]} - {desc}")
-                                print(f"  Pour de meilleurs résultats, utilisez:")
-                                print(f"    - Zoom 0 (fullframe) ou Zoom 2 (1920x1080)")
-                                print(f"    - OU passez en mode XRGB8888 ISP (raw_format=1)")
-                                print()
-
-                        # Activer Lucky Stack
-                        luckystack_active = True
-
-                        # *** IMPORTANT: Reconfigurer caméra pour mode RAW ***
-                        # preview() vérifiera luckystack_active et configurera le capture_thread en mode 'raw'
-                        if raw_format >= 2:
-                            print(f"[LUCKYSTACK] Mode RAW - reconfiguration caméra...")
-                            kill_preview_process()
-                            preview()  # Reconfigure avec stream RAW et capture_thread en mode 'raw'
-                            print(f"[LUCKYSTACK] Caméra reconfigurée pour capture RAW")
-
-                        # Réinitialiser les compteurs de session Lucky Stack
-                        if hasattr(pygame, '_lucky_last_displayed'):
-                            delattr(pygame, '_lucky_last_displayed')
-                        if hasattr(pygame, '_lucky_cached_image'):
-                            delattr(pygame, '_lucky_cached_image')
-                        if hasattr(pygame, '_lucky_last_saved'):
-                            delattr(pygame, '_lucky_last_saved')
-                        if hasattr(pygame, '_lucky_resolution_check'):
-                            delattr(pygame, '_lucky_resolution_check')
-                        if hasattr(pygame, '_lucky_stack_resolution_debug'):
-                            delattr(pygame, '_lucky_stack_resolution_debug')
-                        # Réinitialiser les flags de validation RAW
-                        if hasattr(pygame, '_raw_format_mismatch_warning'):
-                            delattr(pygame, '_raw_format_mismatch_warning')
-                        if hasattr(pygame, '_raw_resolution_mismatch_warning'):
-                            delattr(pygame, '_raw_resolution_mismatch_warning')
-                        if hasattr(pygame, '_stacking_mode_shown'):
-                            delattr(pygame, '_stacking_mode_shown')
-
-                        # Activer le mode stretch pour affichage fullscreen
+                    if not luckystack_active and lucky_interface_mode == 0:
+                        # Entrer dans le mode interface Lucky (sans lancer le stack directement)
                         stretch_mode = 1
 
                         # Passer en mode fullscreen (comme pour LIVE STACK)
@@ -16361,139 +18395,32 @@ while True:
                             max_width, max_height = screen_info.current_w, screen_info.current_h
                         windowSurfaceObj = pygame.display.set_mode((max_width, max_height), pygame.FULLSCREEN, 24)
 
-                        # Créer l'instance luckystack si nécessaire
-                        if luckystack is None:
-                            # Récupérer les paramètres actuels de la caméra
-                            camera_params = {
-                                'exposure': sspeed,  # Déjà en microsecondes
-                                'gain': gain,
-                                'red': red / 10,  # Divisé par 10 pour ColourGains
-                                'blue': blue / 10,
-                                'raw_format': raw_formats[raw_format]  # YUV420/XRGB8888/SRGGB12/SRGGB16
-                            }
-                            luckystack = create_advanced_livestack_session(camera_params)
+                        # Activer l'interface Lucky
+                        lucky_interface_mode = 1
+                        if raw_format >= 2:
+                            raw_format = 1  # Lucky Stack : ISP uniquement (YUV ou XRGB8888)
+                        lucky_settings_visible = 0
 
-                            # Configurer avec paramètres Lucky Imaging
-                            luckystack.configure(
-                                # Stacker avancé
-                                stacking_method=['mean', 'median', 'kappa_sigma', 'winsorized', 'weighted'][ls_stack_method],
-                                kappa=ls_stack_kappa / 10.0,
-                                iterations=ls_stack_iterations,
+                        # Initialiser les sliders Gain/Expo/Zoom depuis les valeurs caméra actuelles
+                        ls_gain = max(0, gain if gain > 0 else 10)
+                        _init_expo = custom_sspeed if custom_sspeed > 0 else sspeed
+                        ls_exposure_us = max(1000, min(100000, _init_expo if _init_expo > 0 else 10000))
+                        ls_zoom = zoom
 
-                                # Contrôle qualité DÉSACTIVÉ pour Lucky Imaging
-                                # (Lucky fait déjà sa propre sélection via scoring)
-                                enable_qc=False,
+                        # Réinitialiser les drags
+                        _lucky_slider_rects = {}
+                        _lucky_slider_dragging = False
+                        _lucky_ge_dragging = None
 
-                                # Planétaire (peut être activé avec Lucky)
-                                planetary_enable=bool(ls_planetary_enable),
-                                planetary_mode=ls_planetary_mode,
-                                planetary_disk_min=ls_planetary_disk_min,
-                                planetary_disk_max=ls_planetary_disk_max,
-                                planetary_disk_threshold=ls_planetary_threshold,
-                                planetary_disk_margin=ls_planetary_margin,
-                                planetary_disk_ellipse=bool(ls_planetary_ellipse),
-                                planetary_window=planetary_windows[ls_planetary_window],
-                                planetary_upsample=ls_planetary_upsample,
-                                planetary_highpass=bool(ls_planetary_highpass),
-                                planetary_roi_center=bool(ls_planetary_roi_center),
-                                planetary_corr=ls_planetary_corr / 100.0,
-                                planetary_max_shift=float(ls_planetary_max_shift),
-
-                                # Lucky Imaging (activé)
-                                lucky_enable=True,  # Toujours activé en mode Lucky Stack
-                                lucky_buffer_size=ls_lucky_buffer,
-                                lucky_keep_percent=float(ls_lucky_keep),
-                                lucky_score_method=['laplacian', 'gradient', 'sobel', 'tenengrad'][ls_lucky_score],
-                                lucky_stack_method=['mean', 'median', 'sigma_clip'][ls_lucky_stack],
-                                lucky_align_enabled=bool(ls_lucky_align),
-                                lucky_score_roi_percent=float(ls_lucky_roi),
-
-                                # PNG avec stretch selon paramètres interface
-                                png_stretch=['off', 'ghs', 'asinh'][stretch_preset],
-                                png_factor=stretch_factor / 10.0,
-                                # Pour GHS: pas de normalisation par percentiles (clip 0-100 = désactivé)
-                                # Pour Arcsinh: normalisation active (stretch_p_low/high)
-                                png_clip_low=0.0 if stretch_preset == 1 else stretch_p_low / 10.0,
-                                png_clip_high=100.0 if stretch_preset == 1 else stretch_p_high / 100.0,
-                                ghs_D=ghs_D / 10.0,
-                                ghs_b=ghs_b / 10.0,
-                                ghs_SP=ghs_SP / 100.0,
-                                ghs_LP=ghs_LP / 100.0,
-                                ghs_HP=ghs_HP / 100.0,
-                                preview_refresh=ls_preview_refresh,
-                                save_dng="none"
-                            )
-
-                        # === NOUVELLE APPROCHE RAW: ISP/Stretch appliqué EXTERNE (même que LiveStack) ===
-                        is_raw_mode = (raw_format >= 2)
-
-                        if is_raw_mode:
-                            print(f"[LUCKYSTACK RAW] Mode RAW détecté - ISP/stretch seront appliqués EXTERNE")
-                            print(f"  → libastrostack: stacking brut uniquement (isp_enable=False, stretch=none)")
-                            print(f"  → RPiCamera2: appliquera apply_isp_to_preview() + astro_stretch()")
-                        else:
-                            if isp_enable == 1:
-                                print(f"[INFO] ISP logiciel ignoré pour {raw_formats[raw_format]} (déjà traité par ISP matériel)")
-
-                        # Configuration pour mode externe ISP/stretch
-                        video_format_map = {0: 'yuv420', 1: 'xrgb8888', 2: 'raw12', 3: 'raw16'}
-                        luckystack.configure(
-                            isp_enable=False,  # ISP externe pour RAW
-                            isp_config_path=None,
-                            video_format=video_format_map.get(raw_format, 'yuv420'),
-                            png_stretch='off' if is_raw_mode else ['off', 'ghs', 'asinh'][stretch_preset],  # Respecter le choix utilisateur
-                            # Mettre à jour les paramètres Lucky modifiés entre deux sessions
-                            lucky_stack_method=['mean', 'median', 'sigma_clip'][ls_lucky_stack],
-                            lucky_buffer_size=ls_lucky_buffer,
-                            lucky_keep_percent=float(ls_lucky_keep),
-                            lucky_score_method=['laplacian', 'gradient', 'sobel', 'tenengrad'][ls_lucky_score],
-                            lucky_align_enabled=bool(ls_lucky_align),
-                            lucky_score_roi_percent=float(ls_lucky_roi),
-                            # Paramètres GHS pour mode RGB/YUV
-                            ghs_D=ghs_D / 10.0,
-                            ghs_b=ghs_b / 10.0,
-                            ghs_SP=ghs_SP / 100.0,
-                            ghs_LP=ghs_LP / 100.0,
-                            ghs_HP=ghs_HP / 100.0,
-                        )
-
-                        # Mettre à jour le format RAW actuel avant de démarrer
-                        luckystack.camera_params['raw_format'] = raw_formats[raw_format]
-
-                        # Réinitialiser les compteurs avant de redémarrer
-                        luckystack.reset()
-
-                        # Démarrer la session
-                        luckystack.start()
-
-                        # Pour RAW mode, l'ISP/stretch sera appliqué externe (dans le code d'affichage)
-                        # Plus besoin de apply_isp_to_session() car libastrostack n'a pas d'ISP actif
-
-                        # Réinitialiser les compteurs d'affichage et de sauvegarde
-                        pygame._lucky_last_displayed = 0
-                        pygame._lucky_cached_image = None
-                        pygame._lucky_last_saved = 0
-
-                        # Réinitialiser les flags de debug pour voir les infos à chaque activation
-                        if hasattr(pygame, '_lucky_resolution_check'):
-                            delattr(pygame, '_lucky_resolution_check')
-                        if hasattr(pygame, '_lucky_stack_resolution_debug'):
-                            delattr(pygame, '_lucky_stack_resolution_debug')
-                        if hasattr(pygame, '_lucky_stretch_info_shown'):
-                            delattr(pygame, '_lucky_stretch_info_shown')
-                        if hasattr(pygame, '_lucky_stretch_applied_shown'):
-                            delattr(pygame, '_lucky_stretch_applied_shown')
-                        if hasattr(pygame, '_lucky_no_stretch_shown'):
-                            delattr(pygame, '_lucky_no_stretch_shown')
-                        # Réinitialiser le flag de debug pour voir la méthode de stacking
-                        if luckystack is not None and luckystack.lucky_stacker is not None:
-                            if hasattr(luckystack.lucky_stacker, '_stack_method_shown'):
-                                delattr(luckystack.lucky_stacker, '_stack_method_shown')
-
-                        print("[LUCKYSTACK] Mode activé")
+                        print("[LUCKY INTERFACE] Mode interface Lucky Stack activé depuis le menu")
                     else:
-                        # Désactiver Lucky Stack
+                        # Désactiver Lucky Stack / quitter interface Lucky
                         luckystack_active = False
+                        lucky_interface_mode = 0
+                        lucky_settings_visible = 0
+                        _lucky_slider_rects = {}
+                        _lucky_slider_dragging = False
+                        _lucky_ge_dragging = None
                         stretch_mode = 0  # Désactiver aussi le stretch
 
                         if luckystack is not None:
@@ -20622,6 +22549,7 @@ while True:
                   sun_exposure_us = max(1000, min(20000, _init_expo if _init_expo > 0 else 5000))
 
                   # Forcer binning 1920×1080 à l'entrée
+                  sun_binning = 1
                   vwidth = 1920
                   vheight = 1080
                   zoom = 0
