@@ -43,7 +43,7 @@ class QualityConfig:
         self.max_rotation = 5.0           # Rotation max en degrés
         self.min_scale = 0.95             # Scale minimum (défaut 0.95)
         self.max_scale = 1.05             # Scale maximum (défaut 1.05)
-        self.min_inliers_ratio = 0.3      # Ratio minimum d'inliers RANSAC (30%)
+        self.min_inliers_ratio = 0.5      # Ratio minimum d'inliers RANSAC (50%)
         
         # Paramètres détection étoiles
         self.star_detection_sigma = 5.0   # Seuil sigma pour détection
@@ -109,6 +109,13 @@ class StackingConfig:
 
         # Paramètres alignement avancés
         self.max_stars_alignment = 50     # Nb max étoiles pour alignement
+
+        # Paramètres méthode de stacking
+        self.stacking_method = 'mean'     # 'mean', 'kappa_sigma', 'winsorized', 'median'
+        self.stacking_kappa = 2.5         # Kappa pour sigma-clipping (kappa_sigma/winsorized)
+
+        # Limite de frames (0 = illimité)
+        self.max_frames = 0
 
         # Statistiques (remplies pendant exécution)
         self.num_stacked = 0

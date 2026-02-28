@@ -99,7 +99,7 @@ def load_image(path):
         return None
 
 
-def save_fits(data, path, header_data=None, linear=True):
+def save_fits(data, path, header_data=None, linear=True, format_hint=None):
     """
     Sauvegarde image en FITS
 
@@ -109,6 +109,7 @@ def save_fits(data, path, header_data=None, linear=True):
         header_data: Dictionnaire de métadonnées optionnelles
         linear: Si True, sauvegarde données linéaires (RAW, recommandé)
                 Si False, applique stretch avant sauvegarde (legacy)
+        format_hint: Format source explicite ('yuv420', 'raw12', 'raw16', None=auto)
 
     Returns:
         True si succès
@@ -121,38 +122,48 @@ def save_fits(data, path, header_data=None, linear=True):
         is_color = len(data.shape) == 3
 
         if linear:
-            # MODE RAW: Sauvegarder données linéaires brutes
-            # C'est le vrai format RAW pour post-traitement
-            if is_color:
-                # Normaliser si nécessaire (garder plage dynamique)
-                if data.max() > 65535:
-                    # Données en float très grandes, normaliser
-                    data_normalized = data / data.max()
-                    result = (data_normalized * 65535).astype(np.uint16)
-                elif data.max() <= 1.0:
-                    # Données déjà normalisées 0-1
-                    result = (data * 65535).astype(np.uint16)
+            # MODE RAW: Sauvegarder données linéaires normalisées en uint16
+            # Utiliser format_hint pour déterminer la plage native des données,
+            # puis normaliser vers la plage complète 16-bit (0-65535) pour compatibilité
+            # maximale avec les logiciels de post-traitement (PixInsight, Siril, etc.)
+            if format_hint:
+                f = format_hint.lower()
+                if 'yuv' in f or '420' in f:
+                    native_max = 255.0
+                elif 'raw12' in f or 'srggb12' in f or 'rggb12' in f:
+                    native_max = 4095.0
+                elif 'raw10' in f or 'srggb10' in f:
+                    native_max = 1023.0
                 else:
-                    # Données déjà en valeurs brutes
-                    result = np.clip(data, 0, 65535).astype(np.uint16)
+                    native_max = 65535.0
+            else:
+                # Heuristique basée sur la plage des données
+                dmax = float(data.max())
+                if dmax > 65535:
+                    native_max = dmax
+                elif dmax <= 1.0:
+                    native_max = 1.0
+                elif dmax <= 300:
+                    native_max = 255.0
+                elif dmax <= 5000:
+                    native_max = 4095.0
+                else:
+                    native_max = 65535.0
 
-                # Transposer pour FITS (3, H, W)
-                result = result.transpose(2, 0, 1)
+            # Normaliser vers uint16 pleine échelle
+            if native_max <= 1.0:
+                result_data = (np.clip(data, 0, 1) * 65535).astype(np.uint16)
+            else:
+                result_data = np.clip(data / native_max * 65535, 0, 65535).astype(np.uint16)
 
+            if is_color:
+                result = result_data.transpose(2, 0, 1)
                 hdu = fits.PrimaryHDU(result)
                 hdu.header['COLORTYP'] = 'RGB'
                 hdu.header['DATATYPE'] = 'LINEAR'
                 hdu.header['COMMENT'] = 'Linear (unstretched) data for post-processing'
             else:
-                # Mono
-                if data.max() > 65535:
-                    data_normalized = data / data.max()
-                    result = (data_normalized * 65535).astype(np.uint16)
-                elif data.max() <= 1.0:
-                    result = (data * 65535).astype(np.uint16)
-                else:
-                    result = np.clip(data, 0, 65535).astype(np.uint16)
-
+                result = result_data
                 hdu = fits.PrimaryHDU(result)
                 hdu.header['DATATYPE'] = 'LINEAR'
                 hdu.header['COMMENT'] = 'Linear (unstretched) data for post-processing'

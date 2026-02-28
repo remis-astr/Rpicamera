@@ -413,9 +413,22 @@ class RPiCameraLiveStackAdvanced:
             else:
                 print(f"[LUCKY] stack_method sera appliqué au prochain start(): {method}")
 
+        if 'lucky_align_mode' in kwargs:
+            new_mode = int(kwargs['lucky_align_mode'])
+            self.config.lucky.align_mode = new_mode
+            self.config.lucky.align_enabled = (new_mode != 0)
+            if self.lucky_stacker and self.is_running:
+                self.lucky_stacker.configure(align_mode=new_mode)
+                print(f"[LUCKY] align_mode mis à jour: {new_mode}")
+
         if 'lucky_align_enabled' in kwargs:
             new_align = bool(kwargs['lucky_align_enabled'])
             self.config.lucky.align_enabled = new_align
+            # Backward compat : sync align_mode
+            if not new_align:
+                self.config.lucky.align_mode = 0
+            elif getattr(self.config.lucky, 'align_mode', 0) == 0:
+                self.config.lucky.align_mode = 1
             if self.lucky_stacker and self.is_running:
                 self.lucky_stacker.config.align_enabled = new_align
                 print(f"[LUCKY] align_enabled mis à jour: {new_align}")
@@ -649,6 +662,8 @@ class RPiCameraLiveStackAdvanced:
             lucky_config.min_score = self.config.lucky.min_score
             lucky_config.score_roi_percent = self.config.lucky.score_roi_percent
             lucky_config.align_enabled = self.config.lucky.align_enabled
+            lucky_config.align_mode = getattr(self.config.lucky, 'align_mode', 1 if self.config.lucky.align_enabled else 0)
+            lucky_config.max_shift = getattr(self.config.lucky, 'max_shift', 50.0)
             lucky_config.auto_stack = self.config.lucky.auto_stack
             
             # Mapper les enums

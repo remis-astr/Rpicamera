@@ -51,6 +51,20 @@ import threading
 import gc  # Pour forcer libération mémoire après process_buffer
 from concurrent.futures import ThreadPoolExecutor
 
+# Aligneur planétaire optionnel (disk/hybrid modes)
+try:
+    from libastrostack.aligner_planetary import (
+        PlanetaryAligner as _PlanetaryAligner,
+        PlanetaryMode as _PlanetaryMode,
+        PlanetaryConfig as _PlanetaryConfig,
+    )
+    _HAS_PLANETARY = True
+except ImportError:
+    _HAS_PLANETARY = False
+    _PlanetaryAligner = None
+    _PlanetaryMode = None
+    _PlanetaryConfig = None
+
 
 class ScoreMethod(Enum):
     """Méthodes de calcul du score de qualité"""
@@ -94,7 +108,9 @@ class LuckyConfig:
     sigma_clip_kappa: float = 2.5       # Kappa pour sigma clipping
     
     # Alignement
-    align_enabled: bool = True          # Activer l'alignement
+    align_enabled: bool = True          # Activer l'alignement (legacy, utilisez align_mode)
+    align_mode: int = 1                 # 0=off, 1=surface/phase FFT, 2=disk/Hough, 3=hybride
+    max_shift: float = 50.0             # Décalage max accepté en pixels (0 = désactivé)
     align_method: str = "phase"         # "phase" (FFT) ou "ecc" (Enhanced Correlation)
     align_roi_percent: float = 80.0     # % central pour alignement
     
@@ -385,7 +401,24 @@ class FrameAligner:
         self.config = config
         self.reference: Optional[np.ndarray] = None
         self.reference_is_explicit: bool = False  # Track si référence définie par update_alignment_reference()
+        self._planetary_aligner = None  # Instance PlanetaryAligner pour modes 2/3
     
+    def _create_planetary_aligner(self):
+        """Crée un PlanetaryAligner configuré selon align_mode (2=disk, 3=hybrid)."""
+        if not _HAS_PLANETARY:
+            print("[ALIGN] PlanetaryAligner non disponible, fallback surface/phase")
+            return
+        cfg = _PlanetaryConfig()
+        mode_map = {2: _PlanetaryMode.DISK, 3: _PlanetaryMode.HYBRID}
+        cfg.mode = mode_map.get(self.config.align_mode, _PlanetaryMode.SURFACE)
+        cfg.max_shift = int(self.config.max_shift) if self.config.max_shift > 0 else 9999
+        cfg.disk_min_radius = 30
+        cfg.disk_max_radius = 4000
+        cfg.surface_window_size = 256
+        cfg.surface_highpass = True
+        self._planetary_aligner = _PlanetaryAligner(cfg)
+        print(f"[ALIGN] PlanetaryAligner créé — mode={cfg.mode.value}, max_shift={cfg.max_shift}px")
+
     def set_reference(self, image: np.ndarray, explicit: bool = False):
         """
         Définit l'image de référence
@@ -394,15 +427,25 @@ class FrameAligner:
             image: Image de référence
             explicit: True si définie par update_alignment_reference() (préserve entre buffers)
         """
+        self.reference_is_explicit = explicit
+
+        if self.config.align_mode in (2, 3):
+            # Modes disk/hybrid : référence gérée par PlanetaryAligner
+            if self._planetary_aligner is None:
+                self._create_planetary_aligner()
+            if self._planetary_aligner is not None:
+                self._planetary_aligner.set_reference(image)
+            self.reference = None
+            return
+
+        # Mode 1 (surface/phase) : grayscale normalisé + ROI
         if len(image.shape) == 3:
-            # Normaliser en [0-255] avant conversion (pour RAW float32 [0-65535])
             if image.dtype != np.uint8:
                 img_normalized = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
             else:
                 img_normalized = image
             self.reference = cv2.cvtColor(img_normalized, cv2.COLOR_RGB2GRAY)
         else:
-            # Mono : normaliser directement
             if image.dtype != np.uint8:
                 self.reference = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
             else:
@@ -410,7 +453,6 @@ class FrameAligner:
 
         # Extraire ROI pour alignement
         self.reference = self._extract_align_roi(self.reference)
-        self.reference_is_explicit = explicit
     
     def _extract_align_roi(self, image: np.ndarray) -> np.ndarray:
         """Extrait ROI central pour alignement (utilise le même ROI que le scoring)"""
@@ -425,47 +467,68 @@ class FrameAligner:
     
     def align(self, image: np.ndarray) -> Tuple[np.ndarray, Dict[str, float]]:
         """
-        Aligne une image sur la référence
+        Aligne une image sur la référence.
+        Dispatche selon config.align_mode :
+          1 = surface/phase FFT (défaut)
+          2 = disk/Hough (PlanetaryAligner)
+          3 = hybride disque+surface (PlanetaryAligner)
 
         Returns:
-            (image_alignée, params)
+            (image_alignée, params)  — en cas d'échec, retourne l'image originale avec align_failed=True
         """
+        # ── Modes 2/3 : PlanetaryAligner ────────────────────────────────────
+        if self.config.align_mode in (2, 3):
+            if not _HAS_PLANETARY:
+                # Fallback mode 1
+                pass
+            else:
+                if self._planetary_aligner is None:
+                    self._create_planetary_aligner()
+                if self._planetary_aligner is not None:
+                    aligned, params, success = self._planetary_aligner.align(image)
+                    if not success:
+                        return image.copy(), {'dx': 0.0, 'dy': 0.0, 'align_failed': True}
+                    return aligned, params
+
+        # ── Mode 1 : surface/phase FFT ───────────────────────────────────────
         if self.reference is None:
             self.set_reference(image)
             return image.copy(), {'dx': 0.0, 'dy': 0.0}
 
         # Convertir en grayscale avec normalisation correcte
         if len(image.shape) == 3:
-            # Normaliser en [0-255] avant conversion (pour RAW float32 [0-65535])
             if image.dtype != np.uint8:
                 img_normalized = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
             else:
                 img_normalized = image
             gray = cv2.cvtColor(img_normalized, cv2.COLOR_RGB2GRAY)
         else:
-            # Mono : normaliser directement
             if image.dtype != np.uint8:
                 gray = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
             else:
                 gray = image
-        
+
         # Extraire ROI
         gray_roi = self._extract_align_roi(gray)
-        
-        # Calculer décalage par corrélation de phase
+
+        # Calculer décalage par corrélation de phase ou ECC
         if self.config.align_method == "phase":
             dx, dy = self._phase_correlation(self.reference, gray_roi)
-        else:  # ECC
+        else:
             dx, dy = self._ecc_alignment(self.reference, gray_roi)
-        
+
+        # ── Validation max_shift ─────────────────────────────────────────────
+        max_s = self.config.max_shift
+        if max_s > 0:
+            shift = float(np.sqrt(dx * dx + dy * dy))
+            if shift > max_s:
+                print(f"[ALIGN] Décalage rejeté: {shift:.1f}px > max {max_s:.0f}px — frame non alignée")
+                return image.copy(), {'dx': 0.0, 'dy': 0.0, 'align_failed': True}
+
         # Appliquer translation
         M = np.float32([[1, 0, dx], [0, 1, dy]])
-        
-        if len(image.shape) == 3:
-            aligned = cv2.warpAffine(image, M, (image.shape[1], image.shape[0]))
-        else:
-            aligned = cv2.warpAffine(image, M, (image.shape[1], image.shape[0]))
-        
+        aligned = cv2.warpAffine(image, M, (image.shape[1], image.shape[0]))
+
         return aligned, {'dx': dx, 'dy': dy}
     
     def _phase_correlation(self, ref: np.ndarray, img: np.ndarray) -> Tuple[float, float]:
@@ -549,6 +612,8 @@ class FrameAligner:
         if not self.reference_is_explicit:
             self.reference = None
             self.reference_is_explicit = False
+            if self._planetary_aligner is not None:
+                self._planetary_aligner.reset()
 
 
 class LuckyImagingStacker:
@@ -795,7 +860,8 @@ class LuckyImagingStacker:
 
         # 4. Aligner les frames
         t_align = time.perf_counter()
-        if self.config.align_enabled and len(selected_frames) > 1:
+        _align_active = (getattr(self.config, 'align_mode', 1 if self.config.align_enabled else 0) != 0)
+        if _align_active and len(selected_frames) > 1:
             aligned_frames = self._align_frames(selected_frames)
         else:
             aligned_frames = selected_frames
@@ -838,22 +904,33 @@ class LuckyImagingStacker:
     
     def _align_frames(self, frames: List[np.ndarray]) -> List[np.ndarray]:
         """
-        Aligne une liste de frames
+        Aligne une liste de frames.
 
-        Si une référence explicite existe (via update_alignment_reference),
-        aligne TOUTES les frames sur cette référence pour maintenir cohérence entre buffers.
-        Sinon, utilise la première frame du buffer comme référence.
+        Mode 1 (surface/phase) :
+          - La première frame devient référence (sauf si référence explicite définie).
+        Modes 2/3 (disk/hybrid) :
+          - PlanetaryAligner gère la référence en interne sur le premier appel.
+          - Toutes les frames sont passées à align() y compris la première.
         """
         if not frames:
             return frames
 
-        # Si pas de référence explicite, utiliser la première frame
+        align_mode = getattr(self.config, 'align_mode', 1 if self.config.align_enabled else 0)
+
+        if align_mode in (2, 3) and _HAS_PLANETARY:
+            # Disk/Hybrid : PlanetaryAligner auto-set référence sur le 1er appel
+            aligned = []
+            for frame in frames:
+                aligned_frame, params = self.aligner.align(frame)
+                aligned.append(aligned_frame)
+            return aligned
+
+        # Mode 1 (surface/phase) — logique d'origine
         if not self.aligner.reference_is_explicit:
             self.aligner.set_reference(frames[0], explicit=False)
             aligned = [frames[0]]  # La référence est déjà alignée
             start_idx = 1
         else:
-            # Référence explicite définie : aligner TOUTES les frames (y compris la première)
             aligned = []
             start_idx = 0
             print(f"[LUCKY ALIGN] Utilisation référence explicite pour aligner {len(frames)} frames")
@@ -1032,12 +1109,28 @@ class LuckyImagingStacker:
             if method_str in method_map:
                 self.config.stack_method = method_map[method_str]
         
+        if 'align_mode' in kwargs:
+            new_mode = int(kwargs['align_mode'])
+            if new_mode != getattr(self.config, 'align_mode', -1):
+                self.config.align_mode = new_mode
+                self.config.align_enabled = (new_mode != 0)
+                self.aligner = FrameAligner(self.config)
+                print(f"[LUCKY CONFIG] align_mode: {new_mode}")
+
+        if 'max_shift' in kwargs:
+            self.config.max_shift = float(kwargs['max_shift'])
+
         if 'align_enabled' in kwargs:
-            self.config.align_enabled = bool(kwargs['align_enabled'])
-        
+            ae = bool(kwargs['align_enabled'])
+            self.config.align_enabled = ae
+            if not ae:
+                self.config.align_mode = 0
+            elif getattr(self.config, 'align_mode', 0) == 0:
+                self.config.align_mode = 1
+
         if 'auto_stack' in kwargs:
             self.config.auto_stack = bool(kwargs['auto_stack'])
-        
+
         if 'score_roi_percent' in kwargs:
             self.config.score_roi_percent = float(kwargs['score_roi_percent'])
 
@@ -1157,8 +1250,23 @@ class RPiCameraLuckyImaging:
             }
             self.config.stack_method = method_map.get(kwargs['stack_method'].lower(),
                                                        StackMethod.MEAN)
+        if 'align_mode' in kwargs:
+            new_mode = int(kwargs['align_mode'])
+            self.config.align_mode = new_mode
+            self.config.align_enabled = (new_mode != 0)
+            if self.stacker:
+                self.stacker.configure(align_mode=new_mode)
+        if 'max_shift' in kwargs:
+            self.config.max_shift = float(kwargs['max_shift'])
+            if self.stacker:
+                self.stacker.configure(max_shift=self.config.max_shift)
         if 'align_enabled' in kwargs:
-            self.config.align_enabled = bool(kwargs['align_enabled'])
+            ae = bool(kwargs['align_enabled'])
+            self.config.align_enabled = ae
+            if not ae:
+                self.config.align_mode = 0
+            elif getattr(self.config, 'align_mode', 0) == 0:
+                self.config.align_mode = 1
         if 'auto_stack' in kwargs:
             self.config.auto_stack = bool(kwargs['auto_stack'])
         if 'score_roi_percent' in kwargs:

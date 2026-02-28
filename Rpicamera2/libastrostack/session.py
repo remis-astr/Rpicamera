@@ -142,7 +142,11 @@ class LiveStackSession:
         """
         if not self.is_running:
             return None
-        
+
+        # Vérifier limite max_frames (I11)
+        if self.config.max_frames > 0 and self.config.num_stacked >= self.config.max_frames:
+            return self.stacker.get_result()
+
         print(f"\n[IMG] Frame {self.files_processed + self.files_rejected + 1}")
         
         try:
@@ -282,7 +286,7 @@ class LiveStackSession:
         elif self.config.isp_enable and not is_raw_format:
             print(f"  [ISP] Ignoré (format {self.config.video_format} déjà traité par camera ISP)")
         else:
-            print(f"  [ISP] Désactivé (enable={self.config.isp_enable}, isp={self.isp is not None}, raw={is_raw_format})")
+            pass
 
         # Appliquer étirement
         is_color = len(result.shape) == 3
@@ -299,8 +303,6 @@ class LiveStackSession:
         max_val = result.max()
         min_val = result.min()
 
-        # DEBUG: Tracer les valeurs pour diagnostiquer le problème de blanc
-        print(f"  [DEBUG STRETCH] Avant normalisation: min={min_val:.2f}, max={max_val:.2f}, dtype={result.dtype}")
 
         # IMPORTANT: Détecter 3 cas au lieu de 2 pour éviter bug avec ISP
         if max_val <= 1.1:
@@ -343,9 +345,6 @@ class LiveStackSession:
         # Normaliser à [0-1] (requis par apply_stretch)
         result = result / normalization_factor
         result = np.clip(result, 0, 1)
-
-        # DEBUG: Après normalisation
-        print(f"  [DEBUG STRETCH] Après normalisation: min={result.min():.4f}, max={result.max():.4f}, factor={normalization_factor:.1f}")
 
         # Configurer le clipping par percentiles selon le format
         clip_low = self.config.png_clip_low
@@ -409,10 +408,6 @@ class LiveStackSession:
         # Activée pour YUV/RGB (données ne couvrent pas [0,1])
         normalize_ghs_output = not is_raw_format
 
-        # DEBUG: Paramètres stretch (après ajustement éventuel)
-        print(f"  [DEBUG STRETCH] Paramètres: method={self.config.png_stretch_method}, clip=[{clip_low:.1f}%, {clip_high:.1f}%], normalize={normalize_ghs_output}")
-        print(f"  [DEBUG STRETCH] GHS: D={ghs_D:.2f}, b={ghs_b:.2f}, SP={ghs_SP:.2f}, LP={ghs_LP:.2f}, HP={ghs_HP:.2f}")
-
         if is_color:
             stretched = np.zeros_like(result, dtype=np.float32)
             for i in range(3):
@@ -443,9 +438,6 @@ class LiveStackSession:
                 ghs_HP=ghs_HP,
                 normalize_output=normalize_ghs_output
             )
-
-        # DEBUG: Après stretch - inclure moyenne pour diagnostiquer image blanche
-        print(f"  [DEBUG STRETCH] Après stretch: min={stretched.min():.4f}, max={stretched.max():.4f}, mean={stretched.mean():.4f}")
 
         # TRACEUR RGB: Après stretch (avant conversion PNG)
         # if len(stretched.shape) == 3 and stretched.shape[2] == 3:
@@ -515,7 +507,9 @@ class LiveStackSession:
             header_data['ROTMED'] = np.median(self.rotation_angles)
         
         # Sauvegarder FITS (linéaire ou stretched selon config)
-        save_fits(result, output_path, header_data, linear=self.config.fits_linear)
+        save_fits(result, output_path, header_data,
+                  linear=self.config.fits_linear,
+                  format_hint=self.config.video_format)
 
         print(f"\n[SAVE] FITS: {output_path}")
         print(f"       Type: {'Linéaire (RAW)' if self.config.fits_linear else 'Stretched'}")

@@ -59,7 +59,16 @@ class RPiCameraLiveStack:
         # Thread sauvegarde
         self.save_queue = queue.Queue()
         self.save_thread = None
-        
+
+        # Verrou pour accès concurrent (process_frame vs stop/reset)
+        self._lock = threading.RLock()
+
+        # Validation cohérence shape entre frames (I2)
+        self._session_frame_shape = None
+
+        # Compteur frames sauvegardées individuellement (I7)
+        self._save_frame_count = 0
+
         # Statistiques
         self.start_time = None
         self.total_frames = 0
@@ -81,11 +90,22 @@ class RPiCameraLiveStack:
         - max_rotation: float (rotation max en degrés)
         - min_scale: float (scale minimum)
         - max_scale: float (scale maximum)
+        - stacking_method: "mean", "kappa_sigma", "winsorized", "median"
+        - kappa: float (seuil sigma pour kappa_sigma/winsorized, défaut 2.5)
+        - max_frames: int (limite frames empilées, 0 = illimité)
         - png_stretch: "linear", "asinh", "log", "sqrt", "histogram", "auto"
         - png_factor: float
         - preview_refresh: int (toutes les N images)
         - save_dng: "none", "accepted", "all"
         """
+        # Méthode de stacking
+        if 'stacking_method' in kwargs:
+            self.config.stacking_method = kwargs['stacking_method']
+        if 'kappa' in kwargs:
+            self.config.stacking_kappa = float(kwargs['kappa'])
+        if 'max_frames' in kwargs:
+            self.config.max_frames = int(kwargs['max_frames'])
+
         # Alignement
         if 'alignment_mode' in kwargs:
             self.config.alignment_mode = kwargs['alignment_mode']
@@ -145,12 +165,14 @@ class RPiCameraLiveStack:
         self.session = LiveStackSession(self.config)
         self.session.start()
         
-        # Reset compteurs
+        # Reset compteurs et état
         self.frame_count = 0
         self.total_frames = 0
         self.accepted_frames = 0
         self.rejected_frames = 0
         self.start_time = datetime.now()
+        self._session_frame_shape = None
+        self._save_frame_count = 0
         
         # Démarrer thread sauvegarde (si nécessaire)
         if self.config.save_dng_mode != "none":
@@ -176,11 +198,17 @@ class RPiCameraLiveStack:
             self.save_queue.put(None)  # Signal stop
             self.save_thread.join(timeout=5)
         
-        # Arrêter session
-        if self.session:
-            self.session.stop()
-            self.session = None
-        
+        # Arrêter session (avec verrou pour éviter accès concurrent depuis process_frame)
+        with self._lock:
+            if self.session:
+                self.session.stop()
+                self.session = None
+            # Libérer ressources mémoire (I10)
+            self.last_preview = None
+            self._session_frame_shape = None
+
+        self.save_thread = None
+
         print("[LIVESTACK] Session arrêtée")
     
     def pause(self):
@@ -196,39 +224,69 @@ class RPiCameraLiveStack:
     def process_frame(self, camera_array):
         """
         Traite une frame caméra
-        
+
         Args:
             camera_array: Array NumPy (RGB uint8 ou float32)
-        
+
         Returns:
             preview_updated: bool, True si preview rafraîchi
         """
-        if not self.is_running or self.is_paused or self.session is None:
+        if not self.is_running or self.is_paused:
             return False
-        
-        self.frame_count += 1
-        self.total_frames += 1
-        
-        # Convertir en float32 si nécessaire
-        if camera_array.dtype == np.uint8:
-            image_data = camera_array.astype(np.float32) * 256.0
-        else:
+
+        with self._lock:
+            if self.session is None:
+                return False
+
+            self.frame_count += 1
+            self.total_frames += 1
+
+            # Convertir en float32 en préservant la plage native
+            # uint8  → [0-255] float32  (pas de ×256 : évite valeurs hors-plage ISP)
+            # uint16 → [0-65535] float32
+            # float32 → inchangé
             image_data = camera_array.astype(np.float32)
-        
-        # Traiter avec libastrostack
-        result = self.session.process_image_data(image_data)
-        
-        # Mettre à jour compteurs
-        self.accepted_frames = self.session.config.num_stacked
-        self.rejected_frames = self.session.files_rejected
-        
-        # Preview rafraîchi ?
-        if result is not None:
-            self.last_preview = self.session.get_preview_png()
-            self.last_preview_update = self.frame_count
-            return True
-        
-        return False
+
+            # Validation cohérence shape entre frames (I2)
+            if self._session_frame_shape is None:
+                self._session_frame_shape = image_data.shape
+            elif image_data.shape != self._session_frame_shape:
+                print(f"[LIVESTACK] Frame ignorée : shape {image_data.shape} "
+                      f"!= attendu {self._session_frame_shape}")
+                self.total_frames -= 1
+                self.frame_count -= 1
+                return False
+
+            # Traiter avec libastrostack
+            # Pour save_dng_mode, comparer num_stacked avant/après pour détecter acceptance (I7)
+            n_before = self.session.config.num_stacked
+            result = self.session.process_image_data(image_data)
+            n_after = self.session.config.num_stacked
+
+            # Mettre à jour compteurs (depuis session = source de vérité, I15)
+            self.accepted_frames = n_after
+            self.rejected_frames = self.session.files_rejected
+
+            # Enregistrer frame individuelle si save_dng_mode actif (I7)
+            if self.config.save_dng_mode != 'none':
+                frame_accepted = n_after > n_before
+                should_save = (
+                    self.config.save_dng_mode == 'all' or
+                    (self.config.save_dng_mode == 'accepted' and frame_accepted)
+                )
+                if should_save:
+                    self._save_frame_count += 1
+                    frame_path = (self.output_dir / "frames" /
+                                  f"frame_{self._save_frame_count:05d}.png")
+                    self.save_queue.put((image_data.copy(), str(frame_path)))
+
+            # Preview rafraîchi ?
+            if result is not None:
+                self.last_preview = self.session.get_preview_png()
+                self.last_preview_update = self.frame_count
+                return True
+
+            return False
     
     def get_preview_surface(self, pygame_module, target_size=None):
         """
@@ -269,19 +327,28 @@ class RPiCameraLiveStack:
     def get_stats(self):
         """
         Retourne statistiques pour affichage
-        
+
         Returns:
             dict avec stats
         """
         elapsed = (datetime.now() - self.start_time).total_seconds() if self.start_time else 0
-        
+
+        # Lire compteurs depuis la session (source de vérité) si disponible (I15)
+        with self._lock:
+            if self.session is not None:
+                accepted = self.session.config.num_stacked
+                rejected = self.session.files_rejected
+            else:
+                accepted = self.accepted_frames
+                rejected = self.rejected_frames
+
         return {
             'total_frames': self.total_frames,
-            'accepted': self.accepted_frames,
-            'rejected': self.rejected_frames,
+            'accepted': accepted,
+            'rejected': rejected,
             'rate': self.total_frames / elapsed if elapsed > 0 else 0,
             'elapsed': elapsed,
-            'snr_gain': np.sqrt(self.accepted_frames) if self.accepted_frames > 0 else 1.0,
+            'snr_gain': np.sqrt(accepted) if accepted > 0 else 1.0,
             'is_running': self.is_running,
             'is_paused': self.is_paused,
             'preview_updated': self.last_preview_update
@@ -322,29 +389,50 @@ class RPiCameraLiveStack:
     
     def reset(self):
         """Réinitialise session (nouvelle cible)"""
-        if self.session:
-            self.session.reset()
-        
+        with self._lock:
+            if self.session:
+                self.session.reset()
+
         self.frame_count = 0
         self.total_frames = 0
         self.accepted_frames = 0
         self.rejected_frames = 0
         self.last_preview = None
         self.last_preview_update = 0
-        
+        self._session_frame_shape = None
+        self._save_frame_count = 0
+
         print("[LIVESTACK] Session réinitialisée")
     
     def _save_worker(self):
-        """Worker thread pour sauvegarde DNG asynchrone"""
+        """Worker thread pour sauvegarde frames individuelles en PNG 16-bit (I7)"""
+        import cv2
+        frames_dir = self.output_dir / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+
         while True:
             item = self.save_queue.get()
 
             if item is None:  # Signal stop
                 break
 
-            # Sauvegarder DNG (placeholder)
-            # TODO: Implémenter sauvegarde DNG réelle
-            pass
+            image_data, path = item
+            try:
+                # Normaliser vers uint16 selon la plage des données
+                dmax = float(image_data.max())
+                if dmax <= 1.0:
+                    data_16 = (np.clip(image_data, 0, 1) * 65535).astype(np.uint16)
+                elif dmax <= 300:
+                    data_16 = (np.clip(image_data / 255.0, 0, 1) * 65535).astype(np.uint16)
+                elif dmax <= 5000:
+                    data_16 = (np.clip(image_data / 4095.0, 0, 1) * 65535).astype(np.uint16)
+                else:
+                    data_16 = np.clip(image_data, 0, 65535).astype(np.uint16)
+
+                # Sauvegarder (pas de conversion couleur : même espace que le stack)
+                cv2.imwrite(path, data_16)
+            except Exception as e:
+                print(f"[LIVESTACK] Erreur sauvegarde frame {path}: {e}")
 
     def save(self, filename=None, raw_format_name=None):
         """Alias pour save_result() (compatibilité RPiCamera2.py)"""

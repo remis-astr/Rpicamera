@@ -77,9 +77,11 @@ class AdvancedAligner:
         self.reference_image = image.copy()
         self.is_color = len(image.shape) == 3
         
-        # Détecter étoiles de référence
+        # Détecter étoiles de référence (luminance pour robustesse sur toutes cibles)
         if self.is_color:
-            ref_gray = image[:, :, 1]  # Canal vert
+            ref_gray = (0.299 * image[:, :, 0] +
+                        0.587 * image[:, :, 1] +
+                        0.114 * image[:, :, 2])
         else:
             ref_gray = image
         
@@ -111,7 +113,9 @@ class AdvancedAligner:
         
         # Détecter étoiles dans image courante
         if self.is_color:
-            img_gray = image[:, :, 1]
+            img_gray = (0.299 * image[:, :, 0] +
+                        0.587 * image[:, :, 1] +
+                        0.114 * image[:, :, 2])
         else:
             img_gray = image
         
@@ -194,14 +198,21 @@ class AdvancedAligner:
         matches = []
         match_distances = []
 
+        # Seuil adaptatif : 5% de la plus petite dimension, entre 50px et 200px
+        if self.reference_image is not None:
+            h, w = self.reference_image.shape[:2]
+            match_threshold = max(50, min(200, int(0.05 * min(h, w))))
+        else:
+            match_threshold = 100
+
         for i, ref_pt in enumerate(ref_pts):
             # Distances à toutes les étoiles courantes
             distances = np.sqrt(np.sum((cur_pts - ref_pt)**2, axis=1))
             min_idx = np.argmin(distances)
             min_dist = distances[min_idx]
 
-            # Accepter seulement les matches proches (< 100px)
-            if min_dist < 100:
+            # Accepter seulement les matches proches
+            if min_dist < match_threshold:
                 matches.append((ref_pt, cur_pts[min_idx]))
                 match_distances.append(min_dist)
 
@@ -274,9 +285,10 @@ class AdvancedAligner:
             transform = np.vstack([M, [0, 0, 1]])
 
             return transform, params
-        except:
+        except Exception as e:
+            print(f"  [ALIGN] Erreur _compute_rotation: {e}")
             return None, {}
-    
+
     def _compute_affine(self, ref_stars, cur_stars, image_shape):
         """Calcule transformation affine complète"""
         n_stars = min(30, len(ref_stars), len(cur_stars))
@@ -316,9 +328,10 @@ class AdvancedAligner:
             transform = np.vstack([M, [0, 0, 1]])
 
             return transform, params
-        except:
+        except Exception as e:
+            print(f"  [ALIGN] Erreur _compute_affine: {e}")
             return None, {}
-    
+
     def _apply_transform(self, image, transform):
         """Applique transformation à l'image"""
         M = transform[:2, :]

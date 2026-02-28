@@ -256,7 +256,9 @@ class LuckyImagingConfig:
     sigma_clip_kappa: float = 2.5       # Kappa pour sigma clipping
     
     # Alignement
-    align_enabled: bool = True          # Activer l'alignement
+    align_enabled: bool = True          # Activer l'alignement (legacy)
+    align_mode: int = 1                 # 0=off, 1=surface/phase, 2=disk/Hough, 3=hybride
+    max_shift: float = 50.0             # Décalage max accepté en pixels (0=désactivé)
     align_method: str = "phase"         # "phase" (FFT) ou "ecc"
     align_roi_percent: float = 80.0     # % central pour alignement
     
@@ -682,6 +684,7 @@ class LegacyStackingConfig:
         self.output_directory = "/home/admin/stacks/"
         self.save_rejected_list = True
         self.max_stars_alignment = 50
+        self.max_frames = 0              # 0 = illimité (I11)
         self.num_stacked = 0
         self.total_exposure = 0.0
         self.noise_level = 0.0
