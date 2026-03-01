@@ -126,14 +126,14 @@ def fix_video_timestamps(input_file, fps_value, quality_preset="ultrafast"):
     # Construire la commande ffmpeg
     ffmpeg_cmd = [
         "ffmpeg",
+        "-y",
+        "-loglevel", "error",
         "-i", temp_file,
         "-vf", f"setpts=N/{fps_value}/TB",
         "-r", str(fps_value),
         "-c:v", "libx264",
         "-preset", quality_preset,
         input_file,
-        "-y",
-        "-loglevel", "error"
     ]
 
     try:
@@ -455,13 +455,17 @@ class AsyncCaptureThread:
                 metadata = None
 
                 try:
-                    # Capturer selon le type demandé
+                    # Capturer selon le type demandé (atomique : frame + metadata du même instant)
                     capture_type = self.capture_params.get('type', 'main')
-                    if capture_type == 'raw':
-                        frame = self.picam2.capture_array("raw")
-                    else:
-                        frame = self.picam2.capture_array("main")
-                    metadata = self.picam2.capture_metadata()
+                    request = self.picam2.capture_request()
+                    try:
+                        if capture_type == 'raw':
+                            frame = request.make_array("raw")
+                        else:
+                            frame = request.make_array("main")
+                        metadata = request.get_metadata()
+                    finally:
+                        request.release()
                 except Exception as e:
                     print(f"[AsyncCapture] Erreur capture: {e}")
                     self.capturing = False
@@ -602,6 +606,9 @@ def convert_raw_to_ser(raw_input, ser_output, width, height, fps=None, bit_depth
     # Utiliser fps par défaut si non spécifié
     if fps is None:
         fps = 25
+
+    if width <= 0 or height <= 0:
+        return False, 0, f"Dimensions invalides: {width}x{height}"
 
     file_size = os.path.getsize(raw_input)
 
@@ -1557,6 +1564,7 @@ jsk_settings_tab = 0        # 0=Image (HDR/Denoise/Stretch), 1=Couleur
 # MINERAL MOON Settings
 moon_mode = 0               # 0=OFF, 1=Active
 moon_settings_visible = 0   # 0=Masqué, 1=Affiché
+moon_settings_tab = 0       # 0=Traitement, 1=WB / Couleur
 moon_histogram_visible = 1  # 0=Masqué, 1=Affiché
 moon_processor = None       # Instance MineralMoonProcessor
 moon_recorder = None        # Instance JSKVideoRecorder (réutilisée)
@@ -1565,7 +1573,7 @@ _moon_last_surface = None   # Cache dernière surface valide
 _moon_last_frame_bgr = None # Cache dernière frame BGR (pour SNAP)
 _moon_slider_rects = {}     # Rects des sliders settings
 _moon_slider_dragging = False
-_moon_ge_dragging = None    # 'gain' ou 'expo'
+_moon_ge_dragging = None    # 'gain', 'expo' ou 'zoom'
 # Sauvegarde paramètres à l'entrée
 moon_saved_vwidth = 1920
 moon_saved_vheight = 1080
@@ -1603,7 +1611,7 @@ _sun_last_surface = None    # Cache dernière surface valide
 _sun_last_frame_bgr = None  # Cache dernière frame BGR (pour SNAP)
 _sun_slider_rects = {}      # Rects des sliders settings
 _sun_slider_dragging = False
-_sun_ge_dragging = None     # 'gain' ou 'expo'
+_sun_ge_dragging = None     # 'gain', 'expo' ou 'zoom'
 # Sauvegarde paramètres à l'entrée
 sun_binning = 1             # 1=binning 2x2 (1920×1080), 0=natif (3856×2180)
 sun_saved_vwidth = 1920
@@ -1690,6 +1698,7 @@ hfr_times = deque(maxlen=240)
 hfr_start_time = 0
 hfr_fig = None
 hfr_ax = None
+hfr_ax2 = None
 focus_history = deque(maxlen=240)
 focus_times = deque(maxlen=240)
 focus_start_time = 0
@@ -1730,9 +1739,7 @@ _lucky_slider_dragging = False
 _lucky_ge_dragging = None    # 'gain', 'expo', 'zoom' ou None
 
 # Enregistrement vidéo de progression Lucky
-lucky_video_active = False   # True = enregistrement en cours
-lucky_video_writer = None    # cv2.VideoWriter instance
-lucky_video_path  = ""       # Chemin fichier en cours
+lucky_recorder = None        # Instance JSKVideoRecorder
 lucky_last_filtered_array = None  # Dernier résultat filtré (pour bouton SAVE PNG)
 
 # Filtres de netteté post-stack Lucky (onglet Filtre)
@@ -1806,6 +1813,7 @@ ls_lucky_score = 0  # 0=laplacian, 1=gradient, 2=sobel, 3=tenengrad
 ls_lucky_stack = 0  # 0=mean, 1=median, 2=sigma_clip
 ls_lucky_align = 1  # 0=off, 1=on
 ls_lucky_roi = 50  # % ROI scoring (20-100)
+ls_lucky_max_shift = 30  # Décalage max alignement en pixels (0=désactivé, 1-100)
 ls_lucky_save_progress = 0  # 0=off, 1=on (sauvegarde FITS+PNG tous les 2 stacks)
 lucky_score_methods = ['Laplacian', 'Gradient', 'Sobel', 'Tenengrad']
 lucky_stack_methods = ['Mean', 'Median', 'Sigma-Clip']
@@ -2159,7 +2167,8 @@ livestack_limits = [
     'ls_lucky_score',0,3,
     'ls_lucky_stack',0,2,
     'ls_lucky_align',0,3,
-    'ls_lucky_roi',20,100
+    'ls_lucky_roi',20,100,
+    'ls_lucky_max_shift',0,100
 ]
 
 # check config_file exists, if not then write default values
@@ -2169,7 +2178,7 @@ titles = ['mode','speed','gain','brightness','contrast','frame','red','blue','ev
           'ls_preview_refresh','ls_alignment_mode','ls_enable_qc','ls_max_fwhm','ls_min_sharpness','ls_max_drift','ls_min_stars',
           'ls_stack_method','ls_stack_kappa','ls_stack_iterations',
           'ls_planetary_enable','ls_planetary_mode','ls_planetary_disk_min','ls_planetary_disk_max','ls_planetary_threshold','ls_planetary_margin','ls_planetary_ellipse','ls_planetary_window','ls_planetary_upsample','ls_planetary_highpass','ls_planetary_roi_center','ls_planetary_corr','ls_planetary_max_shift',
-          'ls_lucky_buffer','ls_lucky_keep','ls_lucky_score','ls_lucky_stack','ls_lucky_align','ls_lucky_roi','use_native_sensor_mode',
+          'ls_lucky_buffer','ls_lucky_keep','ls_lucky_score','ls_lucky_stack','ls_lucky_align','ls_lucky_roi','ls_lucky_max_shift','use_native_sensor_mode',
           'focus_method','star_metric','snr_display','metrics_interval','ls_lucky_save_progress','isp_enable',
           'allsky_mode','allsky_mean_target','allsky_mean_threshold','allsky_video_fps','allsky_max_gain','allsky_apply_stretch','allsky_cleanup_jpegs',
           'ls_save_progress','ls_save_final','ls_lucky_save_final',
@@ -2181,7 +2190,7 @@ points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat
           ls_preview_refresh,ls_alignment_mode,ls_enable_qc,ls_max_fwhm,ls_min_sharpness,ls_max_drift,ls_min_stars,
           ls_stack_method,ls_stack_kappa,ls_stack_iterations,
           ls_planetary_enable,ls_planetary_mode,ls_planetary_disk_min,ls_planetary_disk_max,ls_planetary_threshold,ls_planetary_margin,ls_planetary_ellipse,ls_planetary_window,ls_planetary_upsample,ls_planetary_highpass,ls_planetary_roi_center,ls_planetary_corr,ls_planetary_max_shift,
-          ls_lucky_buffer,ls_lucky_keep,ls_lucky_score,ls_lucky_stack,ls_lucky_align,ls_lucky_roi,use_native_sensor_mode,
+          ls_lucky_buffer,ls_lucky_keep,ls_lucky_score,ls_lucky_stack,ls_lucky_align,ls_lucky_roi,ls_lucky_max_shift,use_native_sensor_mode,
           focus_method,star_metric,snr_display,metrics_interval,ls_lucky_save_progress,isp_enable,
           allsky_mode,allsky_mean_target,allsky_mean_threshold,allsky_video_fps,allsky_max_gain,allsky_apply_stretch,allsky_cleanup_jpegs,
           ls_save_progress,ls_save_final,ls_lucky_save_final,
@@ -2199,7 +2208,8 @@ with open(config_file, "r") as file:
    while line:
        line = line.strip()
        item = line.split(" : ")
-       config.append(item[1])
+       if len(item) >= 2:
+           config.append(item[1])
        line = file.readline()
 # Convertir d'abord en float, puis en int sauf pour tinterval (index 13)
 config = list(map(float,config))
@@ -2384,6 +2394,7 @@ ls_lucky_score     = config[73]
 ls_lucky_stack     = config[74]
 ls_lucky_align     = config[75]
 ls_lucky_roi       = config[76]
+ls_lucky_max_shift = config[99] if len(config) > 99 else 30
 use_native_sensor_mode = config[77] if len(config) > 77 else 0
 ls_lucky_save_progress = config[82] if len(config) > 82 else 0
 
@@ -2427,6 +2438,8 @@ if len(config) <= 97:
     config.append(0)     # allsky_stack_enable par défaut (OFF)
 if len(config) <= 98:
     config.append(3)     # allsky_stack_count par défaut (3 images)
+if len(config) <= 99:
+    config.append(30)    # ls_lucky_max_shift par défaut (30 pixels)
 
 # Charger les paramètres ALLSKY
 allsky_mode           = config[84] if len(config) > 84 else 0
@@ -2492,6 +2505,7 @@ ls_lucky_score = max(0, min(ls_lucky_score, 3))  # 0-3: laplacian/gradient/sobel
 ls_lucky_stack = max(0, min(ls_lucky_stack, 2))  # 0-2: mean/median/sigma_clip
 ls_lucky_align = max(0, min(ls_lucky_align, 3))  # 0=off, 1=surface, 2=disk, 3=hybrid
 ls_lucky_roi = max(20, min(ls_lucky_roi, 100))
+ls_lucky_max_shift = max(0, min(ls_lucky_max_shift, 100))  # 0=désactivé, 1-100px
 ls_lucky_save_progress = max(0, min(ls_lucky_save_progress, 1))  # 0-1: off/on
 
 # Validation des options de sauvegarde LiveStack/LuckyStack
@@ -2894,7 +2908,7 @@ def Camera_Version():
             sspeed +=1
     # determine max speed for camera
     max_speed = 0
-    while max_shutter > shutters[max_speed]:
+    while max_speed < len(shutters) - 1 and max_shutter > shutters[max_speed]:
         max_speed +=1
     if speed > max_speed:
         speed = max_speed
@@ -4263,6 +4277,8 @@ def text(col,row,fColor,top,upd,msg,fsize,bkgnd_Color):
 
 def draw_bar(col,row,color,msg,value):
     global bw,bh,preview_width,still_limits,max_speed,v3_mag
+    pmin = 0
+    pmax = 0
     for f in range(0,len(still_limits)-1,3):
         if still_limits[f] == msg:
             pmin = still_limits[f+1]
@@ -4333,8 +4349,8 @@ def draw_hand_icon(col, row):
 
 def draw_Vbar(col,row,color,msg,value):
     global bw,bh,preview_width,video_limits,livestack_limits
-    pmin = None
-    pmax = None
+    pmin = 0
+    pmax = 0
     # Chercher d'abord dans video_limits
     for f in range(0,len(video_limits)-1,3):
         if video_limits[f] == msg:
@@ -5842,7 +5858,7 @@ def draw_lucky_settings_icon(screen_width, screen_height, active=False):
     return icon_rect
 
 
-def draw_lucky_rec_button(screen_width, screen_height, is_recording=False):
+def draw_lucky_rec_button(screen_width, screen_height, is_recording=False, elapsed_str=""):
     """Bouton REC VIDEO en haut à droite — Lucky Stack interface.
     Rouge clignotant si enregistrement actif, bleu marine sinon."""
     global windowSurfaceObj, _font_cache
@@ -5875,6 +5891,9 @@ def draw_lucky_rec_button(screen_width, screen_height, is_recording=False):
                           f.render(lbl1, True, tc).get_rect(centerx=cx, centery=cy + 4))
     windowSurfaceObj.blit(f.render("VIDEO", True, tc),
                           f.render("VIDEO", True, tc).get_rect(centerx=cx, centery=cy + 18))
+    if is_recording and elapsed_str:
+        windowSurfaceObj.blit(f.render(elapsed_str, True, tc),
+                              f.render(elapsed_str, True, tc).get_rect(centerx=cx, top=icon_rect.bottom + 2))
     return icon_rect
 
 
@@ -5991,7 +6010,7 @@ def draw_lucky_controls(screen_width, screen_height):
     """
     global windowSurfaceObj, _font_cache
     global ls_lucky_buffer, ls_lucky_keep, ls_lucky_score, ls_lucky_stack
-    global ls_lucky_align, ls_lucky_roi
+    global ls_lucky_align, ls_lucky_roi, ls_lucky_max_shift
     global ls_lucky_save_progress, ls_lucky_save_final
     global lucky_settings_tab, luckystack_active
     global stretch_preset, isp_gamma, isp_brightness, isp_contrast, isp_saturation
@@ -6072,6 +6091,13 @@ def draw_lucky_controls(screen_width, screen_height):
             panel_x, start_y, slider_w, slider_h,
             f"Alignement: {cur_align}", ls_lucky_align, 0, 3, (80, 120, 200))
         start_y += slider_h + margin
+
+        if ls_lucky_align > 0:
+            shift_label = f"Shift max: {ls_lucky_max_shift}px" if ls_lucky_max_shift > 0 else "Shift max: OFF"
+            control_rects['ls_lucky_max_shift'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                shift_label, ls_lucky_max_shift, 0, 100, (60, 100, 170))
+            start_y += slider_h + margin
 
         control_rects['ls_lucky_roi'] = draw_jsk_slider(
             panel_x, start_y, slider_w, slider_h,
@@ -6220,13 +6246,14 @@ def draw_lucky_controls(screen_width, screen_height):
 def handle_lucky_slider_click(mx, my, control_rects):
     """Gère le clic sur un slider du panneau Lucky. Retourne True si géré."""
     global ls_lucky_buffer, ls_lucky_keep, ls_lucky_score, ls_lucky_stack
-    global ls_lucky_align, ls_lucky_roi, ls_lucky_save_progress, ls_lucky_save_final
+    global ls_lucky_align, ls_lucky_roi, ls_lucky_max_shift, ls_lucky_save_progress, ls_lucky_save_final
     global lucky_settings_tab
     global stretch_preset, isp_gamma, isp_brightness, isp_contrast, isp_saturation
     global red, blue, use_picamera2, picam2
     global ls_lucky_clahe_en, ls_lucky_clahe_str, ls_lucky_clahe_tile
     global ls_lucky_usm_en, ls_lucky_usm_sigma, ls_lucky_usm_amount
     global ls_lucky_lr_en, ls_lucky_lr_iter, ls_lucky_lr_sigma
+    global luckystack, livestack
 
     _needs_isp = False
 
@@ -6245,6 +6272,13 @@ def handle_lucky_slider_click(mx, my, control_rects):
                 ls_lucky_stack = max(0, min(2, int(ratio * 2 + 0.5)))
             elif name == 'ls_lucky_align':
                 ls_lucky_align = max(0, min(3, int(ratio * 3 + 0.5)))
+            elif name == 'ls_lucky_max_shift':
+                ls_lucky_max_shift = max(0, min(100, int(ratio * 100)))
+                # Propagation live si le stacker tourne
+                if luckystack is not None:
+                    luckystack.configure(lucky_max_shift=float(ls_lucky_max_shift))
+                elif livestack is not None:
+                    livestack.configure(lucky_max_shift=float(ls_lucky_max_shift))
             elif name == 'ls_lucky_roi':
                 ls_lucky_roi = max(20, min(100, int(20 + ratio * 80)))
             elif name == 'ls_lucky_save_progress':
@@ -6312,6 +6346,7 @@ def draw_lucky_interface(screen_width, screen_height):
     À appeler après blit du fond, avant pygame.display.update().
     """
     global _lucky_slider_rects, lucky_settings_visible, luckystack_active, luckystack
+    global lucky_recorder
 
     has_stack = False
     if luckystack is not None:
@@ -6323,7 +6358,9 @@ def draw_lucky_interface(screen_width, screen_height):
 
     draw_lucky_settings_icon(screen_width, screen_height, lucky_settings_visible == 1)
     draw_lucky_save_png_button(screen_width, screen_height)
-    draw_lucky_rec_button(screen_width, screen_height, lucky_video_active)
+    _rec_active = lucky_recorder is not None and lucky_recorder.is_recording
+    _elapsed_str = lucky_recorder.get_elapsed_str() if _rec_active else ""
+    draw_lucky_rec_button(screen_width, screen_height, _rec_active, _elapsed_str)
     draw_ls_exit_button(screen_width, screen_height)
     draw_ls_reset_button(screen_width, screen_height)
     draw_ls_start_stop_button(screen_width, screen_height, luckystack_active)
@@ -7063,7 +7100,7 @@ def save_isp_config_to_file():
             "wb_red_gain": isp_wb_red / 100.0,
             "wb_green_gain": isp_wb_green / 100.0,
             "wb_blue_gain": isp_wb_blue / 100.0,
-            "gamma": isp_gamma / 100.0 * 2.2,
+            "gamma": isp_gamma / 100.0,
             "black_level": isp_black_level,
             "brightness_offset": isp_brightness / 100.0,
             "contrast": isp_contrast / 100.0,
@@ -7113,7 +7150,7 @@ def load_isp_from_session():
     isp_wb_red = int(config.wb_red_gain * 100)
     isp_wb_green = int(config.wb_green_gain * 100)
     isp_wb_blue = int(config.wb_blue_gain * 100)
-    isp_gamma = int((config.gamma / 2.2) * 100)  # Convertir gamma en ratio
+    isp_gamma = int(config.gamma * 100)
     isp_black_level = config.black_level
     isp_brightness = int(config.brightness_offset * 100)
     isp_contrast = int(config.contrast * 100)
@@ -8291,19 +8328,20 @@ def draw_moon_binning_button(screen_width, screen_height, binning_active=True):
 
 
 def _moon_ge_slider_positions(screen_height, screen_width=1920):
-    """Positions des sliders Gain/Expo Moon (haut-centre, sous les icônes)."""
+    """Positions des sliders Gain/Expo/Zoom Moon (haut-centre, sous les icônes)."""
     slider_w = 300
     slider_h = 30
     sx = (screen_width - slider_w) // 2
     sy_expo = 75    # juste sous les icônes du haut (margin 15 + size 50 + 10)
     sy_gain = sy_expo + slider_h + 8
-    return sx, sy_gain, sy_expo, slider_w, slider_h
+    sy_zoom = sy_gain + slider_h + 8
+    return sx, sy_gain, sy_expo, sy_zoom, slider_w, slider_h
 
 
 def draw_moon_gain_exposure(screen_width, screen_height):
-    """Dessine les sliders Gain et Exposition en haut-centre — Moon mode."""
-    global windowSurfaceObj, _font_cache, moon_gain, moon_exposure_us
-    sx, sy_gain, sy_expo, slider_w, slider_h = _moon_ge_slider_positions(screen_height, screen_width)
+    """Dessine les sliders Gain, Exposition et Zoom en haut-centre — Moon mode."""
+    global windowSurfaceObj, _font_cache, moon_gain, moon_exposure_us, zoom
+    sx, sy_gain, sy_expo, sy_zoom, slider_w, slider_h = _moon_ge_slider_positions(screen_height, screen_width)
 
     min_exp_ms, max_exp_ms = 1, 1000
     min_exp_us = min_exp_ms * 1000
@@ -8326,6 +8364,7 @@ def draw_moon_gain_exposure(screen_width, screen_height):
     for sy, label, ratio, color in [
         (sy_expo, expo_text, expo_ratio,             (80, 120, 160)),
         (sy_gain, f"Gain: {moon_gain}", (moon_gain - 1) / 299.0, (120, 100, 60)),
+        (sy_zoom, f"Zoom: {zoom}x", zoom / 5.0,                  (70, 130, 140)),
     ]:
         bg_rect = pygame.Rect(sx, sy, slider_w, slider_h)
         pygame.draw.rect(windowSurfaceObj, (40, 40, 50), bg_rect, border_radius=5)
@@ -8340,7 +8379,7 @@ def draw_moon_gain_exposure(screen_width, screen_height):
 
 def is_click_on_moon_gain_slider(mx, my, screen_width, screen_height):
     """Retourne nouvelle valeur gain (1-300) ou None."""
-    sx, sy_gain, _, slider_w, slider_h = _moon_ge_slider_positions(screen_height, screen_width)
+    sx, sy_gain, _, _, slider_w, slider_h = _moon_ge_slider_positions(screen_height, screen_width)
     if sx <= mx <= sx + slider_w and sy_gain <= my <= sy_gain + slider_h:
         return max(1, min(300, int(1 + (mx - sx) / slider_w * 299)))
     return None
@@ -8349,12 +8388,20 @@ def is_click_on_moon_gain_slider(mx, my, screen_width, screen_height):
 def is_click_on_moon_exposure_slider(mx, my, screen_width, screen_height):
     """Retourne nouvelle valeur expo en µs ou None."""
     import math
-    sx, _, sy_expo, slider_w, slider_h = _moon_ge_slider_positions(screen_height, screen_width)
+    sx, _, sy_expo, _, slider_w, slider_h = _moon_ge_slider_positions(screen_height, screen_width)
     if sx <= mx <= sx + slider_w and sy_expo <= my <= sy_expo + slider_h:
         ratio   = max(0.0, min(1.0, (mx - sx) / slider_w))
         log_min = math.log10(1000)
         log_max = math.log10(1000000)
         return int(10 ** (log_min + ratio * (log_max - log_min)))
+    return None
+
+
+def is_click_on_moon_zoom_slider(mx, my, screen_width, screen_height):
+    """Retourne nouvelle valeur zoom (0-5) ou None."""
+    sx, _, _, sy_zoom, slider_w, slider_h = _moon_ge_slider_positions(screen_height, screen_width)
+    if sx <= mx <= sx + slider_w and sy_zoom <= my <= sy_zoom + slider_h:
+        return max(0, min(5, int((mx - sx) / slider_w * 5 + 0.5)))
     return None
 
 
@@ -8425,9 +8472,38 @@ def draw_moon_histogram(bgr_frame, sw, sh):
         windowSurfaceObj.blit(f.render(label, True, color), (hx + ox, hy + 2))
 
 
+def _draw_moon_tab_bar(panel_x, panel_w, y):
+    """Dessine la barre d'onglets Moon et retourne les rects des deux onglets."""
+    global windowSurfaceObj, _font_cache, moon_settings_tab
+    tab_h = 24
+    half = panel_w // 2
+    tabs = [
+        ("Traitement", 0),
+        ("WB / Couleur", 1),
+    ]
+    rects = {}
+    ck = 19
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    for i, (label, idx) in enumerate(tabs):
+        tx = panel_x + i * half
+        active = (moon_settings_tab == idx)
+        bg     = (40, 60, 100) if active else (20, 30, 55)
+        border = (100, 150, 220) if active else (50, 70, 120)
+        r = pygame.Rect(tx, y, half - 2, tab_h)
+        pygame.draw.rect(windowSurfaceObj, bg, r, border_radius=4)
+        pygame.draw.rect(windowSurfaceObj, border, r, 1, border_radius=4)
+        tc = (180, 210, 255) if active else (80, 110, 160)
+        lbl = f.render(label, True, tc)
+        windowSurfaceObj.blit(lbl, lbl.get_rect(center=r.center))
+        rects[f'moon_tab_{idx}'] = r
+    return rects, y + tab_h + 4
+
+
 def draw_moon_controls(screen_width, screen_height):
     """
-    Panneau de contrôle Moon côté droit.
+    Panneau de contrôle Moon côté droit — 2 onglets.
     Retourne dict des rects de sliders pour détection clics.
     """
     global windowSurfaceObj, _font_cache
@@ -8435,6 +8511,7 @@ def draw_moon_controls(screen_width, screen_height):
     global moon_noise_enabled, moon_noise_strength
     global moon_lrgb_enabled, moon_lrgb_weight
     global moon_wb_r, moon_wb_g, moon_wb_b, moon_preset, moon_processor
+    global moon_settings_tab
 
     panel_w   = 230
 
@@ -8460,100 +8537,101 @@ def draw_moon_controls(screen_width, screen_height):
     windowSurfaceObj.blit(title, (panel_x, start_y - 15))
     start_y += 20
 
-    # --- Preset (mode de traitement) ---
-    preset_name = MOON_PRESETS[moon_preset]['name'] if moon_preset < len(MOON_PRESETS) else '?'
-    control_rects['moon_preset'] = draw_jsk_slider(
-        panel_x, start_y, slider_w, slider_h,
-        f"Mode: {preset_name}", moon_preset, 0, len(MOON_PRESETS) - 1,
-        (100, 140, 200))
-    start_y += slider_h + margin
+    # Barre d'onglets
+    tab_rects, start_y = _draw_moon_tab_bar(panel_x, panel_w, start_y)
+    control_rects.update(tab_rects)
 
-    # Info mode actuel (boost/passe ou nom du mode)
-    ck2 = 18
-    if ck2 not in _font_cache:
-        _font_cache[ck2] = pygame.font.Font(None, ck2)
-    if moon_processor is not None:
-        bpp = _font_cache[ck2].render(moon_processor.boost_per_pass_str(), True, (160, 200, 160))
-        windowSurfaceObj.blit(bpp, (panel_x + 2, start_y))
-    start_y += 16
+    if moon_settings_tab == 0:
+        # --- Onglet 0 : Traitement ---
 
-    # --- Saturation ---
-    control_rects['moon_sat_factor'] = draw_jsk_slider(
-        panel_x, start_y, slider_w, slider_h,
-        f"Sat: x{moon_sat_factor/10:.1f}", moon_sat_factor, 10, 200, (140, 100, 180))
-    start_y += slider_h + margin
-
-    control_rects['moon_contrast'] = draw_jsk_slider(
-        panel_x, start_y, slider_w, slider_h,
-        f"Contraste: x{moon_contrast/10:.1f}", moon_contrast, 10, 40, (160, 120, 200))
-    start_y += slider_h + margin
-
-    control_rects['moon_sat_iter'] = draw_jsk_slider(
-        panel_x, start_y, slider_w, slider_h,
-        f"Passes: {moon_sat_iter}", moon_sat_iter, 1, 8, (120, 140, 180))
-    start_y += slider_h + margin
-
-    # --- Protection ---
-    control_rects['moon_lum_protect'] = draw_jsk_slider(
-        panel_x, start_y, slider_w, slider_h,
-        f"Protect L: {moon_lum_protect}", moon_lum_protect, 100, 255, (180, 160, 80))
-    start_y += slider_h + margin + 4
-
-    # --- Denoise ---
-    noise_label = f"Denoise: {'ON' if moon_noise_enabled else 'OFF'}"
-    control_rects['moon_noise_en'] = draw_jsk_slider(
-        panel_x, start_y, slider_w, slider_h,
-        noise_label, moon_noise_enabled, 0, 1, (100, 160, 140))
-    start_y += slider_h + margin
-
-    if moon_noise_enabled:
-        control_rects['moon_noise_str'] = draw_jsk_slider(
+        # --- Preset (mode de traitement) ---
+        preset_name = MOON_PRESETS[moon_preset]['name'] if moon_preset < len(MOON_PRESETS) else '?'
+        control_rects['moon_preset'] = draw_jsk_slider(
             panel_x, start_y, slider_w, slider_h,
-            f"Force: {moon_noise_strength}", moon_noise_strength, 3, 11, (80, 140, 120))
+            f"Mode: {preset_name}", moon_preset, 0, len(MOON_PRESETS) - 1,
+            (100, 140, 200))
         start_y += slider_h + margin
-    start_y += 4
 
-    # --- LRGB ---
-    lrgb_label = f"LRGB: {'ON' if moon_lrgb_enabled else 'OFF'}"
-    control_rects['moon_lrgb_en'] = draw_jsk_slider(
-        panel_x, start_y, slider_w, slider_h,
-        lrgb_label, moon_lrgb_enabled, 0, 1, (160, 120, 180))
-    start_y += slider_h + margin
+        # Info mode actuel (boost/passe ou nom du mode)
+        ck2 = 18
+        if ck2 not in _font_cache:
+            _font_cache[ck2] = pygame.font.Font(None, ck2)
+        if moon_processor is not None:
+            bpp = _font_cache[ck2].render(moon_processor.boost_per_pass_str(), True, (160, 200, 160))
+            windowSurfaceObj.blit(bpp, (panel_x + 2, start_y))
+        start_y += 16
 
-    if moon_lrgb_enabled:
-        control_rects['moon_lrgb_w'] = draw_jsk_slider(
+        # --- Saturation ---
+        control_rects['moon_sat_factor'] = draw_jsk_slider(
             panel_x, start_y, slider_w, slider_h,
-            f"Poids: {moon_lrgb_weight/100:.2f}", moon_lrgb_weight, 10, 100, (140, 100, 160))
+            f"Sat: x{moon_sat_factor/10:.1f}", moon_sat_factor, 10, 200, (140, 100, 180))
         start_y += slider_h + margin
-    start_y += 4
 
-    # --- WB Manuel ---
-    ck3 = 20
-    if ck3 not in _font_cache:
-        _font_cache[ck3] = pygame.font.Font(None, ck3)
-    wb_title = _font_cache[ck3].render("WB Manuel", True, (180, 200, 220))
-    windowSurfaceObj.blit(wb_title, (panel_x + 2, start_y))
-    start_y += 16
+        control_rects['moon_contrast'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Contraste: x{moon_contrast/10:.1f}", moon_contrast, 10, 40, (160, 120, 200))
+        start_y += slider_h + margin
 
-    control_rects['moon_wb_r'] = draw_jsk_slider(
-        panel_x, start_y, slider_w, slider_h,
-        f"R: {moon_wb_r/100:.2f}", moon_wb_r, 50, 250, (180, 80, 80))
-    start_y += slider_h + margin
+        control_rects['moon_sat_iter'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Passes: {moon_sat_iter}", moon_sat_iter, 1, 8, (120, 140, 180))
+        start_y += slider_h + margin
 
-    control_rects['moon_wb_g'] = draw_jsk_slider(
-        panel_x, start_y, slider_w, slider_h,
-        f"G: {moon_wb_g/100:.2f}", moon_wb_g, 50, 250, (80, 180, 80))
-    start_y += slider_h + margin
+        # --- Protection ---
+        control_rects['moon_lum_protect'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Protect L: {moon_lum_protect}", moon_lum_protect, 100, 255, (180, 160, 80))
+        start_y += slider_h + margin + 4
 
-    control_rects['moon_wb_b'] = draw_jsk_slider(
-        panel_x, start_y, slider_w, slider_h,
-        f"B: {moon_wb_b/100:.2f}", moon_wb_b, 50, 250, (80, 100, 200))
-    start_y += slider_h + margin + 4
+        # --- Denoise ---
+        noise_label = f"Denoise: {'ON' if moon_noise_enabled else 'OFF'}"
+        control_rects['moon_noise_en'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            noise_label, moon_noise_enabled, 0, 1, (100, 160, 140))
+        start_y += slider_h + margin
 
-    # --- Zoom ---
-    control_rects['moon_zoom'] = draw_jsk_slider(
-        panel_x, start_y, slider_w, slider_h,
-        f"Zoom: {zoom}x", zoom, 0, 5, (100, 160, 160))
+        if moon_noise_enabled:
+            control_rects['moon_noise_str'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Force: {moon_noise_strength}", moon_noise_strength, 3, 11, (80, 140, 120))
+            start_y += slider_h + margin
+        start_y += 4
+
+        # --- LRGB ---
+        lrgb_label = f"LRGB: {'ON' if moon_lrgb_enabled else 'OFF'}"
+        control_rects['moon_lrgb_en'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            lrgb_label, moon_lrgb_enabled, 0, 1, (160, 120, 180))
+        start_y += slider_h + margin
+
+        if moon_lrgb_enabled:
+            control_rects['moon_lrgb_w'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Poids: {moon_lrgb_weight/100:.2f}", moon_lrgb_weight, 10, 100, (140, 100, 160))
+            start_y += slider_h + margin
+
+    else:
+        # --- Onglet 1 : WB / Couleur ---
+        ck3 = 20
+        if ck3 not in _font_cache:
+            _font_cache[ck3] = pygame.font.Font(None, ck3)
+        wb_title = _font_cache[ck3].render("Balance des Blancs", True, (180, 200, 220))
+        windowSurfaceObj.blit(wb_title, (panel_x + 2, start_y))
+        start_y += 20
+
+        control_rects['moon_wb_r'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"R: {moon_wb_r/100:.2f}", moon_wb_r, 50, 250, (180, 80, 80))
+        start_y += slider_h + margin
+
+        control_rects['moon_wb_g'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"G: {moon_wb_g/100:.2f}", moon_wb_g, 50, 250, (80, 180, 80))
+        start_y += slider_h + margin
+
+        control_rects['moon_wb_b'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"B: {moon_wb_b/100:.2f}", moon_wb_b, 50, 250, (80, 100, 200))
 
     return control_rects
 
@@ -8568,10 +8646,21 @@ def handle_moon_slider_click(mx, my, control_rects):
     global moon_lrgb_enabled, moon_lrgb_weight
     global moon_wb_r, moon_wb_g, moon_wb_b, moon_preset, moon_processor
     global zoom, vwidth, vheight, capture_thread, picam2
+    global moon_settings_tab, _moon_slider_rects
 
     for name, rect in control_rects.items():
         if not rect.collidepoint(mx, my):
             continue
+
+        # Clics sur les onglets
+        if name == 'moon_tab_0':
+            moon_settings_tab = 0
+            _moon_slider_rects = {}
+            return True
+        if name == 'moon_tab_1':
+            moon_settings_tab = 1
+            _moon_slider_rects = {}
+            return True
 
         rel_x = mx - rect.x - 7
         ratio = max(0.0, min(1.0, rel_x / (rect.width - 15)))
@@ -8630,25 +8719,8 @@ def handle_moon_slider_click(mx, my, control_rects):
                 moon_lrgb_weight   = int(p.get('lrgb_w', 0.6) * 100)
                 print(f"[MOON] Preset → {p['name']} ({p.get('processing_mode','classic')})")
 
-        elif name == 'moon_zoom':
-            new_zoom = max(0, min(5, int(ratio * 5 + 0.5)))
-            if new_zoom != zoom:
-                zoom = new_zoom
-                sync_video_resolution_with_zoom()
-                kill_preview_process()
-                preview()
-                # Restaurer AWB manuel après reconfiguration
-                if picam2 is not None:
-                    try:
-                        picam2.set_controls({
-                            "AwbEnable": False,
-                            "ColourGains": (moon_wb_b / 100.0, moon_wb_r / 100.0)
-                        })
-                    except Exception:
-                        pass
-
-        # Mettre à jour le processor (sauf zoom et preset qui gèrent eux-mêmes)
-        if name not in ('moon_zoom', 'moon_preset'):
+        # Mettre à jour le processor (sauf preset et onglets qui gèrent eux-mêmes)
+        if name not in ('moon_preset', 'moon_tab_0', 'moon_tab_1'):
             if moon_processor is not None:
                 moon_processor.configure(
                     saturation_factor=moon_sat_factor / 10.0,
@@ -8817,20 +8889,21 @@ def draw_sun_detect_button(screen_width, screen_height):
 # --- Helpers position sliders Gain/Expo ---
 
 def _sun_ge_slider_positions(screen_height, screen_width=1920):
-    """Positions des sliders Gain/Expo Solar (haut-centre)."""
+    """Positions des sliders Gain/Expo/Zoom Solar (haut-centre)."""
     slider_w = 300
     slider_h = 30
     sx = (screen_width - slider_w) // 2
     sy_expo = 75
     sy_gain = sy_expo + slider_h + 8
-    return sx, sy_gain, sy_expo, slider_w, slider_h
+    sy_zoom = sy_gain + slider_h + 8
+    return sx, sy_gain, sy_expo, sy_zoom, slider_w, slider_h
 
 
 def draw_sun_gain_exposure(screen_width, screen_height):
-    """Dessine les sliders Gain et Exposition en haut-centre — Solar mode."""
-    global windowSurfaceObj, _font_cache, sun_gain, sun_exposure_us
+    """Dessine les sliders Gain, Exposition et Zoom en haut-centre — Solar mode."""
+    global windowSurfaceObj, _font_cache, sun_gain, sun_exposure_us, zoom
     import math
-    sx, sy_gain, sy_expo, slider_w, slider_h = _sun_ge_slider_positions(
+    sx, sy_gain, sy_expo, sy_zoom, slider_w, slider_h = _sun_ge_slider_positions(
         screen_height, screen_width)
 
     min_exp_us, max_exp_us = 1000, 20000   # 1–20 ms
@@ -8852,6 +8925,7 @@ def draw_sun_gain_exposure(screen_width, screen_height):
     for sy, label, ratio, color in [
         (sy_expo, expo_text,            expo_ratio,            (180, 140, 40)),
         (sy_gain, f"Gain: {sun_gain}",  (sun_gain - 0) / 400.0, (140, 110, 30)),
+        (sy_zoom, f"Zoom: {zoom}x",    zoom / 5.0,             (70, 130, 140)),
     ]:
         bg_rect = pygame.Rect(sx, sy, slider_w, slider_h)
         pygame.draw.rect(windowSurfaceObj, (40, 40, 30), bg_rect, border_radius=5)
@@ -8938,7 +9012,7 @@ def is_click_on_sun_binning(mx, my, screen_width, screen_height):
 
 def is_click_on_sun_gain_slider(mx, my, screen_width, screen_height):
     """Retourne nouvelle valeur gain (0-400) ou None."""
-    sx, sy_gain, _, slider_w, slider_h = _sun_ge_slider_positions(screen_height, screen_width)
+    sx, sy_gain, _, _, slider_w, slider_h = _sun_ge_slider_positions(screen_height, screen_width)
     if sx <= mx <= sx + slider_w and sy_gain <= my <= sy_gain + slider_h:
         return max(0, min(400, int((mx - sx) / slider_w * 400)))
     return None
@@ -8947,12 +9021,20 @@ def is_click_on_sun_gain_slider(mx, my, screen_width, screen_height):
 def is_click_on_sun_exposure_slider(mx, my, screen_width, screen_height):
     """Retourne nouvelle valeur expo en µs (1000–20000) ou None."""
     import math
-    sx, _, sy_expo, slider_w, slider_h = _sun_ge_slider_positions(screen_height, screen_width)
+    sx, _, sy_expo, _, slider_w, slider_h = _sun_ge_slider_positions(screen_height, screen_width)
     if sx <= mx <= sx + slider_w and sy_expo <= my <= sy_expo + slider_h:
         ratio   = max(0.0, min(1.0, (mx - sx) / slider_w))
         log_min = math.log10(1000)
         log_max = math.log10(20000)
         return int(10 ** (log_min + ratio * (log_max - log_min)))
+    return None
+
+
+def is_click_on_sun_zoom_slider(mx, my, screen_width, screen_height):
+    """Retourne nouvelle valeur zoom (0-5) ou None."""
+    sx, _, _, sy_zoom, slider_w, slider_h = _sun_ge_slider_positions(screen_height, screen_width)
+    if sx <= mx <= sx + slider_w and sy_zoom <= my <= sy_zoom + slider_h:
+        return max(0, min(5, int((mx - sx) / slider_w * 5 + 0.5)))
     return None
 
 
@@ -9114,17 +9196,6 @@ def draw_sun_controls(screen_width, screen_height):
             f"Mask disk: {'ON' if sun_mask_disk else 'OFF'}",
             sun_mask_disk, 0, 1, (160, 130, 50))
         start_y += slider_h + margin + 6
-
-        # --- Gain / Expo (rappel) ---
-        windowSurfaceObj.blit(
-            _font_cache[ck_sect].render("Acquisition", True, (180, 160, 80)),
-            (panel_x + 2, start_y))
-        start_y += 16
-
-        control_rects['sun_zoom'] = draw_jsk_slider(
-            panel_x, start_y, slider_w, slider_h,
-            f"Zoom: {zoom}x", zoom, 0, 5, (100, 160, 160))
-        start_y += slider_h + margin
 
         preset_names = [p['name'] for p in SOLAR_PRESETS]
         cur_name = preset_names[sun_preset] if 0 <= sun_preset < len(preset_names) else "?"
@@ -9365,14 +9436,6 @@ def handle_sun_slider_click(mx, my, control_rects):
             sun_false_color = max(0, min(3, int(ratio * 3 + 0.5)))
             if sun_processor is not None:
                 sun_processor.configure(false_color=sun_false_color)
-
-        elif name == 'sun_zoom':
-            new_zoom = max(0, min(5, int(ratio * 5 + 0.5)))
-            if new_zoom != zoom:
-                zoom = new_zoom
-                sync_video_resolution_with_zoom()
-                kill_preview_process()
-                preview()
 
         elif name == 'sun_preset':
             new_preset = max(0, min(len(SOLAR_PRESETS) - 1,
@@ -10317,22 +10380,25 @@ def init_fwhm_graph():
     """Initialise le graphique matplotlib pour le FWHM"""
     global fwhm_fig, fwhm_ax
 
-    if fwhm_fig is None:
-        fwhm_fig, fwhm_ax = plt.subplots(figsize=(6, 3), dpi=100)
-        fwhm_fig.patch.set_facecolor('#1a1a1a')
-        fwhm_ax.set_facecolor('#0a0a0a')
+    if fwhm_fig is not None:
+        plt.close(fwhm_fig)
+    fwhm_fig, fwhm_ax = plt.subplots(figsize=(6, 3), dpi=100)
+    fwhm_fig.patch.set_facecolor('#1a1a1a')
+    fwhm_ax.set_facecolor('#0a0a0a')
 
     return fwhm_fig, fwhm_ax
 
 def init_hfr_graph():
     """Initialise le graphique matplotlib pour le HFR"""
-    global hfr_fig, hfr_ax
+    global hfr_fig, hfr_ax, hfr_ax2
 
-    if hfr_fig is None:
-        # Taille et style élégants pour meilleure lisibilité
-        hfr_fig, hfr_ax = plt.subplots(figsize=(6, 3), dpi=100)
-        hfr_fig.patch.set_facecolor('#1a1a1a')
-        hfr_ax.set_facecolor('#0a0a0a')
+    if hfr_fig is not None:
+        plt.close(hfr_fig)
+    # Taille et style élégants pour meilleure lisibilité
+    hfr_fig, hfr_ax = plt.subplots(figsize=(6, 3), dpi=100)
+    hfr_ax2 = None
+    hfr_fig.patch.set_facecolor('#1a1a1a')
+    hfr_ax.set_facecolor('#0a0a0a')
 
     return hfr_fig, hfr_ax
 
@@ -10484,10 +10550,11 @@ def reset_hfr_history():
 def init_focus_graph():
     """Initialise le graphique Focus (Laplacian variance)"""
     global focus_fig, focus_ax
-    if focus_fig is None:
-        focus_fig, focus_ax = plt.subplots(figsize=(6, 3), dpi=100)
-        focus_fig.patch.set_facecolor('#1a1a1a')
-        focus_ax.set_facecolor('#0a0a0a')
+    if focus_fig is not None:
+        plt.close(focus_fig)
+    focus_fig, focus_ax = plt.subplots(figsize=(6, 3), dpi=100)
+    focus_fig.patch.set_facecolor('#1a1a1a')
+    focus_ax.set_facecolor('#0a0a0a')
     return focus_fig, focus_ax
 
 def update_focus_graph(focus_val, method_name='Laplacian'):
@@ -10586,7 +10653,7 @@ def update_combined_hfr_fwhm_graph(hfr_val, fwhm_val):
     """Met à jour un graphique combiné HFR+FWHM et retourne une surface pygame"""
     global hfr_history, hfr_times, hfr_start_time
     global fwhm_history, fwhm_times, fwhm_start_time
-    global hfr_fig, hfr_ax, fwhm_fig, fwhm_ax
+    global hfr_fig, hfr_ax, hfr_ax2, fwhm_fig, fwhm_ax
     global _hfr_fwhm_frame_counter, _graphs_update_interval
 
     # Synchroniser les temps de départ
@@ -10621,12 +10688,15 @@ def update_combined_hfr_fwhm_graph(hfr_val, fwhm_val):
     if hfr_fig is None or hfr_ax is None:
         fig, ax1 = plt.subplots(figsize=(6, 3), dpi=100)
         hfr_fig, hfr_ax = fig, ax1
+        hfr_ax2 = None
         fig.patch.set_facecolor('#1a1a1a')
         ax1.set_facecolor('#0a0a0a')
     else:
         fig, ax1 = hfr_fig, hfr_ax
         ax1.clear()
         ax1.set_facecolor('#0a0a0a')
+        if hfr_ax2 is not None:
+            hfr_ax2.cla()
 
     # Axe pour HFR (gauche)
     if len(hfr_history) >= 2:
@@ -10650,8 +10720,10 @@ def update_combined_hfr_fwhm_graph(hfr_val, fwhm_val):
         max_hfr = max(hfr_list)
         ax1.set_ylim(0, max(max_hfr * 1.2, 8))
 
-    # Axe pour FWHM (droite)
-    ax2 = ax1.twinx()
+    # Axe pour FWHM (droite) — réutiliser l'axe existant pour éviter l'accumulation
+    if hfr_ax2 is None:
+        hfr_ax2 = ax1.twinx()
+    ax2 = hfr_ax2
     if len(fwhm_history) >= 2:
         fwhm_times_list = list(fwhm_times)
         fwhm_list = list(fwhm_history)
@@ -11115,7 +11187,7 @@ def preview():
     global saturation,meters,meter,flickers,flicker,sharpnesss,sharpness,rotate,v3_hdrs,mjpeg_extractor
     global picam2, capture_thread, use_picamera2, Pi_Cam, camera, v3_af, v5_af, vflip, hflip, denoise, denoises, quality, use_native_sensor_mode, zfs
     global livestack_active, luckystack_active, raw_format, raw_stream_size, capture_size, jsk_live_mode
-    global lucky_video_active, lucky_video_writer, lucky_video_path
+    global lucky_recorder
     global lucky_last_filtered_array
     global ls_lucky_clahe_en, ls_lucky_clahe_str, ls_lucky_clahe_tile
     global ls_lucky_usm_en, ls_lucky_usm_sigma, ls_lucky_usm_amount
@@ -11982,6 +12054,113 @@ def preview():
     restart = 0
     time.sleep(0.2)
 
+def save_config_to_file():
+    """Sauvegarde tous les paramètres dans le fichier de configuration."""
+    config[0]  = mode
+    config[1]  = speed
+    config[2]  = gain
+    config[3]  = int(brightness)
+    config[4]  = int(contrast)
+    config[5]  = frame
+    config[6]  = int(red)
+    config[7]  = int(blue)
+    config[8]  = ev
+    config[9]  = vlen
+    config[10] = fps
+    config[11] = vformat
+    config[12] = codec
+    config[13] = tinterval
+    config[14] = tshots
+    config[15] = extn
+    config[16] = zx
+    config[17] = zy
+    config[18] = zoom
+    config[19] = int(saturation)
+    config[20] = meter
+    config[21] = awb
+    config[22] = sharpness
+    config[23] = int(denoise)
+    config[24] = quality
+    config[25] = profile
+    config[26] = level
+    config[27] = histogram
+    config[28] = histarea
+    config[29] = v3_f_speed
+    config[30] = v3_f_range
+    config[31] = rotate
+    config[32] = IRF
+    config[33] = str_cap
+    config[34] = v3_hdr
+    config[35] = raw_format
+    config[36] = vflip
+    config[37] = hflip
+    config[38] = stretch_p_low
+    config[39] = stretch_p_high
+    config[40] = stretch_factor
+    config[41] = stretch_preset
+    config[42] = ghs_D
+    config[43] = ghs_b
+    config[44] = ghs_SP
+    config[45] = ghs_LP
+    config[46] = ghs_HP
+    config[47] = ghs_preset
+    config[48] = ls_preview_refresh
+    config[49] = ls_alignment_mode
+    config[50] = ls_enable_qc
+    config[51] = ls_max_fwhm
+    config[52] = ls_min_sharpness
+    config[53] = ls_max_drift
+    config[54] = ls_min_stars
+    config[55] = ls_stack_method
+    config[56] = ls_stack_kappa
+    config[57] = ls_stack_iterations
+    config[58] = ls_planetary_enable
+    config[59] = ls_planetary_mode
+    config[60] = ls_planetary_disk_min
+    config[61] = ls_planetary_disk_max
+    config[62] = ls_planetary_threshold
+    config[63] = ls_planetary_margin
+    config[64] = ls_planetary_ellipse
+    config[65] = ls_planetary_window
+    config[66] = ls_planetary_upsample
+    config[67] = ls_planetary_highpass
+    config[68] = ls_planetary_roi_center
+    config[69] = ls_planetary_corr
+    config[70] = ls_planetary_max_shift
+    config[71] = ls_lucky_buffer
+    config[72] = ls_lucky_keep
+    config[73] = ls_lucky_score
+    config[74] = ls_lucky_stack
+    config[75] = ls_lucky_align
+    config[76] = ls_lucky_roi
+    config[77] = use_native_sensor_mode
+    config[78] = focus_method
+    config[79] = star_metric
+    config[80] = snr_display
+    config[81] = metrics_interval
+    config[82] = ls_lucky_save_progress
+    config[83] = isp_enable
+    config[84] = allsky_mode
+    config[85] = allsky_mean_target
+    config[86] = allsky_mean_threshold
+    config[87] = allsky_video_fps
+    config[88] = allsky_max_gain
+    config[89] = allsky_apply_stretch
+    config[90] = allsky_cleanup_jpegs
+    config[91] = ls_save_progress
+    config[92] = ls_save_final
+    config[93] = ls_lucky_save_final
+    config[94] = fix_bad_pixels
+    config[95] = fix_bad_pixels_sigma
+    config[96] = fix_bad_pixels_min_adu
+    config[97] = allsky_stack_enable
+    config[98] = allsky_stack_count
+    with open(config_file, 'w') as f:
+        for item in range(0, len(titles)):
+            f.write(titles[item] + " : " + str(config[item]) + "\n")
+    time.sleep(1)
+
+
 def Menu():
     global vwidths2,vheights2,Pi_Cam,scientif,mode,v3_hdr,scientific,tinterval,zoom,vwidth,vheight,preview_width,preview_height,ft,fv,focus,fxz,v3_hdr,v3_hdrs,bw,bh,ft,fv,cam1,v3_f_mode,v3_af,button_row,xx,xy,use_native_sensor_mode
     global allsky_mode,allsky_mean_target,allsky_mean_threshold,allsky_video_fps,allsky_max_gain,allsky_apply_stretch,allsky_cleanup_jpegs,allsky_modes,allsky_stack_enable,allsky_stack_count
@@ -12759,7 +12938,7 @@ pygame.display.update()
 
 # determine max speed for camera
 max_speed = 0
-while max_shutter > shutters[max_speed]:
+while max_speed < len(shutters) - 1 and max_shutter > shutters[max_speed]:
     max_speed +=1
 if speed > max_speed:
     speed = max_speed
@@ -13063,6 +13242,7 @@ while True:
 
                 if moon_settings_visible == 1:
                     _moon_slider_rects = draw_moon_controls(max_width, max_height)
+                pygame.display.update()
 
             # === SOLAR MODE: Post-traitement sur flux ISP (main stream) ===
             if sun_mode == 1 and sun_processor is not None:
@@ -13117,6 +13297,7 @@ while True:
 
                 if sun_settings_visible == 1:
                     _sun_slider_rects = draw_sun_controls(max_width, max_height)
+                pygame.display.update()
 
             # === JSK LIVE MODE: Traitement dédié dans le chemin Picamera2 ===
             # Le pipeline JSK LIVE (HDR + Denoise) remplace le pipeline normal (debayer + ISP)
@@ -13220,6 +13401,7 @@ while True:
                 # Afficher le panneau de contrôle si visible
                 if jsk_settings_visible == 1:
                     _jsk_slider_rects = draw_jsk_controls(max_width, max_height, None)
+                pygame.display.update()
 
             # Si une frame est disponible, la traiter et l'afficher
             # Sinon, on saute juste le traitement (l'interface reste réactive)
@@ -13637,28 +13819,9 @@ while True:
                                 pygame._lucky_last_displayed = stacks_done
 
                                 # ── Vidéo de progression ──────────────────────
-                                if lucky_video_active:
+                                if lucky_recorder is not None and lucky_recorder.is_recording:
                                     try:
-                                        # BGR uint8 pour cv2.VideoWriter
-                                        if stacked_array.ndim == 2:
-                                            frame_vid = cv2.cvtColor(stacked_array, cv2.COLOR_GRAY2BGR)
-                                        elif stacked_array.shape[2] == 3:
-                                            # stacked_array est BGR (déjà swappé par le pipeline)
-                                            frame_vid = stacked_array
-                                        else:
-                                            frame_vid = stacked_array[:, :, :3]
-                                        h_v, w_v = frame_vid.shape[:2]
-                                        if lucky_video_writer is None:
-                                            import time as _t, os as _os
-                                            ts = _t.strftime("%Y%m%d_%H%M%S")
-                                            vdir = "/home/admin/stacks/lucky"
-                                            _os.makedirs(vdir, exist_ok=True)
-                                            lucky_video_path = f"{vdir}/lucky_progress_{ts}.mp4"
-                                            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                                            lucky_video_writer = cv2.VideoWriter(
-                                                lucky_video_path, fourcc, 5, (w_v, h_v))
-                                            print(f"[LUCKY VIDEO] Création: {lucky_video_path}")
-                                        lucky_video_writer.write(frame_vid)
+                                        lucky_recorder.write_frame(stacked_array)
                                     except Exception as _ve:
                                         print(f"[LUCKY VIDEO] Erreur frame: {_ve}")
 
@@ -13985,7 +14148,7 @@ while True:
                 jsk_raw_input = None
                 try:
                     # Utiliser raw_array si disponible (données RAW brutes 12 bits)
-                    if 'raw_array' in dir() and raw_array is not None and len(raw_array.shape) == 2:
+                    if 'raw_array' in locals() and raw_array is not None and len(raw_array.shape) == 2:
                         jsk_raw_input = raw_array
                 except:
                     pass
@@ -14332,12 +14495,12 @@ while True:
             pygame.draw.line(windowSurfaceObj,(255,255,255),(xx-int(histarea_display/2),xy),(xx+int(histarea_display/2),xy),1)
             pygame.draw.line(windowSurfaceObj,(255,255,255),(xx,xy-int(histarea_display/2)),(xx,xy+int(histarea_display/2)),1)
 
-    # Mode preview (zoom == 0 ET focus_mode == 0) - Ne pas afficher en mode stretch
-    if zoom == 0 and focus_mode == 0 and stretch_mode == 0:
+    # Mode preview (zoom == 0 ET focus_mode == 0) - Ne pas afficher en mode stretch ni en modes fullscreen
+    if zoom == 0 and focus_mode == 0 and stretch_mode == 0 and moon_mode == 0 and sun_mode == 0 and jsk_live_mode == 0:
         text(0,0,6,2,0,"Preview",fv* 2,0)
 
     # Mode preview (zoom == 0)
-    if zoom == 0:
+    if zoom == 0 and moon_mode == 0 and sun_mode == 0 and jsk_live_mode == 0:
         #pygame.draw.rect(windowSurfaceObj,blackColor,Rect(0,0,int(preview_width/4.5),int(preview_height/8)),0)
         # Ne pas afficher le texte en mode stretch
         if stretch_mode == 0:
@@ -14374,7 +14537,7 @@ while True:
     pygame.display.update()
     
     # *** CETTE PARTIE EST CRUCIALE : Mode preview (zoom == 0) ***
-    if zoom == 0:
+    if zoom == 0 and moon_mode == 0 and sun_mode == 0 and jsk_live_mode == 0:
         #pygame.draw.rect(windowSurfaceObj,blackColor,Rect(0,0,int(preview_width/4.5),int(preview_height/8)),0)
         # Ne pas afficher le texte en mode stretch
         if stretch_mode == 0:
@@ -14452,6 +14615,11 @@ while True:
                 apply_controls_immediately(exposure_time=moon_exposure_us)
                 _moon_ge_dragging = 'expo'
                 continue
+            new_z = is_click_on_moon_zoom_slider(mx, my, _fs_w, _fs_h)
+            if new_z is not None:
+                zoom = new_z
+                _moon_ge_dragging = 'zoom'
+                continue
             if moon_settings_visible == 1 and _moon_slider_rects:
                 if handle_moon_slider_click(mx, my, _moon_slider_rects):
                     _moon_slider_dragging = True
@@ -14501,6 +14669,11 @@ while True:
                 sun_exposure_us = new_e
                 apply_controls_immediately(exposure_time=sun_exposure_us)
                 _sun_ge_dragging = 'expo'
+                continue
+            new_z = is_click_on_sun_zoom_slider(mx, my, _fs_w, _fs_h)
+            if new_z is not None:
+                zoom = new_z
+                _sun_ge_dragging = 'zoom'
                 continue
             if sun_settings_visible == 1 and _sun_slider_rects:
                 if handle_sun_slider_click(mx, my, _sun_slider_rects):
@@ -14577,11 +14750,15 @@ while True:
                     if new_g is not None:
                         moon_gain = new_g
                         apply_controls_immediately(gain_value=moon_gain)
-                else:
+                elif _moon_ge_dragging == 'expo':
                     new_e = is_click_on_moon_exposure_slider(mx, my, _fs_w, _fs_h)
                     if new_e is not None:
                         moon_exposure_us = new_e
                         apply_controls_immediately(exposure_time=moon_exposure_us)
+                elif _moon_ge_dragging == 'zoom':
+                    new_z = is_click_on_moon_zoom_slider(mx, my, _fs_w, _fs_h)
+                    if new_z is not None:
+                        zoom = new_z
                 continue
             else:
                 _moon_ge_dragging = None
@@ -14641,11 +14818,15 @@ while True:
                     if new_g is not None:
                         sun_gain = new_g
                         apply_controls_immediately(gain_value=sun_gain)
-                else:
+                elif _sun_ge_dragging == 'expo':
                     new_e = is_click_on_sun_exposure_slider(mx, my, _fs_w, _fs_h)
                     if new_e is not None:
                         sun_exposure_us = new_e
                         apply_controls_immediately(exposure_time=sun_exposure_us)
+                elif _sun_ge_dragging == 'zoom':
+                    new_z = is_click_on_sun_zoom_slider(mx, my, _fs_w, _fs_h)
+                    if new_z is not None:
+                        zoom = new_z
                 continue
             else:
                 _sun_ge_dragging = None
@@ -14758,6 +14939,9 @@ while True:
                 pygame.display.update()
                 kill_preview_process()
                 preview()
+                apply_controls_immediately(
+                    gain_value=ls_gain if ls_gain > 0 else None,
+                    exposure_time=ls_exposure_us)
             continue
         if _ls_slider_dragging:
             _ls_slider_dragging = False
@@ -14783,6 +14967,9 @@ while True:
                 pygame.display.update()
                 kill_preview_process()
                 preview()
+                apply_controls_immediately(
+                    gain_value=ls_gain if ls_gain > 0 else None,
+                    exposure_time=ls_exposure_us)
             continue
         if _lucky_slider_dragging:
             _lucky_slider_dragging = False
@@ -14791,6 +14978,18 @@ while True:
             continue
         # Fin du drag Moon
         if _moon_ge_dragging is not None:
+            if _moon_ge_dragging == 'zoom':
+                sync_video_resolution_with_zoom()
+                kill_preview_process()
+                preview()
+                if picam2 is not None:
+                    try:
+                        picam2.set_controls({
+                            "AwbEnable": False,
+                            "ColourGains": (moon_wb_b / 100.0, moon_wb_r / 100.0)
+                        })
+                    except Exception:
+                        pass
             _moon_ge_dragging = None
             continue
         if _moon_slider_dragging:
@@ -14809,8 +15008,12 @@ while True:
             if jsk_live_mode == 1 and jsk_settings_visible == 1 and _jsk_slider_rects:
                 handle_jsk_slider_click(mousex, mousey, _jsk_slider_rects)
             continue
-        # Fin du drag Solar gain/expo
+        # Fin du drag Solar gain/expo/zoom
         if _sun_ge_dragging is not None:
+            if _sun_ge_dragging == 'zoom':
+                sync_video_resolution_with_zoom()
+                kill_preview_process()
+                preview()
             _sun_ge_dragging = None
             continue
         if _sun_slider_dragging:
@@ -15070,6 +15273,7 @@ while True:
                         lucky_align_enabled=bool(ls_lucky_align),
                         lucky_align_mode=ls_lucky_align,
                         lucky_score_roi_percent=float(ls_lucky_roi),
+                        lucky_max_shift=float(ls_lucky_max_shift),
                         png_stretch='off' if raw_format >= 2 else ['off', 'ghs', 'asinh'][stretch_preset],
                         png_factor=stretch_factor / 10.0,
                         png_clip_low=0.0 if stretch_preset == 1 else stretch_p_low / 10.0,
@@ -15197,21 +15401,22 @@ while True:
 
             # REC VIDEO → démarrer ou arrêter l'enregistrement vidéo de progression
             if is_click_on_ls_save(mousex, mousey, fs_width):
-                if lucky_video_active:
-                    # Arrêter l'enregistrement
-                    lucky_video_active = False
-                    if lucky_video_writer is not None:
-                        lucky_video_writer.release()
-                        lucky_video_writer = None
-                        print(f"[LUCKY VIDEO] Enregistrement terminé : {lucky_video_path}")
-                    else:
-                        print("[LUCKY VIDEO] Enregistrement arrêté (aucune frame écrite)")
+                if lucky_recorder is not None and lucky_recorder.is_recording:
+                    lucky_recorder.stop()
+                    print(f"[LUCKY VIDEO] Enregistrement terminé")
                 else:
-                    # Démarrer — le VideoWriter sera créé à la première frame
-                    lucky_video_active = True
-                    lucky_video_writer = None
-                    lucky_video_path   = ""
-                    print("[LUCKY VIDEO] Enregistrement démarré (en attente du prochain stack)")
+                    if lucky_recorder is None:
+                        lucky_recorder = JSKVideoRecorder()
+                    import datetime as _dt
+                    ts = _dt.datetime.now().strftime("%y%m%d%H%M%S")
+                    import os as _os
+                    _os.makedirs("/home/admin/stacks/lucky", exist_ok=True)
+                    out = f"/home/admin/stacks/lucky/lucky_progress_{ts}.mp4"
+                    rw, rh = vwidth, vheight
+                    if lucky_recorder.start(out, rw, rh, fps=5):
+                        print(f"[LUCKY VIDEO] Enregistrement démarré: {out}")
+                    else:
+                        print(f"[LUCKY VIDEO] Erreur démarrage enregistrement")
                 continue
 
             # RESET → réinitialiser la session Lucky
@@ -15223,10 +15428,8 @@ while True:
                 if luckystack is not None:
                     luckystack.reset()
                 # Fermer la vidéo si enregistrement actif
-                if lucky_video_writer is not None:
-                    lucky_video_writer.release()
-                    lucky_video_writer = None
-                lucky_video_active = False
+                if lucky_recorder is not None and lucky_recorder.is_recording:
+                    lucky_recorder.stop()
                 for _attr in ['_lucky_last_displayed', '_lucky_cached_image', '_lucky_last_saved',
                               '_lucky_resolution_check', '_lucky_stack_resolution_debug']:
                     if hasattr(pygame, _attr):
@@ -15256,11 +15459,9 @@ while True:
                                 save_lucky_filtered_png(lucky_last_filtered_array, filename=f"lucky_final_filtered_{_ts}")
                         luckystack.stop()
                     # Fermer la vidéo si enregistrement actif
-                    if lucky_video_active and lucky_video_writer is not None:
-                        lucky_video_writer.release()
-                        lucky_video_writer = None
-                        lucky_video_active = False
-                        print(f"[LUCKY VIDEO] Vidéo finalisée : {lucky_video_path}")
+                    if lucky_recorder is not None and lucky_recorder.is_recording:
+                        lucky_recorder.stop()
+                        print(f"[LUCKY VIDEO] Vidéo finalisée")
                     apply_controls_immediately(
                         gain_value=ls_gain if ls_gain > 0 else None,
                         exposure_time=ls_exposure_us)
@@ -15337,6 +15538,7 @@ while True:
                         lucky_align_enabled=bool(ls_lucky_align),
                         lucky_align_mode=ls_lucky_align,
                         lucky_score_roi_percent=float(ls_lucky_roi),
+                        lucky_max_shift=float(ls_lucky_max_shift),
                         png_stretch=['off', 'ghs', 'asinh'][stretch_preset],
                         png_factor=stretch_factor / 10.0,
                         png_clip_low=0.0 if stretch_preset == 1 else stretch_p_low / 10.0,
@@ -15351,7 +15553,7 @@ while True:
                     luckystack.configure(
                         isp_enable=False,
                         isp_config_path=None,
-                        video_format='yuv420' if raw_format == 0 else 'xrgb8888',
+                        video_format={0: 'yuv420', 1: 'xrgb8888', 2: 'raw12', 3: 'raw16'}.get(raw_format, 'xrgb8888'),
                         lucky_stack_method=['mean', 'median', 'sigma_clip'][ls_lucky_stack],
                         lucky_buffer_size=ls_lucky_buffer,
                         lucky_keep_percent=float(ls_lucky_keep),
@@ -15359,6 +15561,7 @@ while True:
                         lucky_align_enabled=bool(ls_lucky_align),
                         lucky_align_mode=ls_lucky_align,
                         lucky_score_roi_percent=float(ls_lucky_roi),
+                        lucky_max_shift=float(ls_lucky_max_shift),
                         ghs_D=ghs_D / 10.0,
                         ghs_b=ghs_b / 10.0,
                         ghs_SP=ghs_SP / 100.0,
@@ -15399,11 +15602,9 @@ while True:
                 stretch_mode = 0
 
                 # Fermer la vidéo si enregistrement actif
-                if lucky_video_writer is not None:
-                    lucky_video_writer.release()
-                    lucky_video_writer = None
-                    print(f"[LUCKY VIDEO] Vidéo finalisée à la sortie : {lucky_video_path}")
-                lucky_video_active = False
+                if lucky_recorder is not None and lucky_recorder.is_recording:
+                    lucky_recorder.stop()
+                    print(f"[LUCKY VIDEO] Vidéo finalisée à la sortie")
 
                 # Restaurer ISP hardware caméra
                 if use_picamera2 and picam2 is not None and raw_format < 2:
@@ -15764,6 +15965,9 @@ while True:
                 _moon_last_surface = None
                 kill_preview_process()
                 preview()
+                apply_controls_immediately(
+                    gain_value=moon_gain if moon_gain > 0 else None,
+                    exposure_time=moon_exposure_us)
                 # Restaurer AWB manuel après reconfiguration caméra
                 if picam2 is not None:
                     try:
@@ -15834,7 +16038,7 @@ while True:
                 print("[MOON] Mode désactivé")
                 continue
 
-            # Sliders Gain/Expo
+            # Sliders Gain/Expo/Zoom
             new_g = is_click_on_moon_gain_slider(mousex, mousey, fs_width, fs_height)
             if new_g is not None:
                 moon_gain = new_g
@@ -15844,6 +16048,21 @@ while True:
             if new_e is not None:
                 moon_exposure_us = new_e
                 apply_controls_immediately(exposure_time=moon_exposure_us)
+                continue
+            new_z = is_click_on_moon_zoom_slider(mousex, mousey, fs_width, fs_height)
+            if new_z is not None:
+                zoom = new_z
+                sync_video_resolution_with_zoom()
+                kill_preview_process()
+                preview()
+                if picam2 is not None:
+                    try:
+                        picam2.set_controls({
+                            "AwbEnable": False,
+                            "ColourGains": (moon_wb_b / 100.0, moon_wb_r / 100.0)
+                        })
+                    except Exception:
+                        pass
                 continue
 
             # Sliders settings panel
@@ -15924,6 +16143,9 @@ while True:
                     sun_processor._disk_center = None  # Force re-détection
                 kill_preview_process()
                 preview()
+                apply_controls_immediately(
+                    gain_value=sun_gain if sun_gain > 0 else None,
+                    exposure_time=sun_exposure_us)
                 continue
 
             # DETECT — redétection du disque solaire
@@ -15984,7 +16206,7 @@ while True:
                 print("[SOLAR] Mode désactivé")
                 continue
 
-            # Sliders Gain/Expo
+            # Sliders Gain/Expo/Zoom
             new_g = is_click_on_sun_gain_slider(mousex, mousey, fs_width, fs_height)
             if new_g is not None:
                 sun_gain = new_g
@@ -15994,6 +16216,13 @@ while True:
             if new_e is not None:
                 sun_exposure_us = new_e
                 apply_controls_immediately(exposure_time=sun_exposure_us)
+                continue
+            new_z = is_click_on_sun_zoom_slider(mousex, mousey, fs_width, fs_height)
+            if new_z is not None:
+                zoom = new_z
+                sync_video_resolution_with_zoom()
+                kill_preview_process()
+                preview()
                 continue
 
             # Sliders settings panel
@@ -16043,6 +16272,9 @@ while True:
                 _jsk_last_blit_pos = (0, 0)
                 kill_preview_process()
                 preview()
+                apply_controls_immediately(
+                    gain_value=jsk_gain if jsk_gain > 0 else None,
+                    exposure_time=jsk_exposure_us)
                 print(f"[JSK LIVE] Binning: {'ON (1928×1090)' if jsk_binning else 'OFF (' + str(igw) + '×' + str(igh) + ')'}")
                 continue
 
@@ -16103,7 +16335,7 @@ while True:
                     jsk_recorder.stop()
 
                 # Restaurer les paramètres sauvegardés
-                if 'jsk_saved_vwidth' in dir():
+                if 'jsk_saved_vwidth' in locals():
                     vwidth = jsk_saved_vwidth
                     vheight = jsk_saved_vheight
                     zoom = jsk_saved_zoom
@@ -16195,7 +16427,7 @@ while True:
                 fxx = 0
                 fxy = 0
                 fxz = 1
-                fzy = 1
+                fyz = 1
                 if (v3_f_mode == 0 or v3_f_mode == 2) and menu == 0:
                     text(0,3,3,1,1,str(v3_f_modes[v3_f_mode]),fv,7)
             if ((Pi_Cam == 3 and v3_af == 1) or ((Pi_Cam == 5 or Pi_Cam == 6)) or Pi_Cam == 8) and zoom == 0:
@@ -16235,9 +16467,12 @@ while True:
                         os.killpg(p.pid, signal.SIGTERM)
                         # Attendre que le processus de preview se termine complètement
                         poll = p.poll()
-                        while poll == None:
+                        _poll_deadline = time.monotonic() + 30.0
+                        while poll is None and time.monotonic() < _poll_deadline:
                             poll = p.poll()
                             time.sleep(0.1)
+                        if poll is None:
+                            print("[WARN] Timeout: le processus preview ne s'est pas terminé après 30s")
 
                     button(0,0,1,4)
                     if os.path.exists("PiLibtext.txt"):
@@ -16425,9 +16660,12 @@ while True:
                         os.killpg(p.pid, signal.SIGTERM)
                         # Attendre que le processus de preview se termine complètement
                         poll = p.poll()
-                        while poll == None:
+                        _poll_deadline = time.monotonic() + 30.0
+                        while poll is None and time.monotonic() < _poll_deadline:
                             poll = p.poll()
                             time.sleep(0.1)
+                        if poll is None:
+                            print("[WARN] Timeout: le processus preview ne s'est pas terminé après 30s")
 
                     button(0,1,1,3)
                     if Pi == 5:
@@ -17258,12 +17496,8 @@ while True:
                         print(f"[DEBUG] Command: {datastr}")
                         print(f"[DEBUG] Pi={Pi}, codec={codecs[codec]}")
 
-                        if Pi == 5 and codecs[codec] == 'mp4':
-                            print("[DEBUG] Using os.system() for MP4 on Pi 5")
-                            os.system(datastr)
-                        else:
-                            print("[DEBUG] Using subprocess.Popen()")
-                            p = subprocess.Popen(datastr, shell=True, preexec_fn=os.setsid)
+                        print("[DEBUG] Using subprocess.Popen()")
+                        p = subprocess.Popen(datastr, shell=True, preexec_fn=os.setsid)
                         start_video = time.monotonic()
                         stop = 0
                         while (time.monotonic() - start_video < vlen or vlen == 0) and stop == 0:
@@ -17343,9 +17577,12 @@ while True:
                         os.killpg(p.pid, signal.SIGTERM)
                         # Attendre que le processus de preview se termine complètement
                         poll = p.poll()
-                        while poll == None:
+                        _poll_deadline = time.monotonic() + 30.0
+                        while poll is None and time.monotonic() < _poll_deadline:
                             poll = p.poll()
                             time.sleep(0.1)
+                        if poll is None:
+                            print("[WARN] Timeout: le processus preview ne s'est pas terminé après 30s")
 
                     button(0,1,1,3)
                     text(0,1,2,0,1,"           STOP ",ft,0)
@@ -17886,9 +18123,12 @@ while True:
                                 start2 = time.monotonic()
                                 if p is not None:
                                     poll = p.poll()
-                                    while poll == None:
+                                    _poll_deadline = time.monotonic() + 30.0
+                                    while poll is None and time.monotonic() < _poll_deadline:
                                         poll = p.poll()
                                         time.sleep(0.1)
+                                    if poll is None:
+                                        print("[WARN] Timeout: le processus ne s'est pas terminé après 30s")
                                 # Forcer .jpg pour Allsky (format %04d pour cohérence avec mode normal)
                                 if allsky_mode > 0:
                                     fname =  pic_dir + str(timestamp) + "_%04d.jpg" % count
@@ -18003,7 +18243,7 @@ while True:
                                         windowSurfaceObj.blit(catSurfacesmall, (0, 0))
                                         text(0,0,6,2,1,counts[count-1],int(fv*1.5),1)
                                         pygame.display.update()
-                                        show == 1
+                                        show = 1
                                     for event in pygame.event.get():
                                         if event.type == QUIT:
                                             # Ignorer QUIT pendant timelapse (écran en veille, etc.)
@@ -18397,6 +18637,7 @@ while True:
 
                         # Activer l'interface Lucky
                         lucky_interface_mode = 1
+                        lucky_recorder = JSKVideoRecorder()
                         if raw_format >= 2:
                             raw_format = 1  # Lucky Stack : ISP uniquement (YUV ou XRGB8888)
                         lucky_settings_visible = 0
@@ -18422,6 +18663,8 @@ while True:
                         _lucky_slider_dragging = False
                         _lucky_ge_dragging = None
                         stretch_mode = 0  # Désactiver aussi le stretch
+                        if lucky_recorder is not None and lucky_recorder.is_recording:
+                            lucky_recorder.stop()
 
                         if luckystack is not None:
                             # Sauvegarder le résultat final avant de stopper (si activé)
@@ -18999,109 +19242,7 @@ while True:
               elif button_row == 9:
                    # SAVE CONFIG
                    text(0,9,3,0,1,"SAVE Config",fv,7)
-                   config[0] = mode
-                   config[1] = speed
-                   config[2] = gain
-                   config[3] = int(brightness)
-                   config[4] = int(contrast)
-                   config[5] = frame
-                   config[6] = int(red)
-                   config[7] = int(blue)
-                   config[8] = ev
-                   config[9] = vlen
-                   config[10] = fps
-                   config[11] = vformat
-                   config[12] = codec
-                   config[13] = tinterval
-                   config[14] = tshots
-                   config[15] = extn
-                   config[16] = zx
-                   config[17] = zy
-                   config[18] = zoom
-                   config[19] = int(saturation)
-                   config[20] = meter
-                   config[21] = awb
-                   config[22] = sharpness
-                   config[23] = int(denoise)
-                   config[24] = quality
-                   config[25] = profile
-                   config[26] = level
-                   config[27] = histogram
-                   config[28] = histarea
-                   config[29] = v3_f_speed
-                   config[30] = v3_f_range
-                   config[31] = rotate
-                   config[32] = IRF
-                   config[33] = str_cap
-                   config[34] = v3_hdr
-                   config[35] = raw_format  # Remplace timet (fixé à 100ms)
-                   config[36] = vflip
-                   config[37] = hflip
-                   config[38] = stretch_p_low
-                   config[39] = stretch_p_high
-                   config[40] = stretch_factor
-                   config[41] = stretch_preset
-                   config[42] = ghs_D
-                   config[43] = ghs_b
-                   config[44] = ghs_SP
-                   config[45] = ghs_LP
-                   config[46] = ghs_HP
-                   config[47] = ghs_preset
-                   config[48] = ls_preview_refresh
-                   config[49] = ls_alignment_mode
-                   config[50] = ls_enable_qc
-                   config[51] = ls_max_fwhm
-                   config[52] = ls_min_sharpness
-                   config[53] = ls_max_drift
-                   config[54] = ls_min_stars
-                   config[55] = ls_stack_method
-                   config[56] = ls_stack_kappa
-                   config[57] = ls_stack_iterations
-                   config[58] = ls_planetary_enable
-                   config[59] = ls_planetary_mode
-                   config[60] = ls_planetary_disk_min
-                   config[61] = ls_planetary_disk_max
-                   config[62] = ls_planetary_threshold
-                   config[63] = ls_planetary_margin
-                   config[64] = ls_planetary_ellipse
-                   config[65] = ls_planetary_window
-                   config[66] = ls_planetary_upsample
-                   config[67] = ls_planetary_highpass
-                   config[68] = ls_planetary_roi_center
-                   config[69] = ls_planetary_corr
-                   config[70] = ls_planetary_max_shift
-                   config[71] = ls_lucky_buffer
-                   config[72] = ls_lucky_keep
-                   config[73] = ls_lucky_score
-                   config[74] = ls_lucky_stack
-                   config[75] = ls_lucky_align
-                   config[76] = ls_lucky_roi
-                   config[77] = use_native_sensor_mode
-                   config[78] = focus_method
-                   config[79] = star_metric
-                   config[80] = snr_display
-                   config[81] = metrics_interval
-                   config[82] = ls_lucky_save_progress
-                   config[83] = isp_enable
-                   config[84] = allsky_mode
-                   config[85] = allsky_mean_target
-                   config[86] = allsky_mean_threshold
-                   config[87] = allsky_video_fps
-                   config[88] = allsky_max_gain
-                   config[89] = allsky_apply_stretch
-                   config[90] = allsky_cleanup_jpegs
-                   config[97] = allsky_stack_enable
-                   config[98] = allsky_stack_count
-                   config[91] = ls_save_progress
-                   config[92] = ls_save_final
-                   config[93] = ls_lucky_save_final
-                   config[94] = fix_bad_pixels
-                   config[95] = fix_bad_pixels_sigma
-                   config[96] = fix_bad_pixels_min_adu
-                   with open(config_file, 'w') as f:
-                      for item in range(0,len(titles)):
-                          f.write(titles[item] + " : " + str(config[item]) + "\n")
-                   time.sleep(1)
+                   save_config_to_file()
                    text(0,9,2,0,1,"SAVE CONFIG",fv,7)
 
             # MENU 3
@@ -19843,110 +19984,8 @@ while True:
               elif button_row == 9:
                    # SAVE CONFIG
                    text(0,9,3,0,1,"SAVE Config",fv,10)
-                   config[0] = mode
-                   config[1] = speed
-                   config[2] = gain
-                   config[3] = int(brightness)
-                   config[4] = int(contrast)
-                   config[5] = frame
-                   config[6] = int(red)
-                   config[7] = int(blue)
-                   config[8] = ev
-                   config[9] = vlen
-                   config[10] = fps
-                   config[11] = vformat
-                   config[12] = codec
-                   config[13] = tinterval
-                   config[14] = tshots
-                   config[15] = extn
-                   config[16] = zx
-                   config[17] = zy
-                   config[18] = zoom
-                   config[19] = int(saturation)
-                   config[20] = meter
-                   config[21] = awb
-                   config[22] = sharpness
-                   config[23] = int(denoise)
-                   config[24] = quality
-                   config[25] = profile
-                   config[26] = level
-                   config[27] = histogram
-                   config[28] = histarea
-                   config[29] = v3_f_speed
-                   config[30] = v3_f_range
-                   config[31] = rotate
-                   config[32] = IRF
-                   config[33] = str_cap
-                   config[34] = v3_hdr
-                   config[35] = raw_format  # Remplace timet (fixé à 100ms)
-                   config[36] = vflip
-                   config[37] = hflip
-                   config[38] = stretch_p_low
-                   config[39] = stretch_p_high
-                   config[40] = stretch_factor
-                   config[41] = stretch_preset
-                   config[42] = ghs_D
-                   config[43] = ghs_b
-                   config[44] = ghs_SP
-                   config[45] = ghs_LP
-                   config[46] = ghs_HP
-                   config[47] = ghs_preset
-                   config[48] = ls_preview_refresh
-                   config[49] = ls_alignment_mode
-                   config[50] = ls_enable_qc
-                   config[51] = ls_max_fwhm
-                   config[52] = ls_min_sharpness
-                   config[53] = ls_max_drift
-                   config[54] = ls_min_stars
-                   config[55] = ls_stack_method
-                   config[56] = ls_stack_kappa
-                   config[57] = ls_stack_iterations
-                   config[58] = ls_planetary_enable
-                   config[59] = ls_planetary_mode
-                   config[60] = ls_planetary_disk_min
-                   config[61] = ls_planetary_disk_max
-                   config[62] = ls_planetary_threshold
-                   config[63] = ls_planetary_margin
-                   config[64] = ls_planetary_ellipse
-                   config[65] = ls_planetary_window
-                   config[66] = ls_planetary_upsample
-                   config[67] = ls_planetary_highpass
-                   config[68] = ls_planetary_roi_center
-                   config[69] = ls_planetary_corr
-                   config[70] = ls_planetary_max_shift
-                   config[71] = ls_lucky_buffer
-                   config[72] = ls_lucky_keep
-                   config[73] = ls_lucky_score
-                   config[74] = ls_lucky_stack
-                   config[75] = ls_lucky_align
-                   config[76] = ls_lucky_roi
-                   config[77] = use_native_sensor_mode
-                   config[78] = focus_method
-                   config[79] = star_metric
-                   config[80] = snr_display
-                   config[81] = metrics_interval
-                   config[82] = ls_lucky_save_progress
-                   config[83] = isp_enable
-                   config[84] = allsky_mode
-                   config[85] = allsky_mean_target
-                   config[86] = allsky_mean_threshold
-                   config[87] = allsky_video_fps
-                   config[88] = allsky_max_gain
-                   config[89] = allsky_apply_stretch
-                   config[90] = allsky_cleanup_jpegs
-                   config[97] = allsky_stack_enable
-                   config[98] = allsky_stack_count
-                   config[91] = ls_save_progress
-                   config[92] = ls_save_final
-                   config[93] = ls_lucky_save_final
-                   config[94] = fix_bad_pixels
-                   config[95] = fix_bad_pixels_sigma
-                   config[96] = fix_bad_pixels_min_adu
-                   with open(config_file, 'w') as f:
-                      for item in range(0,len(titles)):
-                          f.write(titles[item] + " : " + str(config[item]) + "\n")
-                   time.sleep(1)
-                   text(0,9,2,0,1,"SAVE CONFIG",fv,10)    
+                   save_config_to_file()
+                   text(0,9,2,0,1,"SAVE CONFIG",fv,10)
                                         
             # MENU 5
             elif menu == 5:   
@@ -20265,109 +20304,7 @@ while True:
               elif button_row == 8:
                    # SAVE CONFIG
                    text(0,8,3,0,1,"SAVE Config",fv,11)
-                   config[0] = mode
-                   config[1] = speed
-                   config[2] = gain
-                   config[3] = int(brightness)
-                   config[4] = int(contrast)
-                   config[5] = frame
-                   config[6] = int(red)
-                   config[7] = int(blue)
-                   config[8] = ev
-                   config[9] = vlen
-                   config[10] = fps
-                   config[11] = vformat
-                   config[12] = codec
-                   config[13] = tinterval
-                   config[14] = tshots
-                   config[15] = extn
-                   config[16] = zx
-                   config[17] = zy
-                   config[18] = zoom
-                   config[19] = int(saturation)
-                   config[20] = meter
-                   config[21] = awb
-                   config[22] = sharpness
-                   config[23] = int(denoise)
-                   config[24] = quality
-                   config[25] = profile
-                   config[26] = level
-                   config[27] = histogram
-                   config[28] = histarea
-                   config[29] = v3_f_speed
-                   config[30] = v3_f_range
-                   config[31] = rotate
-                   config[32] = IRF
-                   config[33] = str_cap
-                   config[34] = v3_hdr
-                   config[35] = raw_format  # Remplace timet (fixé à 100ms)
-                   config[36] = vflip
-                   config[37] = hflip
-                   config[38] = stretch_p_low
-                   config[39] = stretch_p_high
-                   config[40] = stretch_factor
-                   config[41] = stretch_preset
-                   config[42] = ghs_D
-                   config[43] = ghs_b
-                   config[44] = ghs_SP
-                   config[45] = ghs_LP
-                   config[46] = ghs_HP
-                   config[47] = ghs_preset
-                   config[48] = ls_preview_refresh
-                   config[49] = ls_alignment_mode
-                   config[50] = ls_enable_qc
-                   config[51] = ls_max_fwhm
-                   config[52] = ls_min_sharpness
-                   config[53] = ls_max_drift
-                   config[54] = ls_min_stars
-                   config[55] = ls_stack_method
-                   config[56] = ls_stack_kappa
-                   config[57] = ls_stack_iterations
-                   config[58] = ls_planetary_enable
-                   config[59] = ls_planetary_mode
-                   config[60] = ls_planetary_disk_min
-                   config[61] = ls_planetary_disk_max
-                   config[62] = ls_planetary_threshold
-                   config[63] = ls_planetary_margin
-                   config[64] = ls_planetary_ellipse
-                   config[65] = ls_planetary_window
-                   config[66] = ls_planetary_upsample
-                   config[67] = ls_planetary_highpass
-                   config[68] = ls_planetary_roi_center
-                   config[69] = ls_planetary_corr
-                   config[70] = ls_planetary_max_shift
-                   config[71] = ls_lucky_buffer
-                   config[72] = ls_lucky_keep
-                   config[73] = ls_lucky_score
-                   config[74] = ls_lucky_stack
-                   config[75] = ls_lucky_align
-                   config[76] = ls_lucky_roi
-                   config[77] = use_native_sensor_mode
-                   config[78] = focus_method
-                   config[79] = star_metric
-                   config[80] = snr_display
-                   config[81] = metrics_interval
-                   config[82] = ls_lucky_save_progress
-                   config[83] = isp_enable
-                   config[84] = allsky_mode
-                   config[85] = allsky_mean_target
-                   config[86] = allsky_mean_threshold
-                   config[87] = allsky_video_fps
-                   config[88] = allsky_max_gain
-                   config[89] = allsky_apply_stretch
-                   config[90] = allsky_cleanup_jpegs
-                   config[97] = allsky_stack_enable
-                   config[98] = allsky_stack_count
-                   config[91] = ls_save_progress
-                   config[92] = ls_save_final
-                   config[93] = ls_lucky_save_final
-                   config[94] = fix_bad_pixels
-                   config[95] = fix_bad_pixels_sigma
-                   config[96] = fix_bad_pixels_min_adu
-                   with open(config_file, 'w') as f:
-                      for item in range(0,len(titles)):
-                          f.write(titles[item] + " : " + str(config[item]) + "\n")
-                   time.sleep(1)
+                   save_config_to_file()
                    text(0,8,2,0,1,"SAVE CONFIG",fv,11)
 
             # MENU 6 - TIMELAPSE (Multi-pages)
@@ -20384,111 +20321,7 @@ while True:
                   elif current_page == 2:
                       # Page 2 -> Save Config (button_row 9 on page 2 is SAVE CONFIG)
                       text(0,9,3,0,1,"SAVE Config",fv,10)
-                      config[0] = mode
-                      config[1] = speed
-                      config[2] = gain
-                      config[3] = int(brightness)
-                      config[4] = int(contrast)
-                      config[5] = frame
-                      config[6] = int(red)
-                      config[7] = int(blue)
-                      config[8] = ev
-                      config[9] = vlen
-                      config[10] = fps
-                      config[11] = vformat
-                      config[12] = codec
-                      config[13] = tinterval
-                      config[14] = tshots
-                      config[15] = extn
-                      config[16] = zx
-                      config[17] = zy
-                      config[18] = zoom
-                      config[19] = int(saturation)
-                      config[20] = meter
-                      config[21] = awb
-                      config[22] = sharpness
-                      config[23] = int(denoise)
-                      config[24] = quality
-                      config[25] = profile
-                      config[26] = level
-                      config[27] = histogram
-                      config[28] = histarea
-                      config[29] = v3_f_speed
-                      config[30] = v3_f_range
-                      config[31] = rotate
-                      config[32] = IRF
-                      config[33] = str_cap
-                      config[34] = v3_hdr
-                      config[35] = raw_format
-                      config[36] = vflip
-                      config[37] = hflip
-                      config[38] = stretch_p_low
-                      config[39] = stretch_p_high
-                      config[40] = stretch_factor
-                      config[41] = stretch_preset
-                      config[42] = ghs_D
-                      config[43] = ghs_b
-                      config[44] = ghs_SP
-                      config[45] = ghs_LP
-                      config[46] = ghs_HP
-                      config[47] = ghs_preset
-                      config[48] = ls_preview_refresh
-                      config[49] = ls_alignment_mode
-                      config[50] = ls_enable_qc
-                      config[51] = ls_max_fwhm
-                      config[52] = ls_min_sharpness
-                      config[53] = ls_max_drift
-                      config[54] = ls_min_stars
-                      config[55] = ls_stack_method
-                      config[56] = ls_stack_kappa
-                      config[57] = ls_stack_iterations
-                      config[58] = ls_planetary_enable
-                      config[59] = ls_planetary_mode
-                      config[60] = ls_planetary_disk_min
-                      config[61] = ls_planetary_disk_max
-                      config[62] = ls_planetary_threshold
-                      config[63] = ls_planetary_margin
-                      config[64] = ls_planetary_ellipse
-                      config[65] = ls_planetary_window
-                      config[66] = ls_planetary_upsample
-                      config[67] = ls_planetary_highpass
-                      config[68] = ls_planetary_roi_center
-                      config[69] = ls_planetary_corr
-                      config[70] = ls_planetary_max_shift
-                      config[71] = ls_lucky_buffer
-                      config[72] = ls_lucky_keep
-                      config[73] = ls_lucky_score
-                      config[74] = ls_lucky_stack
-                      config[75] = ls_lucky_align
-                      config[76] = ls_lucky_roi
-                      config[77] = use_native_sensor_mode
-                      config[78] = focus_method
-                      config[79] = star_metric
-                      config[80] = snr_display
-                      config[81] = metrics_interval
-                      config[82] = ls_lucky_save_progress
-                      config[83] = isp_enable
-                      # Add allsky parameters
-                      config[84] = allsky_mode
-                      config[85] = allsky_mean_target
-                      config[86] = allsky_mean_threshold
-                      config[87] = allsky_video_fps
-                      config[88] = allsky_max_gain
-                      config[89] = allsky_apply_stretch
-                      config[90] = allsky_cleanup_jpegs
-                      config[97] = allsky_stack_enable
-                      config[98] = allsky_stack_count
-                      config[91] = ls_save_progress
-                      config[92] = ls_save_final
-                      config[93] = ls_lucky_save_final
-                      config[94] = fix_bad_pixels
-                      config[95] = fix_bad_pixels_sigma
-                      config[96] = fix_bad_pixels_min_adu
-
-                      with open(config_file, 'w') as f:
-                         for item in range(0,len(titles)):
-                             f.write(titles[item] + " : " + str(config[item]) + "\n")
-                      time.sleep(1)
+                      save_config_to_file()
                       text(0,9,2,0,1,"SAVE CONFIG",fv,10)
 
               # ========== PAGE 1 HANDLERS ==========
@@ -20691,110 +20524,7 @@ while True:
                   elif button_row == 8:
                       # SAVE CONFIG (Page 1)
                       text(0,8,3,0,1,"SAVE Config",fv,12)
-                      config[0] = mode
-                      config[1] = speed
-                      config[2] = gain
-                      config[3] = int(brightness)
-                      config[4] = int(contrast)
-                      config[5] = frame
-                      config[6] = int(red)
-                      config[7] = int(blue)
-                      config[8] = ev
-                      config[9] = vlen
-                      config[10] = fps
-                      config[11] = vformat
-                      config[12] = codec
-                      config[13] = tinterval
-                      config[14] = tshots
-                      config[15] = extn
-                      config[16] = zx
-                      config[17] = zy
-                      config[18] = zoom
-                      config[19] = int(saturation)
-                      config[20] = meter
-                      config[21] = awb
-                      config[22] = sharpness
-                      config[23] = int(denoise)
-                      config[24] = quality
-                      config[25] = profile
-                      config[26] = level
-                      config[27] = histogram
-                      config[28] = histarea
-                      config[29] = v3_f_speed
-                      config[30] = v3_f_range
-                      config[31] = rotate
-                      config[32] = IRF
-                      config[33] = str_cap
-                      config[34] = v3_hdr
-                      config[35] = raw_format
-                      config[36] = vflip
-                      config[37] = hflip
-                      config[38] = stretch_p_low
-                      config[39] = stretch_p_high
-                      config[40] = stretch_factor
-                      config[41] = stretch_preset
-                      config[42] = ghs_D
-                      config[43] = ghs_b
-                      config[44] = ghs_SP
-                      config[45] = ghs_LP
-                      config[46] = ghs_HP
-                      config[47] = ghs_preset
-                      config[48] = ls_preview_refresh
-                      config[49] = ls_alignment_mode
-                      config[50] = ls_enable_qc
-                      config[51] = ls_max_fwhm
-                      config[52] = ls_min_sharpness
-                      config[53] = ls_max_drift
-                      config[54] = ls_min_stars
-                      config[55] = ls_stack_method
-                      config[56] = ls_stack_kappa
-                      config[57] = ls_stack_iterations
-                      config[58] = ls_planetary_enable
-                      config[59] = ls_planetary_mode
-                      config[60] = ls_planetary_disk_min
-                      config[61] = ls_planetary_disk_max
-                      config[62] = ls_planetary_threshold
-                      config[63] = ls_planetary_margin
-                      config[64] = ls_planetary_ellipse
-                      config[65] = ls_planetary_window
-                      config[66] = ls_planetary_upsample
-                      config[67] = ls_planetary_highpass
-                      config[68] = ls_planetary_roi_center
-                      config[69] = ls_planetary_corr
-                      config[70] = ls_planetary_max_shift
-                      config[71] = ls_lucky_buffer
-                      config[72] = ls_lucky_keep
-                      config[73] = ls_lucky_score
-                      config[74] = ls_lucky_stack
-                      config[75] = ls_lucky_align
-                      config[76] = ls_lucky_roi
-                      config[77] = use_native_sensor_mode
-                      config[78] = focus_method
-                      config[79] = star_metric
-                      config[80] = snr_display
-                      config[81] = metrics_interval
-                      config[82] = ls_lucky_save_progress
-                      config[83] = isp_enable
-                      # Add allsky parameters
-                      config[84] = allsky_mode
-                      config[85] = allsky_mean_target
-                      config[86] = allsky_mean_threshold
-                      config[87] = allsky_video_fps
-                      config[88] = allsky_max_gain
-                      config[89] = allsky_apply_stretch
-                      config[90] = allsky_cleanup_jpegs
-                      config[97] = allsky_stack_enable
-                      config[98] = allsky_stack_count
-                      config[91] = ls_save_progress
-                      config[92] = ls_save_final
-                      config[93] = ls_lucky_save_final
-                      config[94] = fix_bad_pixels
-                      config[95] = fix_bad_pixels_sigma
-                      config[96] = fix_bad_pixels_min_adu
-                      with open(config_file, 'w') as f:
-                          for item in range(0,len(titles)):
-                              f.write(titles[item] + " : " + str(config[item]) + "\n")
-                      time.sleep(1)
+                      save_config_to_file()
                       text(0,8,2,0,1,"SAVE CONFIG",fv,12)
 
               # ========== PAGE 2 HANDLERS (ALLSKY) ==========
@@ -21280,109 +21010,7 @@ while True:
               elif button_row == 8:
                    # SAVE CONFIG
                    text(0,8,3,0,1,"SAVE Config",fv,7)
-                   config[0] = mode
-                   config[1] = speed
-                   config[2] = gain
-                   config[3] = int(brightness)
-                   config[4] = int(contrast)
-                   config[5] = frame
-                   config[6] = int(red)
-                   config[7] = int(blue)
-                   config[8] = ev
-                   config[9] = vlen
-                   config[10] = fps
-                   config[11] = vformat
-                   config[12] = codec
-                   config[13] = tinterval
-                   config[14] = tshots
-                   config[15] = extn
-                   config[16] = zx
-                   config[17] = zy
-                   config[18] = zoom
-                   config[19] = int(saturation)
-                   config[20] = meter
-                   config[21] = awb
-                   config[22] = sharpness
-                   config[23] = int(denoise)
-                   config[24] = quality
-                   config[25] = profile
-                   config[26] = level
-                   config[27] = histogram
-                   config[28] = histarea
-                   config[29] = v3_f_speed
-                   config[30] = v3_f_range
-                   config[31] = rotate
-                   config[32] = IRF
-                   config[33] = str_cap
-                   config[34] = v3_hdr
-                   config[35] = raw_format  # Remplace timet (fixé à 100ms)
-                   config[36] = vflip
-                   config[37] = hflip
-                   config[38] = stretch_p_low
-                   config[39] = stretch_p_high
-                   config[40] = stretch_factor
-                   config[41] = stretch_preset
-                   config[42] = ghs_D
-                   config[43] = ghs_b
-                   config[44] = ghs_SP
-                   config[45] = ghs_LP
-                   config[46] = ghs_HP
-                   config[47] = ghs_preset
-                   config[48] = ls_preview_refresh
-                   config[49] = ls_alignment_mode
-                   config[50] = ls_enable_qc
-                   config[51] = ls_max_fwhm
-                   config[52] = ls_min_sharpness
-                   config[53] = ls_max_drift
-                   config[54] = ls_min_stars
-                   config[55] = ls_stack_method
-                   config[56] = ls_stack_kappa
-                   config[57] = ls_stack_iterations
-                   config[58] = ls_planetary_enable
-                   config[59] = ls_planetary_mode
-                   config[60] = ls_planetary_disk_min
-                   config[61] = ls_planetary_disk_max
-                   config[62] = ls_planetary_threshold
-                   config[63] = ls_planetary_margin
-                   config[64] = ls_planetary_ellipse
-                   config[65] = ls_planetary_window
-                   config[66] = ls_planetary_upsample
-                   config[67] = ls_planetary_highpass
-                   config[68] = ls_planetary_roi_center
-                   config[69] = ls_planetary_corr
-                   config[70] = ls_planetary_max_shift
-                   config[71] = ls_lucky_buffer
-                   config[72] = ls_lucky_keep
-                   config[73] = ls_lucky_score
-                   config[74] = ls_lucky_stack
-                   config[75] = ls_lucky_align
-                   config[76] = ls_lucky_roi
-                   config[77] = use_native_sensor_mode
-                   config[78] = focus_method
-                   config[79] = star_metric
-                   config[80] = snr_display
-                   config[81] = metrics_interval
-                   config[82] = ls_lucky_save_progress
-                   config[83] = isp_enable
-                   config[84] = allsky_mode
-                   config[85] = allsky_mean_target
-                   config[86] = allsky_mean_threshold
-                   config[87] = allsky_video_fps
-                   config[88] = allsky_max_gain
-                   config[89] = allsky_apply_stretch
-                   config[90] = allsky_cleanup_jpegs
-                   config[97] = allsky_stack_enable
-                   config[98] = allsky_stack_count
-                   config[91] = ls_save_progress
-                   config[92] = ls_save_final
-                   config[93] = ls_lucky_save_final
-                   config[94] = fix_bad_pixels
-                   config[95] = fix_bad_pixels_sigma
-                   config[96] = fix_bad_pixels_min_adu
-                   with open(config_file, 'w') as f:
-                      for item in range(0,len(titles)):
-                          f.write(titles[item] + " : " + str(config[item]) + "\n")
-                   time.sleep(1)
+                   save_config_to_file()
                    text(0,8,2,0,1,"SAVE CONFIG",fv,7)
 
             elif menu == 8:
@@ -21540,109 +21168,7 @@ while True:
 
                   elif button_row == 8:
                       # SAVE CONFIG (Page 2 du menu 8)
-                      config[0] = mode
-                      config[1] = speed
-                      config[2] = gain
-                      config[3] = brightness
-                      config[4] = contrast
-                      config[5] = frame
-                      config[6] = red
-                      config[7] = blue
-                      config[8] = ev
-                      config[9] = vlen
-                      config[10] = fps
-                      config[11] = vformat
-                      config[12] = codec
-                      config[13] = tinterval
-                      config[14] = tshots
-                      config[15] = extn
-                      config[16] = zx
-                      config[17] = zy
-                      config[18] = zoom
-                      config[19] = saturation
-                      config[20] = meter
-                      config[21] = awb
-                      config[22] = sharpness
-                      config[23] = denoise
-                      config[24] = quality
-                      config[25] = profile
-                      config[26] = level
-                      config[27] = histogram
-                      config[28] = histarea
-                      config[29] = v3_f_speed
-                      config[30] = v3_f_range
-                      config[31] = rotate
-                      config[32] = IRF
-                      config[33] = str_cap
-                      config[34] = v3_hdr
-                      config[35] = raw_format  # Remplace timet (fixé à 100ms)
-                      config[36] = vflip
-                      config[37] = hflip
-                      config[38] = stretch_p_low
-                      config[39] = stretch_p_high
-                      config[40] = stretch_factor
-                      config[41] = stretch_preset
-                      config[42] = ghs_D
-                      config[43] = ghs_b
-                      config[44] = ghs_SP
-                      config[45] = ghs_LP
-                      config[46] = ghs_HP
-                      config[47] = ghs_preset
-                      config[48] = ls_preview_refresh
-                      config[49] = ls_alignment_mode
-                      config[50] = ls_enable_qc
-                      config[51] = ls_max_fwhm
-                      config[52] = ls_min_sharpness
-                      config[53] = ls_max_drift
-                      config[54] = ls_min_stars
-                      config[55] = ls_stack_method
-                      config[56] = ls_stack_kappa
-                      config[57] = ls_stack_iterations
-                      config[58] = ls_planetary_enable
-                      config[59] = ls_planetary_mode
-                      config[60] = ls_planetary_disk_min
-                      config[61] = ls_planetary_disk_max
-                      config[62] = ls_planetary_threshold
-                      config[63] = ls_planetary_margin
-                      config[64] = ls_planetary_ellipse
-                      config[65] = ls_planetary_window
-                      config[66] = ls_planetary_upsample
-                      config[67] = ls_planetary_highpass
-                      config[68] = ls_planetary_roi_center
-                      config[69] = ls_planetary_corr
-                      config[70] = ls_planetary_max_shift
-                      config[71] = ls_lucky_buffer
-                      config[72] = ls_lucky_keep
-                      config[73] = ls_lucky_score
-                      config[74] = ls_lucky_stack
-                      config[75] = ls_lucky_align
-                      config[76] = ls_lucky_roi
-                      config[77] = use_native_sensor_mode
-                      config[78] = focus_method
-                      config[79] = star_metric
-                      config[80] = snr_display
-                      config[81] = metrics_interval
-                      config[82] = ls_lucky_save_progress
-                      config[83] = isp_enable
-                      config[84] = allsky_mode
-                      config[85] = allsky_mean_target
-                      config[86] = allsky_mean_threshold
-                      config[87] = allsky_video_fps
-                      config[88] = allsky_max_gain
-                      config[89] = allsky_apply_stretch
-                      config[90] = allsky_cleanup_jpegs
-                      config[97] = allsky_stack_enable
-                      config[98] = allsky_stack_count
-                      config[91] = ls_save_progress
-                      config[92] = ls_save_final
-                      config[93] = ls_lucky_save_final
-                      config[94] = fix_bad_pixels
-                      config[95] = fix_bad_pixels_sigma
-                      config[96] = fix_bad_pixels_min_adu
-                      with open(config_file, 'w') as f:
-                          for item in range(0,len(titles)):
-                              f.write(titles[item] + " : " + str(config[item]) + "\n")
-                      time.sleep(1)
+                      save_config_to_file()
                       text(0,8,2,0,1,"SAVE CONFIG",fv,7)
 
               # Page 1 : Gestion des paramètres originaux
@@ -21814,109 +21340,7 @@ while True:
               elif current_page == 2 and button_row == 8:
                    # PAGE 2 : SAVE CONFIG
                    text(0,8,3,0,1,"SAVE Config",fv,7)
-                   config[0] = mode
-                   config[1] = speed
-                   config[2] = gain
-                   config[3] = int(brightness)
-                   config[4] = int(contrast)
-                   config[5] = frame
-                   config[6] = int(red)
-                   config[7] = int(blue)
-                   config[8] = ev
-                   config[9] = vlen
-                   config[10] = fps
-                   config[11] = vformat
-                   config[12] = codec
-                   config[13] = tinterval
-                   config[14] = tshots
-                   config[15] = extn
-                   config[16] = zx
-                   config[17] = zy
-                   config[18] = zoom
-                   config[19] = saturation
-                   config[20] = meter
-                   config[21] = awb
-                   config[22] = sharpness
-                   config[23] = denoise
-                   config[24] = quality
-                   config[25] = profile
-                   config[26] = level
-                   config[27] = histogram
-                   config[28] = histarea
-                   config[29] = v3_f_speed
-                   config[30] = v3_f_range
-                   config[31] = rotate
-                   config[32] = IRF
-                   config[33] = str_cap
-                   config[34] = v3_hdr
-                   config[35] = raw_format  # Remplace timet (fixé à 100ms)
-                   config[36] = vflip
-                   config[37] = hflip
-                   config[38] = stretch_p_low
-                   config[39] = stretch_p_high
-                   config[40] = stretch_factor
-                   config[41] = stretch_preset
-                   config[42] = ghs_D
-                   config[43] = ghs_b
-                   config[44] = ghs_SP
-                   config[45] = ghs_LP
-                   config[46] = ghs_HP
-                   config[47] = ghs_preset
-                   config[48] = ls_preview_refresh
-                   config[49] = ls_alignment_mode
-                   config[50] = ls_enable_qc
-                   config[51] = ls_max_fwhm
-                   config[52] = ls_min_sharpness
-                   config[53] = ls_max_drift
-                   config[54] = ls_min_stars
-                   config[55] = ls_stack_method
-                   config[56] = ls_stack_kappa
-                   config[57] = ls_stack_iterations
-                   config[58] = ls_planetary_enable
-                   config[59] = ls_planetary_mode
-                   config[60] = ls_planetary_disk_min
-                   config[61] = ls_planetary_disk_max
-                   config[62] = ls_planetary_threshold
-                   config[63] = ls_planetary_margin
-                   config[64] = ls_planetary_ellipse
-                   config[65] = ls_planetary_window
-                   config[66] = ls_planetary_upsample
-                   config[67] = ls_planetary_highpass
-                   config[68] = ls_planetary_roi_center
-                   config[69] = ls_planetary_corr
-                   config[70] = ls_planetary_max_shift
-                   config[71] = ls_lucky_buffer
-                   config[72] = ls_lucky_keep
-                   config[73] = ls_lucky_score
-                   config[74] = ls_lucky_stack
-                   config[75] = ls_lucky_align
-                   config[76] = ls_lucky_roi
-                   config[77] = use_native_sensor_mode
-                   config[78] = focus_method
-                   config[79] = star_metric
-                   config[80] = snr_display
-                   config[81] = metrics_interval
-                   config[82] = ls_lucky_save_progress
-                   config[83] = isp_enable
-                   config[84] = allsky_mode
-                   config[85] = allsky_mean_target
-                   config[86] = allsky_mean_threshold
-                   config[87] = allsky_video_fps
-                   config[88] = allsky_max_gain
-                   config[89] = allsky_apply_stretch
-                   config[90] = allsky_cleanup_jpegs
-                   config[97] = allsky_stack_enable
-                   config[98] = allsky_stack_count
-                   config[91] = ls_save_progress
-                   config[92] = ls_save_final
-                   config[93] = ls_lucky_save_final
-                   config[94] = fix_bad_pixels
-                   config[95] = fix_bad_pixels_sigma
-                   config[96] = fix_bad_pixels_min_adu
-                   with open(config_file, 'w') as f:
-                       for item in range(0,len(titles)):
-                           f.write(titles[item] + " : " + str(config[item]) + "\n")
-                   time.sleep(1)
+                   save_config_to_file()
                    text(0,8,2,0,1,"SAVE CONFIG",fv,7)
 
               elif current_page == 1 and button_row == 8:
@@ -22006,109 +21430,7 @@ while True:
               elif button_row == 8:
                 # SAVE CONFIG
                 text(0,8,3,0,1,"SAVE Config",fv,10)
-                config[0] = mode
-                config[1] = speed
-                config[2] = gain
-                config[3] = int(brightness)
-                config[4] = int(contrast)
-                config[5] = frame
-                config[6] = int(red)
-                config[7] = int(blue)
-                config[8] = ev
-                config[9] = vlen
-                config[10] = fps
-                config[11] = vformat
-                config[12] = codec
-                config[13] = tinterval
-                config[14] = tshots
-                config[15] = extn
-                config[16] = zx
-                config[17] = zy
-                config[18] = zoom
-                config[19] = int(saturation)
-                config[20] = meter
-                config[21] = awb
-                config[22] = sharpness
-                config[23] = int(denoise)
-                config[24] = quality
-                config[25] = profile
-                config[26] = level
-                config[27] = histogram
-                config[28] = histarea
-                config[29] = v3_f_speed
-                config[30] = v3_f_range
-                config[31] = rotate
-                config[32] = IRF
-                config[33] = str_cap
-                config[34] = v3_hdr
-                config[35] = raw_format  # Remplace timet (fixé à 100ms)
-                config[36] = vflip
-                config[37] = hflip
-                config[38] = stretch_p_low
-                config[39] = stretch_p_high
-                config[40] = stretch_factor
-                config[41] = stretch_preset
-                config[42] = ghs_D
-                config[43] = ghs_b
-                config[44] = ghs_SP
-                config[45] = ghs_LP
-                config[46] = ghs_HP
-                config[47] = ghs_preset
-                config[48] = ls_preview_refresh
-                config[49] = ls_alignment_mode
-                config[50] = ls_enable_qc
-                config[51] = ls_max_fwhm
-                config[52] = ls_min_sharpness
-                config[53] = ls_max_drift
-                config[54] = ls_min_stars
-                config[55] = ls_stack_method
-                config[56] = ls_stack_kappa
-                config[57] = ls_stack_iterations
-                config[58] = ls_planetary_enable
-                config[59] = ls_planetary_mode
-                config[60] = ls_planetary_disk_min
-                config[61] = ls_planetary_disk_max
-                config[62] = ls_planetary_threshold
-                config[63] = ls_planetary_margin
-                config[64] = ls_planetary_ellipse
-                config[65] = ls_planetary_window
-                config[66] = ls_planetary_upsample
-                config[67] = ls_planetary_highpass
-                config[68] = ls_planetary_roi_center
-                config[69] = ls_planetary_corr
-                config[70] = ls_planetary_max_shift
-                config[71] = ls_lucky_buffer
-                config[72] = ls_lucky_keep
-                config[73] = ls_lucky_score
-                config[74] = ls_lucky_stack
-                config[75] = ls_lucky_align
-                config[76] = ls_lucky_roi
-                config[77] = use_native_sensor_mode
-                config[78] = focus_method
-                config[79] = star_metric
-                config[80] = snr_display
-                config[81] = metrics_interval
-                config[82] = ls_lucky_save_progress
-                config[83] = isp_enable
-                config[84] = allsky_mode
-                config[85] = allsky_mean_target
-                config[86] = allsky_mean_threshold
-                config[87] = allsky_video_fps
-                config[88] = allsky_max_gain
-                config[89] = allsky_apply_stretch
-                config[90] = allsky_cleanup_jpegs
-                config[97] = allsky_stack_enable
-                config[98] = allsky_stack_count
-                config[91] = ls_save_progress
-                config[92] = ls_save_final
-                config[93] = ls_lucky_save_final
-                config[94] = fix_bad_pixels
-                config[95] = fix_bad_pixels_sigma
-                config[96] = fix_bad_pixels_min_adu
-                with open(config_file, 'w') as f:
-                    for item in range(0,len(titles)):
-                        f.write(titles[item] + " : " + str(config[item]) + "\n")
-                time.sleep(1)
+                save_config_to_file()
                 text(0,8,2,0,1,"SAVE CONFIG",fv,10)
 
               elif button_row == 9:
@@ -22266,109 +21588,7 @@ while True:
               elif button_row == 8:
                    # SAVE CONFIG (même code que menu 8)
                    text(0,8,3,0,1,"SAVE Config",fv,7)
-                   config[0] = mode
-                   config[1] = speed
-                   config[2] = gain
-                   config[3] = int(brightness)
-                   config[4] = int(contrast)
-                   config[5] = frame
-                   config[6] = int(red)
-                   config[7] = int(blue)
-                   config[8] = ev
-                   config[9] = vlen
-                   config[10] = fps
-                   config[11] = vformat
-                   config[12] = codec
-                   config[13] = tinterval
-                   config[14] = tshots
-                   config[15] = extn
-                   config[16] = zx
-                   config[17] = zy
-                   config[18] = zoom
-                   config[19] = saturation
-                   config[20] = meter
-                   config[21] = awb
-                   config[22] = sharpness
-                   config[23] = denoise
-                   config[24] = quality
-                   config[25] = profile
-                   config[26] = level
-                   config[27] = histogram
-                   config[28] = histarea
-                   config[29] = v3_f_speed
-                   config[30] = v3_f_range
-                   config[31] = rotate
-                   config[32] = IRF
-                   config[33] = str_cap
-                   config[34] = v3_hdr
-                   config[35] = raw_format  # Remplace timet (fixé à 100ms)
-                   config[36] = vflip
-                   config[37] = hflip
-                   config[38] = stretch_p_low
-                   config[39] = stretch_p_high
-                   config[40] = stretch_factor
-                   config[41] = stretch_preset
-                   config[42] = ghs_D
-                   config[43] = ghs_b
-                   config[44] = ghs_SP
-                   config[45] = ghs_LP
-                   config[46] = ghs_HP
-                   config[47] = ghs_preset
-                   config[48] = ls_preview_refresh
-                   config[49] = ls_alignment_mode
-                   config[50] = ls_enable_qc
-                   config[51] = ls_max_fwhm
-                   config[52] = ls_min_sharpness
-                   config[53] = ls_max_drift
-                   config[54] = ls_min_stars
-                   config[55] = ls_stack_method
-                   config[56] = ls_stack_kappa
-                   config[57] = ls_stack_iterations
-                   config[58] = ls_planetary_enable
-                   config[59] = ls_planetary_mode
-                   config[60] = ls_planetary_disk_min
-                   config[61] = ls_planetary_disk_max
-                   config[62] = ls_planetary_threshold
-                   config[63] = ls_planetary_margin
-                   config[64] = ls_planetary_ellipse
-                   config[65] = ls_planetary_window
-                   config[66] = ls_planetary_upsample
-                   config[67] = ls_planetary_highpass
-                   config[68] = ls_planetary_roi_center
-                   config[69] = ls_planetary_corr
-                   config[70] = ls_planetary_max_shift
-                   config[71] = ls_lucky_buffer
-                   config[72] = ls_lucky_keep
-                   config[73] = ls_lucky_score
-                   config[74] = ls_lucky_stack
-                   config[75] = ls_lucky_align
-                   config[76] = ls_lucky_roi
-                   config[77] = use_native_sensor_mode
-                   config[78] = focus_method
-                   config[79] = star_metric
-                   config[80] = snr_display
-                   config[81] = metrics_interval
-                   config[82] = ls_lucky_save_progress
-                   config[83] = isp_enable
-                   config[84] = allsky_mode
-                   config[85] = allsky_mean_target
-                   config[86] = allsky_mean_threshold
-                   config[87] = allsky_video_fps
-                   config[88] = allsky_max_gain
-                   config[89] = allsky_apply_stretch
-                   config[90] = allsky_cleanup_jpegs
-                   config[97] = allsky_stack_enable
-                   config[98] = allsky_stack_count
-                   config[91] = ls_save_progress
-                   config[92] = ls_save_final
-                   config[93] = ls_lucky_save_final
-                   config[94] = fix_bad_pixels
-                   config[95] = fix_bad_pixels_sigma
-                   config[96] = fix_bad_pixels_min_adu
-                   with open(config_file, 'w') as f:
-                       for item in range(0,len(titles)):
-                           f.write(titles[item] + " : " + str(config[item]) + "\n")
-                   time.sleep(1)
+                   save_config_to_file()
                    text(0,8,2,0,1,"SAVE CONFIG",fv,7)
 
               elif button_row == 9:
