@@ -1407,7 +1407,7 @@ udp_ip_addr = "10.42.0.52"  # IP address of the client for UDP streaming
 
 preview_width  = 880
 preview_height = 580
-fullscreen     = 0   # set to 1 for FULLSCREEN
+fullscreen     = 1   # toujours plein écran (home screen)
 frame          = 0   # set to 0 for NO frame 
 FUP            = 21  # Pi v3 camera Focus UP GPIO button
 FDN            = 16  # Pi v3 camera Focus DN GPIO button
@@ -1527,7 +1527,7 @@ ghs_presets = ['Manual', 'Galaxies', 'Nebulae', 'Initial']
 # JSK LIVE Settings
 jsk_live_mode = 0           # 0=OFF, 1=Active
 jsk_settings_visible = 0    # 0=Masqué, 1=Affiché
-jsk_stack_count = 1         # 1-6 images à empiler (après HDR)
+jsk_stack_count = 1         # 1-10 images à empiler (après HDR)
 jsk_hdr_bits_clip = 2       # 1-3 bits de poids fort à enlever
 jsk_hdr_method = 2          # 0=OFF, 1=Median, 2=Mean, 3=Mertens
 jsk_denoise_type = 0        # 0=OFF, 1=Bilateral, 2=FastNLM, 3=Gaussian, 4=Median
@@ -1549,7 +1549,7 @@ jsk_saved_vheight = 1080
 jsk_saved_zoom = 0
 jsk_saved_use_native = 0
 jsk_gain = 10               # Gain en mode JSK LIVE (1-300)
-jsk_exposure_us = 10000     # Exposition en µs en mode JSK LIVE (1000-1000000 = 1ms-1000ms)
+jsk_exposure_us = 10000     # Exposition en µs en mode JSK LIVE (1000-2000000 = 1ms-2000ms)
 jsk_saved_gain = 0          # Sauvegarde du gain global a l'entree
 jsk_saved_exposure = 0      # Sauvegarde de l'exposition globale a l'entree
 jsk_crop_square = 0         # 0=OFF, 1=crop carré centré (min sensor dim)
@@ -1738,6 +1738,39 @@ _lucky_slider_rects = {}
 _lucky_slider_dragging = False
 _lucky_ge_dragging = None    # 'gain', 'expo', 'zoom' ou None
 
+# === HOME SCREEN NOUVELLE INTERFACE ===
+home_settings_visible = 0    # Panneau réglages affiché (0=masqué, 1=visible)
+home_settings_tab     = 0    # Onglet actif (0=Capture, 1=Image, 2=LiveStack, 3=Lucky, 4=Système)
+home_histogram_visible = 1   # Histogramme superposé affiché
+home_binning          = 0    # Binning actif sur l'écran d'accueil
+_home_slider_rects    = {}   # Rects pour détection clics (gain/expo/zoom + settings)
+_home_btn_rects       = {}   # Rects pour boutons de modes et actions
+_home_last_frame_bgr  = None # Dernière frame BGR pour l'histogramme
+_home_ge_dragging     = None # 'gain', 'expo', 'zoom' ou None (drag sliders haut)
+_home_save_pending    = False # Sauvegarde config différée (debounce)
+_home_save_deadline   = 0     # Timestamp pygame.time.get_ticks() au-delà duquel sauvegarder
+_home_pending_capture = -1    # -1=rien, 0=still, 1=video, 2=timelapse
+_home_passthrough     = False # True = prochain MOUSEBUTTONUP ignore le bloc home
+_home_suppress_oldui  = False # True = button()/text()/Menu() ne dessinent pas (capture home)
+_HOME_GAIN_SCALES     = [100, 200, 300, 400, 500, 600, 700, 800]   # Échelles max du slider Gain
+_HOME_EXPO_SCALES_MS  = [50, 100, 500, 1000, 2000, 3000, 4000, 8000, 12000]  # Échelles max expo (ms)
+home_gain_scale_idx   = 2   # Index dans _HOME_GAIN_SCALES → max=300 par défaut
+home_expo_scale_idx   = 3   # Index dans _HOME_EXPO_SCALES_MS → max=1000ms par défaut
+home_windowed         = 0   # 0=plein écran, 1=fenêtré
+
+# === MODE FOCUS OVERLAY ===
+focus_gain           = 50        # Gain dédié overlay focus (0=AE auto)
+focus_exposure_us    = 50000     # Expo µs dédiée overlay focus (50ms)
+focus_zoom_focus     = 0         # Zoom overlay focus (renommé pour éviter conflit)
+_focus_overlay_rects = {}        # Rects overlay (boutons + sliders)
+_focus_ge_dragging   = None      # Slider en drag : 'focus_gain'/'focus_expo'/'focus_zoom'/'focus_frq'/None
+_focus_cur_foc       = None      # Valeur focus courante (partagée draw loop → overlay)
+_focus_cur_hfr       = None      # Valeur HFR courante
+_focus_cur_fwhm      = None      # Valeur FWHM courante
+_focus_cur_snr       = None      # Valeur SNR courante (None si snr_display==0)
+_focus_last_graph_surf = None    # Cache dernière surface graphique focus (anti-clignotement)
+_focus_last_star_surf  = None    # Cache dernière surface graphique star (anti-clignotement)
+
 # Enregistrement vidéo de progression Lucky
 lucky_recorder = None        # Instance JSKVideoRecorder
 lucky_last_filtered_array = None  # Dernier résultat filtré (pour bouton SAVE PNG)
@@ -1768,6 +1801,12 @@ ls_sched_gain = 10           # Gain pour le scheduler (sans affecter preview)
 ls_sched_expo_us = 10000000  # Expo pour le scheduler (sans affecter preview)
 ls_sched_frames = 100        # Nombre de frames à stacker pour le scheduler
 ls_sched_frames_done = 0     # Compteur de frames stackées par le scheduler
+
+# === PAVÉ NUMÉRIQUE (overlay de saisie directe) ===
+_numpad_active = 0     # 1 = overlay affiché
+_numpad_target = None  # clé du paramètre édité
+_numpad_input  = ''    # chaîne de saisie en cours
+_numpad_rects  = {}    # rects des boutons du pavé
 ls_save_dng_mode = 0    # 0=non, 1=acceptées seulement, 2=toutes frames
 ls_cam_brightness = 0   # Brightness hardware ISP LS: -100-100 → -1.0 à 1.0 (défaut 0)
 ls_cam_contrast = 100   # Contrast hardware ISP LS: 0-200 → 0.0-2.0 (défaut 1.0)
@@ -2127,7 +2166,7 @@ still_limits = ['mode',0,len(modes)-1,'speed',0,len(shutters)-1,'gain',0,30,'bri
                 'histogram',0,len(histograms)-1,'v3_f_speed',0,len(v3_f_speeds)-1,'v3_hdr',0,len(v3_hdrs)-1,'focus_method',0,4,'star_metric',0,2,'snr_display',0,1,'metrics_interval',1,10]
 video_limits = ['vlen',0,3600,'fps',1,180,'v5_focus',10,2500,'vformat',0,7,'0',0,0,'zoom',0,5,'Focus',0,1,'tduration',1,86400,'tinterval',0.01,10,'tshots',1,999,
                 'flicker',0,3,'codec',0,len(codecs)-1,'ser_format',0,len(ser_formats)-1,'profile',0,len(h264profiles)-1,'v3_focus',10,2000,'histarea',10,300,'v3_f_range',0,len(v3_f_ranges)-1,
-                'str_cap',0,len(strs)-1,'v6_focus',10,1020,'stretch_p_low',0,2,'stretch_p_high',9995,10000,'stretch_factor',0,80,'stretch_preset',0,2,
+                'str_cap',0,len(strs)-1,'v6_focus',10,1020,'stretch_p_low',0,2,'stretch_p_high',9995,10000,'stretch_factor',0,1500,'stretch_preset',0,2,
                 'ghs_D',-10,100,'ghs_b',-300,100,'ghs_SP',0,100,'ghs_LP',0,100,'ghs_HP',0,100,'ghs_preset',0,3,'use_native_sensor_mode',0,1,
                 'raw_format',0,3,'focus_method',0,4,'star_metric',0,2,'snr_display',0,1,'metrics_interval',1,10,
                 'allsky_mode',0,2,'allsky_mean_target',10,60,'allsky_mean_threshold',2,15,'allsky_video_fps',15,60,
@@ -3670,14 +3709,11 @@ if len(sys.argv) > 1:
 
 pygame.init()
 
-if frame == 1:
-    if fullscreen == 1:
-        windowSurfaceObj = pygame.display.set_mode((preview_width + bw,dis_height),pygame.FULLSCREEN, 24)
-    elif fullscreen == 0:
-        windowSurfaceObj = pygame.display.set_mode((preview_width + bw,dis_height),0,24)
-
-else:
-    windowSurfaceObj = pygame.display.set_mode((preview_width + bw,dis_height), pygame.NOFRAME,24)
+# Initialisation plein écran (home screen)
+_screen_info = pygame.display.Info()
+_home_init_w = _screen_info.current_w or 1024
+_home_init_h = _screen_info.current_h or 600
+windowSurfaceObj = pygame.display.set_mode((_home_init_w, _home_init_h), pygame.FULLSCREEN, 24)
 
 Camera_Version()
 
@@ -3699,21 +3735,7 @@ redColor =    pygame.Color(160,  70,  70)  # Rouge brique
 navyColor =   pygame.Color( 20,  40, 100)  # Bleu marine pour Lucky Stack
 
 def button(col,row,bkgnd_Color,border_Color):
-    global preview_width,bw,bh,alt_dis,preview_height,menu
-    colors = [greyColor, dgryColor,yellowColor,purpleColor,greenColor,whiteColor,lgrnColor,lpurColor,lyelColor,blueColor,navyColor]
-    Color = colors[bkgnd_Color]
-    bx = preview_width + (col * bw)
-    by = row * bh
-    # but = pygame.image.load("button.jpg")  # Image des boutons désactivée
-    pygame.draw.rect(windowSurfaceObj,Color,Rect(bx+1,by,bw-2,bh))
-    pygame.draw.line(windowSurfaceObj,whiteColor,(bx,by),(bx,by+bh-1),2)
-    pygame.draw.line(windowSurfaceObj,whiteColor,(bx,by),(bx+bw-1,by),1)
-    pygame.draw.line(windowSurfaceObj,dgryColor,(bx,by+bh-1),(bx+bw-1,by+bh-1),1)
-    pygame.draw.line(windowSurfaceObj,dgryColor,(bx+bw-2,by),(bx+bw-2,by+bh),2)
-    # Images des boutons (Still, Video, Timelapse) désactivées pour un look plus épuré
-    # if menu == 0 and row < 3:
-    #     windowSurfaceObj.blit(but, (preview_width + 2,by + 2))
-    pygame.display.update()
+    pass  # Ancienne interface supprimée — home screen actif
 
 def ms_to_shutter_index(ms_value):
     """
@@ -4217,63 +4239,7 @@ def duration_input_dialog(title, current_seconds, min_seconds, max_seconds):
     return result
 
 def text(col,row,fColor,top,upd,msg,fsize,bkgnd_Color):
-    global bh,preview_width,fv,tduration,menu
-    colors =  [dgryColor, greenColor, yellowColor, redColor, purpleColor, blueColor, whiteColor, greyColor, blackColor, purpleColor,lgrnColor,lpurColor,lyelColor,navyColor]
-    Color  =  colors[fColor]
-    bColor =  colors[bkgnd_Color]
-    bx = preview_width + (col * bw)
-    by = row * bh
-    if menu == 0 and row < 3:
-        by +=10
-    global _font_cache
-    
-    # Utiliser le cache des polices (clé = taille) - optimisation performance
-    cache_key = int(fsize)
-    if cache_key not in _font_cache:
-        # Polices modernes en ordre de préférence
-        modern_fonts = [
-            '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
-            '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
-            '/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf',
-            '/usr/share/fonts/truetype/freefont/FreeSerif.ttf'
-        ]
-        
-        for font_path in modern_fonts:
-            if os.path.exists(font_path):
-                _font_cache[cache_key] = pygame.font.Font(font_path, cache_key)
-                break
-        
-        if cache_key not in _font_cache:
-            _font_cache[cache_key] = pygame.font.Font(None, cache_key)
-    
-    fontObj = _font_cache[cache_key]
-    msgSurfaceObj = fontObj.render(msg, False, Color)
-    msgRectobj = msgSurfaceObj.get_rect()
-    if top == 0:
-        if menu != 0:
-             pygame.draw.rect(windowSurfaceObj,bColor,Rect(bx+1,by+int(bh/3),bw-2,int(bh/3)))
-        msgRectobj.topleft = (bx + 5, by + int(bh/3)-int(preview_width/640))
-    elif msg == "Config":
-        if menu != 0:
-            pygame.draw.rect(windowSurfaceObj,bColor,Rect(bx+1,by+int(bh/1.5),int(bw/2)-1,int(bh/3)-1))
-        msgRectobj.topleft = (bx+5,  by + int(bh/1.5)-1)
-    elif top == 1:
-        if menu != 0 :
-            pygame.draw.rect(windowSurfaceObj,bColor,Rect(bx+20,by+int(bh/1.5)-1,int(bw-20)-1,int(bh/3)))
-        elif timelapse == 1:
-            pygame.draw.rect(windowSurfaceObj,bColor,Rect(bx+20,by+int(bh/1.5)-1,int(bw-101),int(bh/5)))
-        elif video == 1 or stream == 1:
-            pygame.draw.rect(windowSurfaceObj,bColor,Rect(bx+20,by+int(bh/1.5)-1,int(bw-61)-1,int(bh/5)))
-        msgRectobj.topleft = (bx + 20, by + int(bh/1.5)-int(preview_width/640)-1) 
-    elif top == 2:
-        if bkgnd_Color == 1:
-            pygame.draw.rect(windowSurfaceObj,(0,0,0),Rect(0,row * fsize,preview_width,fv*2)) 
-        msgRectobj.topleft = (0,row * fsize)
-    windowSurfaceObj.blit(msgSurfaceObj, msgRectobj)
-    if upd == 1 and top == 2:
-        pygame.display.update(0,0,preview_width,fv*2)
-    if upd == 1:
-        pygame.display.update(bx, by, bw, bh)
+    pass  # Ancienne interface supprimée — home screen actif
 
 def draw_bar(col,row,color,msg,value):
     global bw,bh,preview_width,still_limits,max_speed,v3_mag
@@ -4557,15 +4523,36 @@ def draw_stretch_controls(screen_width, screen_height, image_array=None):
     exp_start_x = screen_width - slider_width - 40
     exp_start_y = 60
 
+    # === Sélecteur de mode preset : OFF | GHS | Arcsinh ===
+    seg_y, seg_h = 18, 28
+    seg_labels = ["OFF", "GHS", "Arcsinh"]
+    seg_colors = [
+        ((50, 50, 60),  (110, 110, 120)),   # OFF  : fond inactif / actif
+        ((25, 65, 35),  ( 55, 170,  80)),   # GHS  : fond inactif / actif
+        ((65, 42, 15),  (190, 120,  50)),   # Arcsinh : fond inactif / actif
+    ]
+    seg_w = slider_width // len(seg_labels)
+    fk18 = 18
+    if fk18 not in _font_cache:
+        _font_cache[fk18] = pygame.font.Font(None, fk18)
+    fontSeg = _font_cache[fk18]
+
+    for i, (label, (col_off, col_on)) in enumerate(zip(seg_labels, seg_colors)):
+        sx = start_x + i * seg_w
+        is_active = (stretch_preset == i)
+        r = pygame.Rect(sx, seg_y, seg_w, seg_h)
+        pygame.draw.rect(windowSurfaceObj, col_on if is_active else col_off, r, border_radius=4)
+        pygame.draw.rect(windowSurfaceObj,
+                         (220, 220, 220) if is_active else (80, 80, 92),
+                         r, 2 if is_active else 1, border_radius=4)
+        tc = (240, 240, 240) if is_active else (150, 150, 155)
+        txt = fontSeg.render(label, True, tc)
+        windowSurfaceObj.blit(txt, txt.get_rect(center=r.center))
+        slider_rects[f'stretch_preset_{i}'] = r
+
+    # Sliders spécifiques au mode actif
     if stretch_preset == 1:
         # Mode GHS
-        title = "GHS Stretch"
-        title_color = (100, 200, 150)
-
-        title_text = fontObj.render(title, True, title_color)
-        windowSurfaceObj.blit(title_text, (start_x, 20))
-
-        # Sliders GHS
         slider_rects['ghs_D'] = draw_stretch_slider(
             start_x, start_y, slider_width, slider_height,
             "D (Stretch)", ghs_D / 10.0, -1.0, 10.0, (100, 180, 140)
@@ -4593,16 +4580,9 @@ def draw_stretch_controls(screen_width, screen_height, image_array=None):
 
     elif stretch_preset == 2:
         # Mode Arcsinh
-        title = "Arcsinh Stretch"
-        title_color = (200, 150, 100)
-
-        title_text = fontObj.render(title, True, title_color)
-        windowSurfaceObj.blit(title_text, (start_x, 20))
-
-        # Sliders Arcsinh
         slider_rects['stretch_factor'] = draw_stretch_slider(
             start_x, start_y, slider_width, slider_height,
-            "Factor", stretch_factor / 10.0, 0.0, 8.0, (200, 160, 100)
+            "Factor", stretch_factor / 10.0, 0.0, 150.0, (200, 160, 100)
         )
 
         slider_rects['stretch_p_low'] = draw_stretch_slider(
@@ -4615,30 +4595,16 @@ def draw_stretch_controls(screen_width, screen_height, image_array=None):
             "Clip High %", stretch_p_high / 100.0, 99.5, 100.0, (100, 180, 140)
         )
     else:
-        # Mode OFF - pas de contrôles de stretch
-        title = "Stretch OFF"
-        title_color = (150, 150, 150)
-        title_text = fontObj.render(title, True, title_color)
-        windowSurfaceObj.blit(title_text, (start_x, 20))
-
-        # Message explicatif
-        cache_key_info = 18
-        if cache_key_info not in _font_cache:
-            _font_cache[cache_key_info] = pygame.font.Font(None, cache_key_info)
-        infoFont = _font_cache[cache_key_info]
-
-        info_lines = [
-            "Le stretch est desactive.",
-            "Pour activer le stretch:",
-            "  - Utilisez le menu principal",
-            "  - Selectionnez GHS ou Arcsinh",
-            "",
-            "Les images stackees seront",
-            "sauvegardees sans stretch."
-        ]
-        for i, line in enumerate(info_lines):
-            info_text = infoFont.render(line, True, (120, 120, 130))
-            windowSurfaceObj.blit(info_text, (start_x, start_y + i * 20))
+        # Mode OFF — message indicatif bref
+        fk16 = 16
+        if fk16 not in _font_cache:
+            _font_cache[fk16] = pygame.font.Font(None, fk16)
+        infoFont = _font_cache[fk16]
+        for j, line in enumerate(["Aucun stretch actif.",
+                                   "Selectionnez GHS ou Arcsinh",
+                                   "avec le selecteur ci-dessus."]):
+            windowSurfaceObj.blit(infoFont.render(line, True, (120, 120, 130)),
+                                  (start_x, start_y + j * 20))
 
     # =========================================================================
     # SECTION EXPOSURE (Gain + Temps d'exposition) - À droite de l'écran pour YUV/RGB
@@ -4709,11 +4675,11 @@ def draw_stretch_histogram(screen_width, screen_height, image_array):
     global stretch_preset, stretch_factor, stretch_p_low, stretch_p_high
     global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
 
-    # Dimensions de l'histogramme
+    # Dimensions de l'histogramme — plein écran (0..screen_width)
     hist_height = 120
     hist_y = screen_height - hist_height - 10
-    hist_width = screen_width - 40
-    hist_x = 20
+    hist_width = screen_width
+    hist_x = 0
 
     # Fond semi-transparent
     s = pygame.Surface((hist_width, hist_height), pygame.SRCALPHA)
@@ -4780,32 +4746,48 @@ def draw_stretch_histogram(screen_width, screen_height, image_array):
         hist_b = normalize_log(hist_b, draw_height)
         hist_l = normalize_log(hist_l, draw_height)
 
-        # OPTIMISATION 4: Utiliser pygame.draw.lines (un seul appel par courbe)
+        # OPTIMISATION 4: Zones remplies semi-transparentes pour R/V/B
         bin_width = hist_width / num_bins
-        base_y = hist_y + hist_height - 10
+        base_y = hist_y + hist_height - 10   # baseline absolue (pour la courbe de transformation)
 
-        # Préparer les listes de points pour chaque canal
-        x_coords = np.linspace(hist_x, hist_x + hist_width, num_bins).astype(int)
+        # Positions X : bords gauches des bins, pas exact = hist_width / num_bins
+        x_coords = (hist_x + np.arange(num_bins) * bin_width).astype(int)
 
-        # Fonction pour créer la liste de points
-        def make_points(hist_data):
-            return [(int(x_coords[i]), int(base_y - hist_data[i])) for i in range(num_bins)]
+        # Surface SRCALPHA pour les zones remplies (alpha natif pygame)
+        hist_surf = pygame.Surface((hist_width, hist_height), pygame.SRCALPHA)
+        hist_surf.fill((0, 0, 0, 0))
+        base_y_s = hist_height - 10   # baseline dans l'espace local de hist_surf
 
-        # Dessiner les courbes avec pygame.draw.lines (beaucoup plus rapide)
-        # Ordre: Luminance en fond, puis R, G, B
-        points_l = make_points(hist_l)
-        points_r = make_points(hist_r)
-        points_g = make_points(hist_g)
-        points_b = make_points(hist_b)
+        def _fill_poly(hist_data, color_rgba):
+            """Zone remplie sous la courbe, coordonnées locales à hist_surf."""
+            pts = [(int(x_coords[i] - hist_x),
+                    max(0, min(base_y_s, base_y_s - int(hist_data[i]))))
+                   for i in range(num_bins)]
+            poly = [(pts[0][0], base_y_s)] + pts + [(pts[-1][0], base_y_s)]
+            if len(poly) >= 3:
+                pygame.draw.polygon(hist_surf, color_rgba, poly)
 
-        if len(points_l) > 1:
-            pygame.draw.lines(windowSurfaceObj, (180, 180, 180), False, points_l, 2)
-        if len(points_r) > 1:
-            pygame.draw.lines(windowSurfaceObj, (255, 80, 80), False, points_r, 2)
-        if len(points_g) > 1:
-            pygame.draw.lines(windowSurfaceObj, (80, 255, 80), False, points_g, 2)
-        if len(points_b) > 1:
-            pygame.draw.lines(windowSurfaceObj, (80, 80, 255), False, points_b, 2)
+        def _draw_line_s(hist_data, color_rgba, lw=1):
+            """Ligne de crête sur hist_surf."""
+            pts = [(int(x_coords[i] - hist_x),
+                    max(0, min(base_y_s - 1, base_y_s - int(hist_data[i]))))
+                   for i in range(num_bins)]
+            if len(pts) > 1:
+                pygame.draw.lines(hist_surf, color_rgba, False, pts, lw)
+
+        # Zones remplies (back → front : luma gris, bleu, vert, rouge)
+        _fill_poly(hist_l, (180, 180, 180,  28))   # luminance : gris très subtil
+        _fill_poly(hist_b, ( 50,  80, 255,  60))   # bleu
+        _fill_poly(hist_g, ( 50, 220,  80,  60))   # vert
+        _fill_poly(hist_r, (255,  60,  50,  60))   # rouge
+
+        # Lignes de crête (légèrement plus opaques pour rester lisibles)
+        _draw_line_s(hist_l, (200, 200, 200,  90), 1)
+        _draw_line_s(hist_b, (110, 130, 255, 210), 1)
+        _draw_line_s(hist_g, ( 90, 255, 110, 210), 1)
+        _draw_line_s(hist_r, (255, 110,  90, 210), 1)
+
+        windowSurfaceObj.blit(hist_surf, (hist_x, hist_y))
 
         # =====================================================================
         # COURBE DE TRANSFORMATION EN VIOLET (GHS ou Arcsinh)
@@ -4933,8 +4915,19 @@ def handle_stretch_slider_click(mousex, mousey, slider_rects):
     global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
     global stretch_factor, stretch_p_low, stretch_p_high
     global gain, ev, still_limits, custom_sspeed
+    global stretch_preset
+
+    # Boutons de sélection du mode preset (clic simple, pas de calcul de ratio)
+    for i in range(3):
+        r = slider_rects.get(f'stretch_preset_{i}')
+        if r and r.collidepoint(mousex, mousey):
+            stretch_preset = i
+            save_config_to_file()
+            return True
 
     for name, rect in slider_rects.items():
+        if name.startswith('stretch_preset_'):
+            continue  # déjà traité ci-dessus
         if rect.collidepoint(mousex, mousey):
             # Calculer la position relative dans le slider
             rel_x = mousex - rect.x - 5
@@ -4958,8 +4951,8 @@ def handle_stretch_slider_click(mousex, mousey, slider_rects):
                 # HP: 0.0 à 1.0, stocké x100
                 ghs_HP = int(ratio * 100)
             elif name == 'stretch_factor':
-                # Factor: 0.0 à 8.0, stocké x10
-                stretch_factor = int(ratio * 80)
+                # Factor: 0.0 à 150.0, stocké x10
+                stretch_factor = int(ratio * 1500)
                 print(f"[ARCSINH] stretch_factor = {stretch_factor} (factor={stretch_factor/10.0})")
             elif name == 'stretch_p_low':
                 # Clip low: 0.0 à 2.0, stocké x10
@@ -5529,9 +5522,22 @@ def draw_ls_controls(screen_width, screen_height):
                 (panel_x + 2, start_y))
             start_y += 15
 
+            _nb_w = 24
+            if 14 not in _font_cache:
+                _font_cache[14] = pygame.font.Font(None, 14)
+            def _ls_nb_btn(key, y):
+                """Dessine bouton [123] à droite du slider et stocke dans control_rects."""
+                _b = pygame.Rect(panel_x + slider_w - _nb_w, y, _nb_w, slider_h)
+                pygame.draw.rect(windowSurfaceObj, (42, 52, 78), _b, border_radius=3)
+                pygame.draw.rect(windowSurfaceObj, (88, 108, 148), _b, 1, border_radius=3)
+                _t = _font_cache[14].render("123", True, (135, 162, 200))
+                windowSurfaceObj.blit(_t, _t.get_rect(center=_b.center))
+                control_rects[key] = _b
+
             control_rects['ls_sched_gain'] = draw_jsk_slider(
-                panel_x, start_y, slider_w, slider_h,
+                panel_x, start_y, slider_w - _nb_w - 2, slider_h,
                 f"Gain: {ls_sched_gain}", ls_sched_gain, 0, 300, (75, 145, 95))
+            _ls_nb_btn('num_ls_sched_gain', start_y)
             start_y += slider_h + margin
 
             import math as _math
@@ -5540,13 +5546,15 @@ def draw_ls_controls(screen_width, screen_height):
             _sexp_c = max(100000, min(ls_sched_expo_us, 60000000))
             _sratio = (_math.log10(_sexp_c) - _math.log10(100000)) / (_math.log10(60000000) - _math.log10(100000))
             control_rects['ls_sched_expo'] = draw_jsk_slider(
-                panel_x, start_y, slider_w, slider_h,
+                panel_x, start_y, slider_w - _nb_w - 2, slider_h,
                 _sexp_text, int(_sratio * 1000), 0, 1000, (55, 120, 80))
+            _ls_nb_btn('num_ls_sched_expo', start_y)
             start_y += slider_h + margin
 
             control_rects['ls_sched_frames'] = draw_jsk_slider(
-                panel_x, start_y, slider_w, slider_h,
+                panel_x, start_y, slider_w - _nb_w - 2, slider_h,
                 f"Nb frames: {ls_sched_frames}", ls_sched_frames, 10, 1000, (75, 145, 95))
+            _ls_nb_btn('num_ls_sched_frames', start_y)
             start_y += slider_h + margin + 4
 
             ck20 = 20
@@ -5662,6 +5670,15 @@ def handle_ls_slider_click(mx, my, control_rects):
                 ls_stack_iterations = max(1, min(10, int(ratio * 9) + 1))
             elif name == 'ls_scheduler_enabled':
                 ls_scheduler_enabled = 1 if ratio > 0.5 else 0
+            elif name == 'num_ls_sched_gain':
+                _open_numpad('ls_sched_gain')
+                return True
+            elif name == 'num_ls_sched_expo':
+                _open_numpad('ls_sched_expo')
+                return True
+            elif name == 'num_ls_sched_frames':
+                _open_numpad('ls_sched_frames')
+                return True
             elif name == 'ls_sched_gain':
                 ls_sched_gain = max(0, min(300, int(ratio * 300)))
             elif name == 'ls_sched_expo':
@@ -5764,6 +5781,185 @@ def draw_ls_interface(screen_width, screen_height):
         _ls_slider_rects = draw_ls_controls(screen_width, screen_height)
     else:
         _ls_slider_rects = {}
+
+    if _numpad_active:
+        draw_numpad_overlay()
+
+
+# ============================================================================
+# PAVÉ NUMÉRIQUE — overlay de saisie directe
+# ============================================================================
+
+def _open_numpad(target):
+    """Ouvre le pavé numérique pour saisir la valeur du paramètre target."""
+    global _numpad_active, _numpad_target, _numpad_input
+    global tinterval, tshots, ls_sched_gain, ls_sched_expo_us, ls_sched_frames
+    _numpad_active = 1
+    _numpad_target = target
+    # Pré-remplir avec la valeur actuelle en unités affichées
+    if target == 'cfg_tinterval':
+        _numpad_input = str(int(tinterval * 1000))    # s → ms
+    elif target == 'cfg_tshots':
+        _numpad_input = str(int(tshots))
+    elif target == 'ls_sched_gain':
+        _numpad_input = str(int(ls_sched_gain))
+    elif target == 'ls_sched_expo':
+        _numpad_input = str(int(ls_sched_expo_us / 1000))  # µs → ms
+    elif target == 'ls_sched_frames':
+        _numpad_input = str(int(ls_sched_frames))
+    else:
+        _numpad_input = ''
+
+
+def draw_numpad_overlay():
+    """Dessine le pavé numérique centré sur l'écran."""
+    global windowSurfaceObj, _numpad_rects, _numpad_target, _numpad_input, _font_cache
+    sw, sh = windowSurfaceObj.get_size()
+    pad_w, pad_h = 244, 330
+    pad_x = (sw - pad_w) // 2
+    pad_y = (sh - pad_h) // 2
+
+    rects = {}
+
+    # Ombre portée
+    shd = pygame.Surface((pad_w + 8, pad_h + 8), pygame.SRCALPHA)
+    shd.fill((0, 0, 0, 130))
+    windowSurfaceObj.blit(shd, (pad_x - 4, pad_y - 4))
+
+    # Fond
+    bg = pygame.Surface((pad_w, pad_h), pygame.SRCALPHA)
+    bg.fill((22, 26, 42, 252))
+    windowSurfaceObj.blit(bg, (pad_x, pad_y))
+    pygame.draw.rect(windowSurfaceObj, (80, 100, 155),
+                     (pad_x, pad_y, pad_w, pad_h), 2, border_radius=6)
+
+    # Polices
+    for _ck in (14, 20, 22, 26):
+        if _ck not in _font_cache:
+            _font_cache[_ck] = pygame.font.Font(None, _ck)
+
+    # Titre du paramètre
+    _LABELS = {
+        'cfg_tinterval':   'TL intervalle (ms)',
+        'cfg_tshots':      'TL nb shots',
+        'ls_sched_gain':   'Gain scheduler',
+        'ls_sched_expo':   'Expo scheduler (ms)',
+        'ls_sched_frames': 'Nb frames scheduler',
+    }
+    _LIMITS = {
+        'cfg_tinterval':   (100,   3600000),
+        'cfg_tshots':      (1,     9999),
+        'ls_sched_gain':   (0,     300),
+        'ls_sched_expo':   (100,   60000),
+        'ls_sched_frames': (10,    1000),
+    }
+    label = _LABELS.get(_numpad_target, _numpad_target or '?')
+    windowSurfaceObj.blit(
+        _font_cache[20].render(label, True, (170, 195, 240)),
+        (pad_x + 8, pad_y + 7))
+
+    lo, hi = _LIMITS.get(_numpad_target, (0, 999999))
+    windowSurfaceObj.blit(
+        _font_cache[14].render(f"min {lo}  –  max {hi}", True, (110, 130, 175)),
+        (pad_x + 8, pad_y + 25))
+
+    # Zone d'affichage de la saisie
+    inp_y = pad_y + 43
+    inp_h = 34
+    pygame.draw.rect(windowSurfaceObj, (28, 34, 58),
+                     (pad_x + 6, inp_y, pad_w - 12, inp_h), border_radius=4)
+    pygame.draw.rect(windowSurfaceObj, (100, 125, 195),
+                     (pad_x + 6, inp_y, pad_w - 12, inp_h), 1, border_radius=4)
+    disp = (_numpad_input if _numpad_input else '0') + '_'
+    windowSurfaceObj.blit(
+        _font_cache[26].render(disp, True, (220, 240, 255)),
+        (pad_x + 10, inp_y + 8))
+
+    # Grille 3 × 4
+    btn_rows = [['7', '8', '9'], ['4', '5', '6'],
+                ['1', '2', '3'], ['00', '0', '⌫']]
+    btn_w = (pad_w - 16) // 3
+    btn_h = 38
+    grid_x = pad_x + 6
+    grid_y = inp_y + inp_h + 10
+
+    for ri, row in enumerate(btn_rows):
+        for ci, key in enumerate(row):
+            bx = grid_x + ci * (btn_w + 2)
+            by = grid_y + ri * (btn_h + 4)
+            r = pygame.Rect(bx, by, btn_w, btn_h)
+            fg = (60, 36, 36) if key == '⌫' else (40, 48, 76)
+            pygame.draw.rect(windowSurfaceObj, fg, r, border_radius=4)
+            pygame.draw.rect(windowSurfaceObj, (85, 95, 132), r, 1, border_radius=4)
+            tc = (220, 130, 130) if key == '⌫' else (225, 230, 245)
+            t = _font_cache[22].render(key, True, tc)
+            windowSurfaceObj.blit(t, t.get_rect(center=r.center))
+            rects[key] = r
+
+    # Boutons OK / ANN
+    action_y = grid_y + 4 * (btn_h + 4) + 4
+    half_w = (pad_w - 18) // 2
+    ok_r  = pygame.Rect(pad_x + 6,              action_y, half_w, 36)
+    ann_r = pygame.Rect(pad_x + 6 + half_w + 6, action_y, half_w, 36)
+    pygame.draw.rect(windowSurfaceObj, (28, 78, 48), ok_r,  border_radius=4)
+    pygame.draw.rect(windowSurfaceObj, (68, 88, 78), ok_r,  1, border_radius=4)
+    pygame.draw.rect(windowSurfaceObj, (68, 36, 36), ann_r, border_radius=4)
+    pygame.draw.rect(windowSurfaceObj, (88, 68, 68), ann_r, 1, border_radius=4)
+    windowSurfaceObj.blit(_font_cache[22].render("OK",  True, (110, 235, 135)),
+                          _font_cache[22].render("OK",  True, (110, 235, 135)).get_rect(center=ok_r.center))
+    windowSurfaceObj.blit(_font_cache[22].render("ANN", True, (235, 115, 115)),
+                          _font_cache[22].render("ANN", True, (235, 115, 115)).get_rect(center=ann_r.center))
+    rects['_ok']  = ok_r
+    rects['_ann'] = ann_r
+    _numpad_rects = rects
+
+
+def handle_numpad_click(mx, my):
+    """Traite un clic sur le pavé numérique. Retourne True si clic consommé."""
+    global _numpad_active, _numpad_target, _numpad_input, _numpad_rects
+    global tinterval, tshots, ls_sched_gain, ls_sched_expo_us, ls_sched_frames
+
+    for key, r in _numpad_rects.items():
+        if not r.collidepoint(mx, my):
+            continue
+        if key.isdigit():
+            if len(_numpad_input) < 7:
+                _numpad_input += key
+        elif key == '00':
+            if len(_numpad_input) < 6:
+                _numpad_input += '00'
+        elif key == '⌫':
+            _numpad_input = _numpad_input[:-1]
+        elif key == '_ok':
+            try:
+                v = float(_numpad_input) if _numpad_input else 0.0
+                _LIMITS = {
+                    'cfg_tinterval':   (100,  3600000),
+                    'cfg_tshots':      (1,    9999),
+                    'ls_sched_gain':   (0,    300),
+                    'ls_sched_expo':   (100,  60000),
+                    'ls_sched_frames': (10,   1000),
+                }
+                lo, hi = _LIMITS.get(_numpad_target, (0, 999999))
+                v = max(lo, min(hi, v))
+                if _numpad_target == 'cfg_tinterval':
+                    tinterval = v / 1000.0          # ms → s
+                elif _numpad_target == 'cfg_tshots':
+                    tshots = int(v + 0.5)
+                elif _numpad_target == 'ls_sched_gain':
+                    ls_sched_gain = int(v + 0.5)
+                elif _numpad_target == 'ls_sched_expo':
+                    ls_sched_expo_us = int(v * 1000 + 0.5)  # ms → µs
+                elif _numpad_target == 'ls_sched_frames':
+                    ls_sched_frames = int(v + 0.5)
+                save_config_to_file()
+            except (ValueError, ZeroDivisionError):
+                pass
+            _numpad_active = 0
+        elif key == '_ann':
+            _numpad_active = 0
+        return True
+    return False
 
 
 # ============================================================================
@@ -6780,7 +6976,7 @@ def draw_raw_controls(screen_width, screen_height, image_array=None):
 
             control_rects['stretch_factor'] = draw_raw_isp_slider(
                 start_x, start_y, slider_width, slider_height,
-                "Factor", stretch_factor / 10.0, 0.0, 8.0, (200, 160, 100)
+                "Factor", stretch_factor / 10.0, 0.0, 150.0, (200, 160, 100)
             )
             control_rects['stretch_p_low'] = draw_raw_isp_slider(
                 start_x, start_y + slider_height + margin, slider_width, slider_height,
@@ -6937,7 +7133,7 @@ def handle_raw_slider_click(mousex, mousey, control_rects):
                 ghs_HP = int(ratio * 100)
             # Sliders Arcsinh (onglet STRETCH mode Arcsinh)
             elif name == 'stretch_factor':
-                stretch_factor = int(ratio * 80)  # 0.0-8.0 → 0-80
+                stretch_factor = int(ratio * 1500)  # 0.0-150.0 → 0-1500
                 print(f"[RAW ARCSINH] stretch_factor = {stretch_factor} (factor={stretch_factor/10.0})")
             elif name == 'stretch_p_low':
                 stretch_p_low = int(ratio * 20)  # 0.0-2.0 → 0-20
@@ -7727,7 +7923,7 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
 
         control_rects['jsk_stack'] = draw_jsk_slider(
             panel_x, start_y, slider_width, slider_height,
-            f"Stack: {jsk_stack_count}", jsk_stack_count, 1, 6, (100, 180, 140)
+            f"Stack: {jsk_stack_count}", jsk_stack_count, 1, 10, (100, 180, 140)
         )
         start_y += slider_height + margin
 
@@ -7910,7 +8106,7 @@ def draw_jsk_gain_exposure(screen_width, screen_height):
     pygame.draw.rect(windowSurfaceObj, (80, 80, 90), bg_rect_expo, 1, border_radius=5)
 
     min_exp_ms = 1
-    max_exp_ms = 1000
+    max_exp_ms = 2000
     min_exp_us = min_exp_ms * 1000
     max_exp_us = max_exp_ms * 1000
 
@@ -7981,12 +8177,12 @@ def is_click_on_jsk_gain_slider(mousex, mousey, screen_width, screen_height):
 
 
 def is_click_on_jsk_exposure_slider(mousex, mousey, screen_width, screen_height):
-    """Verifie si clic sur slider exposure JSK. Retourne la valeur en us (1000-1000000) ou None."""
+    """Verifie si clic sur slider exposure JSK. Retourne la valeur en us (1000-2000000) ou None."""
     sx, _, sy_expo, slider_w, slider_h = _jsk_ge_slider_positions(screen_height)
 
     if sx <= mousex <= sx + slider_w and sy_expo <= mousey <= sy_expo + slider_h:
         min_exp_us = 1000    # 1ms
-        max_exp_us = 1000000 # 1000ms
+        max_exp_us = 2000000 # 2000ms
 
         rel_x = mousex - sx
         ratio = max(0.0, min(1.0, rel_x / slider_w))
@@ -7997,6 +8193,1248 @@ def is_click_on_jsk_exposure_slider(mousex, mousey, screen_width, screen_height)
         value_us = int(10 ** log_val)
         return max(min_exp_us, min(value_us, max_exp_us))
     return None
+
+
+# ============================================================
+# HOME SCREEN — Fonctions de dessin
+# ============================================================
+
+def draw_home_capture_banner(capture_type):
+    """Affiche une bannière de statut pendant une capture STILL/VIDEO/TIMELAPSE."""
+    global windowSurfaceObj, _font_cache, _home_last_frame_bgr
+    global extn, extns2, raw_format, vlen, codec, codecs, tinterval, tshots
+    global mode, modes, allsky_mode
+    try:
+        sw, sh = windowSurfaceObj.get_size()
+        # Fond : dernière frame preview si dispo, sinon noir
+        if _home_last_frame_bgr is not None:
+            import cv2 as _cv2_banner
+            _rgb = _cv2_banner.cvtColor(_home_last_frame_bgr, _cv2_banner.COLOR_BGR2RGB)
+            _surf = pygame.surfarray.make_surface(
+                __import__('numpy').swapaxes(_rgb, 0, 1))
+            _surf = pygame.transform.scale(_surf, (sw, sh))
+            # Assombrir légèrement
+            _dim = pygame.Surface((sw, sh), pygame.SRCALPHA)
+            _dim.fill((0, 0, 0, 120))
+            windowSurfaceObj.blit(_surf, (0, 0))
+            windowSurfaceObj.blit(_dim, (0, 0))
+        else:
+            windowSurfaceObj.fill((10, 10, 18))
+
+        # Panneau central
+        pw, ph = min(560, sw - 40), 130
+        px, py = (sw - pw) // 2, (sh - ph) // 2
+        _bg = pygame.Surface((pw, ph), pygame.SRCALPHA)
+        _bg.fill((15, 20, 35, 230))
+        windowSurfaceObj.blit(_bg, (px, py))
+
+        # Couleurs et titres par type
+        if capture_type == 0:
+            _title = "  Capture photo"
+            _color = (100, 200, 130)
+            _ext = extns2[extn] if 'extns2' in dir() or 'extns2' in globals() else "jpg"
+            _raw_lbl = "  RAW" if raw_format >= 1 else ""
+            _ae_lbl = f"AE: {modes[mode]}" if 'modes' in globals() else ""
+            _line2 = f"Format: {_ext.upper()}{_raw_lbl}   {_ae_lbl}"
+            _line3 = "Enregistrement dans ~/images/"
+        elif capture_type == 1:
+            _title = "  Enregistrement vidéo"
+            _color = (220, 190, 80)
+            _codec_lbl = codecs[codec] if 'codecs' in globals() else "h264"
+            _line2 = f"Durée: {vlen}s   Codec: {_codec_lbl.upper()}"
+            _line3 = "Enregistrement dans ~/videos/"
+        else:
+            _title = "  Timelapse"
+            _color = (100, 160, 220)
+            _allsky_lbl = "  (AllSky)" if allsky_mode > 0 else ""
+            _line2 = f"Intervalle: {tinterval}s   {tshots} photos{_allsky_lbl}"
+            _line3 = "Enregistrement dans ~/images/"
+
+        # Barre colorée gauche
+        pygame.draw.rect(windowSurfaceObj, _color, pygame.Rect(px, py, 4, ph), border_radius=2)
+        # Bordure
+        pygame.draw.rect(windowSurfaceObj, (*_color[:3], 160),
+                         pygame.Rect(px, py, pw, ph), 1, border_radius=4)
+
+        # Titre
+        _fk = 28
+        if _fk not in _font_cache:
+            _font_cache[_fk] = pygame.font.Font(None, _fk)
+        _ft = _font_cache[_fk]
+        windowSurfaceObj.blit(_ft.render(_title, True, _color),
+                              (_ft.render(_title, True, _color).get_rect(midleft=(px + 14, py + 28))))
+
+        # Point clignotant
+        _dot_col = _color if (pygame.time.get_ticks() // 500) % 2 == 0 else (50, 50, 60)
+        pygame.draw.circle(windowSurfaceObj, _dot_col, (px + pw - 20, py + 28), 7)
+
+        # Ligne 2
+        _fk2 = 21
+        if _fk2 not in _font_cache:
+            _font_cache[_fk2] = pygame.font.Font(None, _fk2)
+        _ft2 = _font_cache[_fk2]
+        windowSurfaceObj.blit(_ft2.render(_line2, True, (190, 200, 215)),
+                              (_ft2.render(_line2, True, (190, 200, 215)).get_rect(midleft=(px + 14, py + 62))))
+
+        # Ligne 3
+        _fk3 = 18
+        if _fk3 not in _font_cache:
+            _font_cache[_fk3] = pygame.font.Font(None, _fk3)
+        _ft3 = _font_cache[_fk3]
+        windowSurfaceObj.blit(_ft3.render(_line3, True, (120, 130, 150)),
+                              (_ft3.render(_line3, True, (120, 130, 150)).get_rect(midleft=(px + 14, py + 93))))
+
+        pygame.display.update()
+    except Exception:
+        pass
+
+
+def _draw_home_capture_update(line2, line3=""):
+    """Met à jour les lignes d'info de la bannière capture (video/timelapse en cours)."""
+    global windowSurfaceObj, _font_cache
+    try:
+        sw, sh = windowSurfaceObj.get_size()
+        pw, ph = min(560, sw - 40), 130
+        px, py = (sw - pw) // 2, (sh - ph) // 2
+        # Effacer uniquement la zone des deux lignes du bas du panneau
+        _clr = pygame.Surface((pw - 20, 60), pygame.SRCALPHA)
+        _clr.fill((15, 20, 35, 230))
+        windowSurfaceObj.blit(_clr, (px + 10, py + 48))
+        # Ligne 2
+        _fk2 = 21
+        if _fk2 not in _font_cache:
+            _font_cache[_fk2] = pygame.font.Font(None, _fk2)
+        _ft2 = _font_cache[_fk2]
+        _s2 = _ft2.render(line2, True, (200, 220, 180))
+        windowSurfaceObj.blit(_s2, _s2.get_rect(midleft=(px + 14, py + 62)))
+        # Ligne 3
+        if line3:
+            _fk3 = 18
+            if _fk3 not in _font_cache:
+                _font_cache[_fk3] = pygame.font.Font(None, _fk3)
+            _ft3 = _font_cache[_fk3]
+            _s3 = _ft3.render(line3, True, (140, 160, 180))
+            windowSurfaceObj.blit(_s3, _s3.get_rect(midleft=(px + 14, py + 93)))
+        # Point clignotant sur titre
+        from datetime import timedelta as _td
+        _dot_col = (100, 200, 130) if (pygame.time.get_ticks() // 500) % 2 == 0 else (50, 50, 60)
+        pygame.draw.circle(windowSurfaceObj, _dot_col, (px + pw - 20, py + 28), 7)
+        pygame.display.update()
+    except Exception:
+        pass
+
+
+def _home_cam_restart_with_msg():
+    """
+    Affiche un message de redémarrage caméra puis relance preview().
+    À appeler depuis handle_home_click() pour les contrôles nécessitant
+    une reconfiguration complète (rotation, flip, format capteur, mode AE...).
+    """
+    global windowSurfaceObj, _font_cache, restart
+    try:
+        _w, _h = windowSurfaceObj.get_size()
+        _ck = 28
+        if _ck not in _font_cache:
+            _font_cache[_ck] = pygame.font.Font(None, _ck)
+        _f = _font_cache[_ck]
+        _msg = _f.render("Reconfiguration camera...", True, (200, 200, 200))
+        windowSurfaceObj.blit(_msg, _msg.get_rect(center=(_w // 2, _h // 2)))
+        pygame.display.update()
+    except Exception:
+        pass
+    restart = 1
+
+
+def _apply_home_live_controls():
+    """
+    Applique en live sur picam2 les contrôles modifiables sans reconfiguration :
+    brightness, contrast, saturation, sharpness, AWB/ColourGains.
+    À appeler depuis handle_home_click() après tout changement de ces paramètres.
+    """
+    global picam2, brightness, contrast, saturation, sharpness, awb, red, blue
+    if picam2 is None:
+        return
+    try:
+        c = {}
+        c["Brightness"] = brightness / 100.0
+        c["Contrast"]   = contrast / 100.0
+        c["Saturation"] = saturation / 10.0
+        c["Sharpness"]  = sharpness / 10.0
+        if awb == 0:
+            # AWB manuel : ColourGains désactive AWB automatiquement
+            c["AwbEnable"] = False
+            c["ColourGains"] = (red / 10.0, blue / 10.0)
+        else:
+            from picamera2 import controls as _pic_controls
+            _awb_map = {
+                1: _pic_controls.AwbModeEnum.Auto,
+                2: _pic_controls.AwbModeEnum.Incandescent,
+                3: _pic_controls.AwbModeEnum.Tungsten,
+                4: _pic_controls.AwbModeEnum.Fluorescent,
+                5: _pic_controls.AwbModeEnum.Indoor,
+                6: _pic_controls.AwbModeEnum.Daylight,
+                7: _pic_controls.AwbModeEnum.Cloudy,
+            }
+            c["AwbEnable"] = True
+            if awb in _awb_map:
+                c["AwbMode"] = _awb_map[awb]
+        picam2.set_controls(c)
+    except Exception:
+        pass
+
+
+def draw_home_histogram(bgr_frame, sw, sh):
+    """Histogramme RGB superposé bas-centre — home screen.
+    Même approche que l'histogramme de l'ancienne interface :
+    tableau numpy → surface → set_alpha → blit.
+    """
+    global windowSurfaceObj
+    try:
+        # Dimensions : bande en bas, centrée, hauteur fixe
+        h_w = min(sw, 600)          # largeur de la bande
+        h_h = 80                    # hauteur de la bande
+        hx  = (sw - h_w) // 2      # position x centrée
+        hy  = sh - h_h - 42        # au-dessus de la barre d'action (38px)
+
+        # Sous-échantillonnage pour performance
+        sample = bgr_frame[::4, ::4]
+        if sample.size == 0:
+            return
+
+        bins = np.arange(257)
+        bin_width = h_w / 256.0
+        scale_y   = h_h / 100.0
+
+        # Tableau couleur (h_w × h_h × 3) — même pattern que l'ancien code
+        output = np.zeros((h_w, h_h, 3), dtype=np.uint8)
+
+        # Canaux BGR → (0=Bleu, 1=Vert, 2=Rouge)
+        channels = [
+            (0, (0,   0,   255)),   # Bleu
+            (1, (0,   255, 0  )),   # Vert
+            (2, (255, 0,   0  )),   # Rouge
+        ]
+        for ch_idx, rgb in channels:
+            hist, _ = np.histogram(sample[:, :, ch_idx].ravel(), bins=bins)
+            max_v = float(hist.max()) if hist.max() > 0 else 1.0
+            hist_norm = (hist / max_v * 100).astype(int)
+            for i in range(256):
+                x0 = int(i * bin_width)
+                x1 = int((i + 1) * bin_width) if i < 255 else h_w
+                if hist_norm[i] == 0:
+                    continue
+                h_val = max(1, int(hist_norm[i] * scale_y))
+                if x1 > x0:
+                    output[x0:x1, 0:h_val, 0] |= rgb[0]
+                    output[x0:x1, 0:h_val, 1] |= rgb[1]
+                    output[x0:x1, 0:h_val, 2] |= rgb[2]
+
+        # Fond semi-transparent derrière les barres
+        bg = pygame.Surface((h_w, h_h), pygame.SRCALPHA)
+        bg.fill((10, 10, 18, 150))
+        windowSurfaceObj.blit(bg, (hx, hy))
+
+        graph = pygame.surfarray.make_surface(output)
+        graph = pygame.transform.flip(graph, False, True)   # origine en bas
+        graph.set_colorkey((0, 0, 0))  # fond noir → transparent, laisse bg visible
+        graph.set_alpha(190)
+        windowSurfaceObj.blit(graph, (hx, hy))
+    except Exception:
+        pass
+
+
+def _home_ge_slider_positions(sw, sh):
+    """Positions des 3 sliders Gain/Expo/Zoom en haut-centre du home screen."""
+    slider_w = 165
+    slider_h = 30
+    total_w  = 3 * slider_w + 2 * 8  # 3 sliders + 2 espaces de 8px
+    sx_start = (sw - total_w) // 2
+    sy = 5
+    positions = []
+    for i in range(3):
+        positions.append((sx_start + i * (slider_w + 8), sy, slider_w, slider_h))
+    return positions
+
+
+def draw_home_gain_exposure(sw, sh):
+    """Dessine les 3 sliders Gain / Expo / Zoom en haut-centre — home screen."""
+    global windowSurfaceObj, _font_cache, gain, custom_sspeed, sspeed, zoom
+    global home_gain_scale_idx, home_expo_scale_idx, _HOME_GAIN_SCALES, _HOME_EXPO_SCALES_MS
+    import math
+    positions = _home_ge_slider_positions(sw, sh)
+    rects = {}
+
+    # Echelle dynamique gain
+    _gain_max = _HOME_GAIN_SCALES[max(0, min(home_gain_scale_idx, len(_HOME_GAIN_SCALES)-1))]
+    # Gain
+    g_val = max(1, min(_gain_max, gain if gain > 0 else 50))
+    g_ratio = (g_val - 1) / max(1, _gain_max - 1)
+    # Echelle dynamique expo
+    _expo_max_ms = _HOME_EXPO_SCALES_MS[max(0, min(home_expo_scale_idx, len(_HOME_EXPO_SCALES_MS)-1))]
+    _expo_max_us = _expo_max_ms * 1000
+    # Expo
+    _expo = custom_sspeed if custom_sspeed > 0 else sspeed
+    min_exp_us = 1000
+    exp_c = max(min_exp_us, min(_expo if _expo > 0 else 100000, _expo_max_us))
+    log_min = math.log10(min_exp_us)
+    log_max = math.log10(_expo_max_us)
+    e_ratio = (math.log10(exp_c) - log_min) / max(0.001, log_max - log_min)
+    expo_ms = exp_c / 1000.0
+    expo_text = f"Expo: {expo_ms:.1f}ms" if expo_ms < 10 else f"Expo: {expo_ms:.0f}ms"
+    # Zoom
+    z_ratio = zoom / 5.0
+
+    ck = 20
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    fontObj = _font_cache[ck]
+
+    sliders = [
+        ('home_gain', positions[0], f"Gain: {g_val}", g_ratio, (120, 100, 60)),
+        ('home_expo', positions[1], expo_text,          e_ratio, (80, 120, 160)),
+        ('home_zoom', positions[2], f"Zoom: {zoom}x",  z_ratio, (70, 130, 140)),
+    ]
+    for key, (sx, sy, slider_w, slider_h), label, ratio, color in sliders:
+        bg_rect = pygame.Rect(sx, sy, slider_w, slider_h)
+        s = pygame.Surface((slider_w, slider_h), pygame.SRCALPHA)
+        s.fill((30, 30, 40, 210))
+        windowSurfaceObj.blit(s, (sx, sy))
+        pygame.draw.rect(windowSurfaceObj, (80, 80, 90), bg_rect, 1, border_radius=4)
+        fill_w = int(min(1.0, ratio) * (slider_w - 10))
+        if fill_w > 0:
+            pygame.draw.rect(windowSurfaceObj, color,
+                             pygame.Rect(sx + 5, sy + 5, fill_w, slider_h - 10), border_radius=3)
+        lbl = fontObj.render(label, True, (210, 210, 210))
+        windowSurfaceObj.blit(lbl, lbl.get_rect(center=bg_rect.center))
+        rects[key] = bg_rect
+    return rects
+
+
+def draw_home_top_icons(sw, sh, settings_on, hist_on, binning_on, windowed_on=0):
+    """Dessine l'icône ⚙ en haut-gauche et les boutons WIN/HIST/BIN en haut-droit."""
+    global windowSurfaceObj, _font_cache
+    rects = {}
+    ck = 18
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+
+    # Icône settings ⚙ (haut-gauche)
+    r_set = pygame.Rect(5, 5, 40, 30)
+    bg_set = (60, 80, 120) if settings_on else (30, 35, 50)
+    bd_set = (100, 150, 220) if settings_on else (60, 70, 90)
+    s = pygame.Surface((40, 30), pygame.SRCALPHA)
+    s.fill((*bg_set, 200))
+    windowSurfaceObj.blit(s, (5, 5))
+    pygame.draw.rect(windowSurfaceObj, bd_set, r_set, 1, border_radius=4)
+    lbl = f.render("SET", True, (200, 220, 255) if settings_on else (140, 160, 200))
+    windowSurfaceObj.blit(lbl, lbl.get_rect(center=r_set.center))
+    rects['home_settings'] = r_set
+
+    # Bouton WIN/FS (haut-droit -136) — toggle fenêtré/plein écran
+    r_win = pygame.Rect(sw - 136, 5, 42, 30)
+    bg_w = (70, 55, 30) if windowed_on else (30, 35, 50)
+    bd_w = (180, 150, 80) if windowed_on else (60, 70, 90)
+    s = pygame.Surface((42, 30), pygame.SRCALPHA)
+    s.fill((*bg_w, 200))
+    windowSurfaceObj.blit(s, (sw - 136, 5))
+    pygame.draw.rect(windowSurfaceObj, bd_w, r_win, 1, border_radius=4)
+    lbl = f.render("WIN" if windowed_on else "FS", True, (240, 210, 140) if windowed_on else (140, 150, 170))
+    windowSurfaceObj.blit(lbl, lbl.get_rect(center=r_win.center))
+    rects['home_windowed'] = r_win
+
+    # Bouton HIST (haut-droit -90)
+    r_hist = pygame.Rect(sw - 90, 5, 42, 30)
+    bg_h = (40, 80, 60) if hist_on else (30, 35, 50)
+    bd_h = (80, 180, 120) if hist_on else (60, 70, 90)
+    s = pygame.Surface((42, 30), pygame.SRCALPHA)
+    s.fill((*bg_h, 200))
+    windowSurfaceObj.blit(s, (sw - 90, 5))
+    pygame.draw.rect(windowSurfaceObj, bd_h, r_hist, 1, border_radius=4)
+    lbl = f.render("HIST", True, (160, 240, 200) if hist_on else (120, 150, 130))
+    windowSurfaceObj.blit(lbl, lbl.get_rect(center=r_hist.center))
+    rects['home_hist'] = r_hist
+
+    # Bouton BIN (haut-droit -44)
+    r_bin = pygame.Rect(sw - 44, 5, 40, 30)
+    bg_b = (50, 80, 130) if binning_on else (30, 35, 50)
+    bd_b = (100, 140, 230) if binning_on else (60, 70, 90)
+    s = pygame.Surface((40, 30), pygame.SRCALPHA)
+    s.fill((*bg_b, 200))
+    windowSurfaceObj.blit(s, (sw - 44, 5))
+    pygame.draw.rect(windowSurfaceObj, bd_b, r_bin, 1, border_radius=4)
+    lbl = f.render("BIN", True, (180, 210, 255) if binning_on else (120, 130, 160))
+    windowSurfaceObj.blit(lbl, lbl.get_rect(center=r_bin.center))
+    rects['home_binning'] = r_bin
+
+    return rects
+
+
+def draw_home_left_modes(sw, sh):
+    """Dessine les 4 boutons de modes sur le bord gauche."""
+    global windowSurfaceObj, _font_cache
+    rects = {}
+    btn_w, btn_h, step = 78, 32, 42
+    start_y = sh // 2 - (4 * btn_h + 3 * (step - btn_h)) // 2
+
+    ck = 18
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+
+    modes = [
+        ('mode_livestack', "LIVE", "STACK",   (50, 80, 120)),
+        ('mode_lucky',     "LUCKY","STACK",   (80, 50, 100)),
+        ('mode_stretch',   "STRETCH","",      (60, 80, 60)),
+        ('mode_focus',     "FOCUS", "",       (80, 70, 40)),
+    ]
+    for i, (key, line1, line2, bg) in enumerate(modes):
+        bx = 5
+        by = start_y + i * step
+        r = pygame.Rect(bx, by, btn_w, btn_h)
+        s = pygame.Surface((btn_w, btn_h), pygame.SRCALPHA)
+        s.fill((*bg, 200))
+        windowSurfaceObj.blit(s, (bx, by))
+        pygame.draw.rect(windowSurfaceObj, (min(bg[0]+40,255), min(bg[1]+40,255), min(bg[2]+40,255)), r, 1, border_radius=5)
+        if line2:
+            l1 = f.render(line1, True, (230, 230, 230))
+            l2 = f.render(line2, True, (200, 200, 200))
+            windowSurfaceObj.blit(l1, l1.get_rect(centerx=r.centerx, centery=by + btn_h//2 - 8))
+            windowSurfaceObj.blit(l2, l2.get_rect(centerx=r.centerx, centery=by + btn_h//2 + 8))
+        else:
+            l1 = f.render(line1, True, (230, 230, 230))
+            windowSurfaceObj.blit(l1, l1.get_rect(center=r.center))
+        rects[key] = r
+    return rects
+
+
+def draw_home_right_modes(sw, sh):
+    """Dessine les 4 boutons de modes sur le bord droit."""
+    global windowSurfaceObj, _font_cache
+    rects = {}
+    btn_w, btn_h, step = 78, 32, 42
+    start_y = sh // 2 - (4 * btn_h + 3 * (step - btn_h)) // 2
+
+    ck = 18
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+
+    modes = [
+        ('mode_jsk',   "JSK",   "LIVE",  (80, 60, 40)),
+        ('mode_sun',   "SUN",   "",      (100, 80, 30)),
+        ('mode_moon',  "MOON",  "",      (40, 60, 100)),
+        ('mode_colim', "COLIM", "",      (60, 80, 60)),
+    ]
+    for i, (key, line1, line2, bg) in enumerate(modes):
+        bx = sw - btn_w - 5
+        by = start_y + i * step
+        r = pygame.Rect(bx, by, btn_w, btn_h)
+        s = pygame.Surface((btn_w, btn_h), pygame.SRCALPHA)
+        s.fill((*bg, 200))
+        windowSurfaceObj.blit(s, (bx, by))
+        pygame.draw.rect(windowSurfaceObj, (min(bg[0]+40,255), min(bg[1]+40,255), min(bg[2]+40,255)), r, 1, border_radius=5)
+        if line2:
+            l1 = f.render(line1, True, (230, 230, 230))
+            l2 = f.render(line2, True, (200, 200, 200))
+            windowSurfaceObj.blit(l1, l1.get_rect(centerx=r.centerx, centery=by + btn_h//2 - 8))
+            windowSurfaceObj.blit(l2, l2.get_rect(centerx=r.centerx, centery=by + btn_h//2 + 8))
+        else:
+            l1 = f.render(line1, True, (230, 230, 230))
+            windowSurfaceObj.blit(l1, l1.get_rect(center=r.center))
+        rects[key] = r
+    return rects
+
+
+def draw_home_bottom_bar(sw, sh):
+    """Dessine la barre d'action en bas de l'écran d'accueil."""
+    global windowSurfaceObj, _font_cache
+    bar_y = sh - 38
+    bar_h = 34
+    rects = {}
+
+    # Fond semi-transparent
+    s = pygame.Surface((sw, bar_h), pygame.SRCALPHA)
+    s.fill((25, 25, 35, 220))
+    windowSurfaceObj.blit(s, (0, bar_y))
+
+    ck = 19
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+
+    buttons = [
+        ('action_exit',      "EXIT",      5,   80,  (60, 35, 35)),
+        ('action_still',     "STILL",     105, 85,  (40, 70, 45)),
+        ('action_video',     "VIDEO",     200, 85,  (70, 65, 25)),
+        ('action_timelapse', "TIMELAPSE", 295, 100, (35, 60, 90)),
+    ]
+    for key, label, bx, bw_btn, bg in buttons:
+        r = pygame.Rect(bx, bar_y + 2, bw_btn, bar_h - 4)
+        sb = pygame.Surface((bw_btn, bar_h - 4), pygame.SRCALPHA)
+        sb.fill((*bg, 220))
+        windowSurfaceObj.blit(sb, (bx, bar_y + 2))
+        bd_col = (min(bg[0]+50,255), min(bg[1]+50,255), min(bg[2]+50,255))
+        pygame.draw.rect(windowSurfaceObj, bd_col, r, 1, border_radius=4)
+        lbl = f.render(label, True, (220, 220, 220))
+        windowSurfaceObj.blit(lbl, lbl.get_rect(center=r.center))
+        rects[key] = r
+    return rects
+
+
+def _draw_home_tab_bar(panel_x, panel_w, y):
+    """Dessine la barre d'onglets pour le panneau réglages home screen (7 onglets)."""
+    global windowSurfaceObj, _font_cache, home_settings_tab
+    tab_h = 22
+    tabs = [("Img", 0), ("Cap", 1), ("Vid", 2), ("TL/Sky", 3), ("LS", 4), ("Lk", 5), ("Sys", 6)]
+    n_tabs = len(tabs)
+    tab_w = (panel_w - 2) // n_tabs
+    rects = {}
+    ck = 15
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    for i, (label, idx) in enumerate(tabs):
+        tx = panel_x + i * tab_w
+        active = (home_settings_tab == idx)
+        bg     = (40, 55, 90) if active else (20, 25, 45)
+        border = (100, 140, 220) if active else (45, 55, 90)
+        r = pygame.Rect(tx, y, tab_w - 1, tab_h)
+        pygame.draw.rect(windowSurfaceObj, bg, r, border_radius=3)
+        pygame.draw.rect(windowSurfaceObj, border, r, 1, border_radius=3)
+        tc = (180, 210, 255) if active else (80, 100, 150)
+        lbl = f.render(label, True, tc)
+        windowSurfaceObj.blit(lbl, lbl.get_rect(center=r.center))
+        rects[f'home_tab_{idx}'] = r
+    return rects, y + tab_h + 4
+
+
+def draw_home_settings_panel(sw, sh):
+    """Panneau de réglages à 7 onglets — home screen (côté droit)."""
+    global windowSurfaceObj, _font_cache, home_settings_tab
+    global mode, speed, gain, brightness, contrast, saturation, ev, awb, meter, blue, red
+    global sharpness, denoise, quality, vformat, codec, vlen, fps, tinterval, tshots, extn, raw_format, str_cap
+    global vflip, hflip, rotate, profile, level, v3_hdr, v3_f_speed, v3_f_range
+    global stretch_preset, stretch_p_low, stretch_p_high, stretch_factor
+    global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP, ghs_preset
+    global ls_preview_refresh, ls_alignment_mode, ls_enable_qc, ls_max_fwhm, ls_min_sharpness
+    global ls_max_drift, ls_min_stars, ls_stack_method, ls_stack_kappa, ls_stack_iterations
+    global ls_save_progress, ls_save_final, ls_planetary_enable, ls_planetary_mode
+    global ls_planetary_disk_min, ls_planetary_disk_max
+    global ls_lucky_buffer, ls_lucky_keep, ls_lucky_score, ls_lucky_stack, ls_lucky_align, ls_lucky_roi
+    global ls_lucky_save_progress, ls_lucky_save_final
+    global use_native_sensor_mode, focus_method, star_metric, fix_bad_pixels
+    global fix_bad_pixels_sigma, fix_bad_pixels_min_adu, isp_enable, snr_display
+    global metrics_interval, allsky_mode, allsky_mean_target, allsky_max_gain, allsky_apply_stretch
+    global allsky_stack_enable, allsky_stack_count
+
+    panel_w = 240
+    panel_x = sw - panel_w
+    start_y = 40
+    slider_w = panel_w - 10
+    slider_h = 28
+    margin = 4
+    control_rects = {}
+
+    # Fond
+    panel_h = sh - start_y - 40
+    surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+    surf.fill((20, 20, 30, 230))
+    windowSurfaceObj.blit(surf, (panel_x, start_y))
+    pygame.draw.rect(windowSurfaceObj, (60, 70, 100), (panel_x, start_y, panel_w, panel_h), 1)
+
+    # Onglets
+    tab_rects, y = _draw_home_tab_bar(panel_x, panel_w, start_y)
+    control_rects.update(tab_rects)
+    px = panel_x + 5
+
+    def _sl(key, label, val, vmin, vmax, color=(90, 120, 160)):
+        nonlocal y
+        r = draw_jsk_slider(px, y, slider_w, slider_h, label, val, vmin, vmax, color)
+        control_rects[key] = r
+        y += slider_h + margin
+
+    def _sl_num(key, label, val, vmin, vmax, color=(90, 120, 160)):
+        """Slider + bouton [123] ouvrant le pavé numérique."""
+        nonlocal y
+        nb_w = 24
+        r = draw_jsk_slider(px, y, slider_w - nb_w - 2, slider_h,
+                            label, val, vmin, vmax, color)
+        control_rects[key] = r
+        btn = pygame.Rect(px + slider_w - nb_w, y, nb_w, slider_h)
+        pygame.draw.rect(windowSurfaceObj, (42, 52, 78), btn, border_radius=3)
+        pygame.draw.rect(windowSurfaceObj, (88, 108, 148), btn, 1, border_radius=3)
+        fk14 = 14
+        if fk14 not in _font_cache:
+            _font_cache[fk14] = pygame.font.Font(None, fk14)
+        t = _font_cache[fk14].render("123", True, (135, 162, 200))
+        windowSurfaceObj.blit(t, t.get_rect(center=btn.center))
+        control_rects[f'num_{key}'] = btn
+        y += slider_h + margin
+
+    def _n(arr, idx):
+        try:
+            return str(arr[int(idx)])
+        except Exception:
+            return str(int(idx))
+
+    def _yn(val):
+        return "Oui" if int(val) else "Non"
+
+    _ROT_NAMES = ['0deg', '90deg', '180deg', '270deg']
+    _RAW_NAMES = ['YUV420', 'RGB8', 'RAW12', 'RAW16']
+
+    # ── Tab 0 : Img ── réglages image temps réel ──────────────────────────────
+    if home_settings_tab == 0:
+        _nshutters = len(shutters) - 1 if 'shutters' in globals() else 30
+        _nawbs     = len(awbs)-1    if 'awbs'    in globals() else 7
+        _nmeters   = len(meters)-1  if 'meters'  in globals() else 2
+        _mode_nm   = _n(modes,   mode)       if 'modes'   in globals() else str(mode)
+        _awb_nm    = _n(awbs,    awb)        if 'awbs'    in globals() else str(awb)
+        _meter_nm  = _n(meters,  meter)      if 'meters'  in globals() else str(meter)
+        _dnoise_nm = _n(denoises,int(denoise)) if 'denoises' in globals() else str(int(denoise))
+        _rot_nm    = _n(_ROT_NAMES, rotate)
+        _gscale_nm = f"{_HOME_GAIN_SCALES[max(0,min(home_gain_scale_idx,len(_HOME_GAIN_SCALES)-1))]}"
+        _escale_nm = f"{_HOME_EXPO_SCALES_MS[max(0,min(home_expo_scale_idx,len(_HOME_EXPO_SCALES_MS)-1))]}ms"
+        _sl('cfg_mode',       f"Mode AE: {_mode_nm}",             mode,            0, len(modes)-1 if 'modes' in globals() else 2, (80, 100, 140))
+        _sl('cfg_gain_scale', f"Echelle gain: {_gscale_nm}",      home_gain_scale_idx, 0, len(_HOME_GAIN_SCALES)-1,  (120, 100, 60))
+        _sl('cfg_expo_scale', f"Echelle expo: {_escale_nm}",      home_expo_scale_idx, 0, len(_HOME_EXPO_SCALES_MS)-1, (80, 120, 160))
+        _sl('cfg_brightness', f"Luminosite: {int(brightness)}",   int(brightness), -100, 100,     (110, 110, 80))
+        _sl('cfg_contrast',   f"Contraste: {int(contrast)}",      int(contrast),   0, 200,        (100, 120, 80))
+        _sl('cfg_saturation', f"Saturation: {int(saturation)}",   int(saturation), 0, 200,        (120, 80, 100))
+        _sl('cfg_ev',         f"EV: {ev:+d}",                     ev,              -10, 10,       (80, 110, 110))
+        _sl('cfg_awb',        f"AWB: {_awb_nm}",                  awb,             0, _nawbs,     (80, 100, 130))
+        _sl('cfg_meter',      f"Mesure: {_meter_nm}",             meter,           0, _nmeters,   (90, 90, 130))
+        _sl('cfg_blue',       f"Bal. bleu: {blue/10:.1f}",        blue,            1, 80,         (60, 90, 160))
+        _sl('cfg_red',        f"Bal. rouge: {red/10:.1f}",        red,             1, 80,         (160, 60, 60))
+        _sl('cfg_sharpness',  f"Nettete: {sharpness}",            sharpness,       0, 32,         (80, 130, 110))
+        _sl('cfg_denoise',    f"Denoise: {_dnoise_nm}",           int(denoise),    0, 3,          (70, 120, 120))
+        _sl('cfg_rotate',     f"Rotation: {_rot_nm}",             rotate,          0, 3,          (80, 90, 120))
+        _sl('cfg_vflip',      f"Flip V: {_yn(vflip)}",            vflip,           0, 1,          (70, 80, 110))
+        _sl('cfg_hflip',      f"Flip H: {_yn(hflip)}",            hflip,           0, 1,          (70, 80, 110))
+
+    # ── Tab 1 : Cap ── capture photo + stretch + ISP + pixels chauds ──────────
+    elif home_settings_tab == 1:
+        _extn_nm   = _n(extns, extn)  if 'extns' in globals() else str(extn)
+        _raw_nm    = _n(_RAW_NAMES, raw_format)
+        _str_nm    = _n(stretch_presets, stretch_preset) if 'stretch_presets' in globals() else str(stretch_preset)
+        _ghsp_nm   = _n(ghs_presets,    ghs_preset)    if 'ghs_presets'    in globals() else str(ghs_preset)
+        _nextn_max = len(extns)-1    if 'extns'    in globals() else 5
+        _sl('cfg_extn',     f"Format fichier: {_extn_nm}",    extn,      0, _nextn_max, (80, 100, 120))
+        _sl('cfg_raw',      f"Capteur: {_raw_nm}",            raw_format,0, 3,          (80, 90, 130))
+        _sl('cfg_quality',  f"Qualite JPEG: {quality}",       quality,   0, 100,        (90, 120, 90))
+        _sl('cfg_isp',      f"ISP actif: {_yn(isp_enable)}",  isp_enable,0, 1,          (80, 90, 110))
+        # Pixels chauds : sous-options masquées quand OFF
+        _sl('cfg_fixbad',   f"Pix chauds: {_yn(fix_bad_pixels)}", fix_bad_pixels, 0, 1, (100, 80, 80))
+        if fix_bad_pixels:
+            _sl('cfg_fixsig', f"Sigma: {fix_bad_pixels_sigma}", fix_bad_pixels_sigma, 10, 100, (100, 80, 90))
+            _sl('cfg_fixadu', f"ADU min: {fix_bad_pixels_min_adu}", fix_bad_pixels_min_adu, 10, 500, (90, 80, 100))
+        # --- Stretch aperçu : sélecteur puis params selon le type choisi ---
+        _nstr_max = len(stretch_presets)-1 if 'stretch_presets' in globals() else 2
+        _sl('cfg_str_prev', f"Stretch: {_str_nm}", stretch_preset, 0, _nstr_max, (80, 100, 140))
+        if stretch_preset == 2:
+            # Arcsinh : seuil bas, seuil haut, facteur
+            _sl('cfg_str_low',  f"Seuil bas: {stretch_p_low/10:.1f}%",    stretch_p_low,  0, 2,          (70, 130, 110))
+            _sl('cfg_str_high', f"Seuil haut: {stretch_p_high/100:.2f}%", stretch_p_high, 9980, 10000,   (70, 120, 120))
+            _sl('cfg_str_fac',  f"Facteur: {stretch_factor/10:.1f}",       stretch_factor, 0, 1500,       (80, 120, 110))
+        elif stretch_preset == 1:
+            # GHS : preset puis 5 paramètres
+            _sl('cfg_ghs_pre', f"Preset: {_ghsp_nm}",      ghs_preset, 0, len(ghs_presets)-1 if 'ghs_presets' in globals() else 3, (90, 80, 150))
+            _sl('cfg_ghs_D',   f"D (intensite): {ghs_D/10:.1f}",  ghs_D,  -10, 100, (90, 70, 160))
+            _sl('cfg_ghs_b',   f"b (local): {ghs_b/10:.1f}",      ghs_b,  -50, 150, (80, 70, 150))
+            _sl('cfg_ghs_SP',  f"SP (sym): {ghs_SP/100:.2f}",     ghs_SP,   0, 100, (80, 80, 140))
+            _sl('cfg_ghs_LP',  f"LP (ombres): {ghs_LP/100:.2f}",  ghs_LP,   0, 100, (70, 80, 130))
+            _sl('cfg_ghs_HP',  f"HP (hautes l.): {ghs_HP/100:.2f}", ghs_HP, 0, 100, (70, 90, 120))
+
+    # ── Tab 2 : Vid ── vidéo ──────────────────────────────────────────────────
+    elif home_settings_tab == 2:
+        _vfmt_nm  = (f"{vwidths[vformat]}x{vheights[vformat]}"
+                     if 'vwidths' in globals() and 0 <= vformat < len(vwidths) else str(vformat))
+        _codec_nm = _n(codecs, codec) if 'codecs' in globals() else str(codec)
+        _prof_nm  = _n(h264profiles, profile) if 'h264profiles' in globals() else str(profile)
+        _lvl_nm   = ['4.0', '4.1', '4.2'][int(level)] if 0 <= int(level) <= 2 else str(level)
+        _nvfmt_max  = len(vwidths)-1  if 'vwidths' in globals() else 4
+        _ncodec_max = len(codecs)-1   if 'codecs'  in globals() else 6
+        _sl('cfg_vformat', f"Resolution: {_vfmt_nm}",  vformat, 0, _nvfmt_max,  (100, 110, 80))
+        _sl('cfg_codec',   f"Codec: {_codec_nm}",      codec,   0, _ncodec_max, (100, 100, 80))
+        _sl('cfg_vlen',    f"Duree: {vlen}s",           vlen,    1, 60,          (110, 90, 70))
+        _sl('cfg_fps',     f"FPS: {fps}",               fps,     1, 60,          (110, 100, 60))
+        _sl('cfg_profile', f"H264 profil: {_prof_nm}", profile, 0, len(h264profiles)-1 if 'h264profiles' in globals() else 8, (70, 80, 100))
+        _sl('cfg_level',   f"H264 niveau: {_lvl_nm}",  level,   0, 2,           (70, 80, 90))
+
+    # ── Tab 3 : TL/Sky ── timelapse + allsky ─────────────────────────────────
+    elif home_settings_tab == 3:
+        _sl_num('cfg_tinterval', f"TL intervalle: {tinterval}s",  tinterval, 1, 3600, (90, 80, 130))
+        _sl_num('cfg_tshots',   f"TL nb shots: {tshots}",        tshots,    1, 9999, (80, 80, 120))
+        _sl('cfg_allsky',       f"AllSky: {_yn(allsky_mode)}",           allsky_mode,        0, 1,     (80, 80, 150))
+        _sl('cfg_allsky_tg',    f"AllSky lum.cible auto-gain: {allsky_mean_target}%",  allsky_mean_target, 5, 100,   (80, 80, 140))
+        _sl('cfg_allsky_gn',    f"AllSky gain max: {allsky_max_gain}",   allsky_max_gain,    0, 300,   (80, 80, 130))
+        _sl('cfg_allsky_st',    f"AllSky stretch: {_yn(allsky_apply_stretch)}", allsky_apply_stretch, 0, 1, (80, 90, 120))
+        _sl('cfg_allsky_stk',   f"AllSky stack: {_yn(allsky_stack_enable)}", allsky_stack_enable, 0, 1, (80, 100, 120))
+        _sl('cfg_allsky_cnt',   f"AllSky nb stack: {allsky_stack_count}", allsky_stack_count, 2, 10,   (80, 100, 110))
+
+    # ── Tab 4 : LS ── Live Stack ──────────────────────────────────────────────
+    elif home_settings_tab == 4:
+        _align_nm = _n(ls_alignment_modes, ls_alignment_mode) if 'ls_alignment_modes' in globals() else str(ls_alignment_mode)
+        _stkm_nm  = _n(stack_methods,      ls_stack_method)   if 'stack_methods'      in globals() else str(ls_stack_method)
+        _plm_nm   = _n(planetary_modes,    ls_planetary_mode) if 'planetary_modes'    in globals() else str(ls_planetary_mode)
+        _sl('cfg_ls_refresh',  f"Refresh: {ls_preview_refresh}fr",     ls_preview_refresh,   1, 10,   (80, 100, 140))
+        _sl('cfg_ls_align',    f"Alignement: {_align_nm}",             ls_alignment_mode,    0, len(ls_alignment_modes)-1 if 'ls_alignment_modes' in globals() else 3, (80, 110, 130))
+        _sl('cfg_ls_qc',       f"Ctrl qualite: {_yn(ls_enable_qc)}",   ls_enable_qc,         0, 1,    (90, 120, 90))
+        _sl('cfg_ls_fwhm',     f"FWHM max: {ls_max_fwhm}",            ls_max_fwhm,          0, 500,  (100, 110, 80))
+        _sl('cfg_ls_sharp',    f"Nettete min: {ls_min_sharpness}",     ls_min_sharpness,     0, 100,  (110, 100, 70))
+        _sl('cfg_ls_drift',    f"Derive max: {ls_max_drift}px",        ls_max_drift,         100, 5000,(90, 80, 110))
+        _sl('cfg_ls_stars',    f"Etoiles min: {ls_min_stars}",         ls_min_stars,         0, 50,   (80, 80, 120))
+        _sl('cfg_ls_method',   f"Stacking: {_stkm_nm}",               ls_stack_method,      0, len(stack_methods)-1 if 'stack_methods' in globals() else 4, (100, 100, 140))
+        _sl('cfg_ls_kappa',    f"Kappa x10: {ls_stack_kappa}",         ls_stack_kappa,       10, 50,  (90, 100, 130))
+        _sl('cfg_ls_iter',     f"Iterations: {ls_stack_iterations}",   ls_stack_iterations,  1, 10,   (80, 110, 120))
+        _sl('cfg_ls_saveprog', f"Save progres: {_yn(ls_save_progress)}", ls_save_progress,  0, 1,    (70, 120, 90))
+        _sl('cfg_ls_savefin',  f"Save final: {_yn(ls_save_final)}",    ls_save_final,        0, 1,    (70, 110, 100))
+        _sl('cfg_ls_planet',   f"Planetaire: {_yn(ls_planetary_enable)}", ls_planetary_enable, 0, 1, (100, 80, 80))
+        _sl('cfg_ls_plmode',   f"Mode pl: {_plm_nm}",                 ls_planetary_mode,    0, len(planetary_modes)-1 if 'planetary_modes' in globals() else 2, (100, 80, 90))
+        _sl('cfg_ls_plmin',    f"Disque min: {ls_planetary_disk_min}px", ls_planetary_disk_min, 10, 1000, (90, 80, 100))
+        _sl('cfg_ls_plmax',    f"Disque max: {ls_planetary_disk_max}px", ls_planetary_disk_max, 10, 1000, (90, 80, 100))
+
+    # ── Tab 5 : Lk ── Lucky Stack ─────────────────────────────────────────────
+    elif home_settings_tab == 5:
+        _score_nm = _n(lucky_score_methods, ls_lucky_score) if 'lucky_score_methods' in globals() else str(ls_lucky_score)
+        _stkl_nm  = _n(lucky_stack_methods, ls_lucky_stack) if 'lucky_stack_methods' in globals() else str(ls_lucky_stack)
+        _sl('cfg_lk_buffer', f"Buffer: {ls_lucky_buffer}fr",    ls_lucky_buffer,        10, 200, (80, 60, 120))
+        _sl('cfg_lk_keep',   f"Garder: {ls_lucky_keep}%",       ls_lucky_keep,          5, 100,  (80, 70, 110))
+        _sl('cfg_lk_score',  f"Score: {_score_nm}",             ls_lucky_score,         0, len(lucky_score_methods)-1 if 'lucky_score_methods' in globals() else 3, (90, 60, 100))
+        _sl('cfg_lk_stack',  f"Stacking: {_stkl_nm}",          ls_lucky_stack,         0, len(lucky_stack_methods)-1 if 'lucky_stack_methods' in globals() else 2, (90, 70, 90))
+        _sl('cfg_lk_align',  f"Alignement: {_yn(ls_lucky_align)}", ls_lucky_align,      0, 1,    (80, 80, 100))
+        _sl('cfg_lk_roi',    f"ROI: {ls_lucky_roi}%",           ls_lucky_roi,           0, 100,  (70, 80, 110))
+        _sl('cfg_lk_savepg', f"Save progres: {_yn(ls_lucky_save_progress)}", ls_lucky_save_progress, 0, 1, (70, 100, 80))
+        _sl('cfg_lk_savefn', f"Save final: {_yn(ls_lucky_save_final)}", ls_lucky_save_final, 0, 1, (70, 90, 90))
+
+    # ── Tab 6 : Sys ── Système / Capteur / Focus / SNR ───────────────────────
+    elif home_settings_tab == 6:
+        _focm_nm = _n(focus_methods, focus_method) if 'focus_methods' in globals() else str(focus_method)
+        _starm_nm= _n(star_metrics,  star_metric)  if 'star_metrics'  in globals() else str(star_metric)
+        _v3sp_nm = _n(v3_f_speeds,   v3_f_speed)   if 'v3_f_speeds'   in globals() else str(v3_f_speed)
+        _v3rg_nm = _n(v3_f_ranges,   v3_f_range)   if 'v3_f_ranges'   in globals() else str(v3_f_range)
+        _sl('cfg_native',  f"Mode natif: {_yn(use_native_sensor_mode)}", use_native_sensor_mode, 0, 1, (80, 100, 80))
+        _sl('cfg_v3speed', f"V3 vitesse AF: {_v3sp_nm}", v3_f_speed, 0, len(v3_f_speeds)-1 if 'v3_f_speeds' in globals() else 1, (90, 90, 80))
+        _sl('cfg_v3range', f"V3 plage AF: {_v3rg_nm}",  v3_f_range, 0, len(v3_f_ranges)-1 if 'v3_f_ranges' in globals() else 2, (80, 90, 90))
+        _sl('cfg_v3hdr',   f"V3 HDR: {_yn(v3_hdr)}",    v3_hdr,     0, 1,   (80, 100, 100))
+        _sl('cfg_focus_m', f"Focus: {_focm_nm}",         focus_method, 0, len(focus_methods)-1 if 'focus_methods' in globals() else 4, (80, 110, 90))
+        _sl('cfg_star_m',  f"Metrique: {_starm_nm}",     star_metric,  0, len(star_metrics)-1 if 'star_metrics' in globals() else 2, (90, 100, 80))
+        _sl('cfg_snr',     f"SNR display: {_yn(snr_display)}", snr_display, 0, 1, (70, 100, 110))
+        _sl('cfg_metrics', f"SNR intervalle: {metrics_interval}s", metrics_interval, 1, 10, (70, 90, 120))
+
+    return control_rects
+
+
+def _apply_focus_controls():
+    """Applique gain/expo focus à la caméra immédiatement."""
+    global focus_gain, focus_exposure_us, picam2
+    if picam2 is not None:
+        try:
+            c = {}
+            if focus_gain == 0:
+                c["AeEnable"] = True
+            else:
+                c["AeEnable"] = False
+                c["AnalogueGain"] = float(focus_gain)
+                c["ExposureTime"] = int(focus_exposure_us)
+            picam2.set_controls(c)
+        except Exception as e:
+            print(f"[FOCUS] Contrôles: {e}")
+
+
+def _draw_metric_graph_pygame(x, y, w, h, history_deque, times_deque,
+                               title, unit, threshold_good, threshold_excellent,
+                               y_max_default, border_col, invert=False):
+    """
+    Graphique temps-réel directement en pygame — pas de matplotlib, zéro clignotement.
+    invert=True : plus petit = meilleur (HFR, FWHM). False : plus grand = meilleur (focus).
+    """
+    global windowSurfaceObj, _font_cache
+
+    # Fond semi-transparent (laisse voir le preview en dessous)
+    bg = pygame.Surface((w, h), pygame.SRCALPHA)
+    bg.fill((6, 10, 20, 155))
+    windowSurfaceObj.blit(bg, (x, y))
+
+    vals = list(history_deque)
+    ts   = list(times_deque)
+    n    = len(vals)
+
+    # Polices
+    for fk in (17, 20, 22):
+        if fk not in _font_cache:
+            _font_cache[fk] = pygame.font.Font(None, fk)
+    f_sm = _font_cache[17]
+    f_val = _font_cache[22]
+
+    # Titre (haut-gauche)
+    t_surf = f_sm.render(title, True, (130, 160, 210))
+    windowSurfaceObj.blit(t_surf, (x + 5, y + 4))
+
+    if n < 2:
+        wait = f_sm.render("En attente de données...", True, (55, 68, 95))
+        windowSurfaceObj.blit(wait, wait.get_rect(center=(x + w // 2, y + h // 2)))
+        pygame.draw.rect(windowSurfaceObj, border_col, pygame.Rect(x, y, w, h), 1, border_radius=3)
+        return
+
+    # Zone tracé (marge pour titre et valeur)
+    pad_l, pad_r, pad_t, pad_b = 5, 6, 20, 18
+    ix, iy = x + pad_l, y + pad_t
+    iw, ih = w - pad_l - pad_r, h - pad_t - pad_b
+
+    vmin  = 0.0
+    vmax  = max(max(vals) * 1.15, y_max_default)
+    t0    = ts[0]
+    tspan = max(ts[-1] - t0, 0.001)
+
+    def _px(i):
+        return ix + int((ts[i] - t0) / tspan * iw)
+
+    def _py(v):
+        frac = max(0.0, min(1.0, (v - vmin) / max(vmax - vmin, 0.001)))
+        return iy + ih - int(frac * ih)
+
+    # Grille verticale légère
+    for gi in range(1, 4):
+        gx = ix + int(gi / 4 * iw)
+        gs = pygame.Surface((1, ih), pygame.SRCALPHA)
+        gs.fill((38, 48, 62, 100))
+        windowSurfaceObj.blit(gs, (gx, iy))
+
+    # Lignes de seuil horizontales
+    for thr, gc in [(threshold_excellent, (0, 70, 40, 190)), (threshold_good, (55, 55, 0, 190))]:
+        if vmin < thr < vmax:
+            gy = _py(thr)
+            gs = pygame.Surface((iw, 1), pygame.SRCALPHA)
+            gs.fill(gc)
+            windowSurfaceObj.blit(gs, (ix, gy))
+
+    # Remplissage semi-transparent sous la courbe
+    poly_pts = [(ix, iy + ih)]
+    for i in range(n):
+        poly_pts.append((_px(i), max(iy, min(iy + ih, _py(vals[i])))))
+    poly_pts.append((_px(n - 1), iy + ih))
+    if len(poly_pts) >= 3:
+        fill_s = pygame.Surface((w, h), pygame.SRCALPHA)
+        local_pts = [(p[0] - x, p[1] - y) for p in poly_pts]
+        fill_col = (border_col[0] // 4, border_col[1] // 4, border_col[2] // 4, 55)
+        pygame.draw.polygon(fill_s, fill_col, local_pts)
+        windowSurfaceObj.blit(fill_s, (x, y))
+
+    def _qcol(v):
+        if invert:
+            if v < threshold_excellent: return (0, 230, 110)
+            elif v < threshold_good:    return (225, 210, 0)
+            else:                       return (235, 70, 35)
+        else:
+            if v > threshold_excellent: return (0, 230, 110)
+            elif v > threshold_good:    return (225, 210, 0)
+            else:                       return (235, 70, 35)
+
+    # Courbe avec halo (glow)
+    pts = [(_px(i), max(iy, min(iy + ih, _py(vals[i])))) for i in range(n)]
+    for i in range(n - 1):
+        c  = _qcol(vals[i])
+        p1, p2 = pts[i], pts[i + 1]
+        hc = (c[0] // 6, c[1] // 6, c[2] // 6)
+        pygame.draw.line(windowSurfaceObj, hc, p1, p2, 5)   # halo
+        pygame.draw.line(windowSurfaceObj, c,  p1, p2, 2)   # ligne principale
+
+    # Point terminal
+    cur = vals[-1]
+    cc  = _qcol(cur)
+    lpt = pts[-1]
+    pygame.draw.circle(windowSurfaceObj, cc, lpt, 4)
+    pygame.draw.circle(windowSurfaceObj, (245, 248, 255), lpt, 2)
+
+    # Valeur courante colorée (bas-droite)
+    val_str = f"{cur:.1f}{unit}"
+    vs = f_val.render(val_str, True, cc)
+    windowSurfaceObj.blit(vs, (x + w - vs.get_width() - 5, y + h - vs.get_height() - 2))
+
+    # Durée écoulée (bas-gauche en petit)
+    dur_s = f_sm.render(f"{ts[-1] - t0:.0f}s", True, (55, 65, 85))
+    windowSurfaceObj.blit(dur_s, (x + 5, y + h - dur_s.get_height() - 2))
+
+    # Bordure arrondie
+    pygame.draw.rect(windowSurfaceObj, border_col, pygame.Rect(x, y, w, h), 1, border_radius=3)
+
+
+def draw_focus_overlay(sw, sh):
+    """Dessine l'overlay du mode Focus (barre 2 rangées + bandeau graphiques + réticule)."""
+    global windowSurfaceObj, _font_cache
+    global focus_gain, focus_exposure_us, focus_zoom_focus
+    global focus_method, star_metric, metrics_interval, snr_display, histarea
+    global _focus_cur_snr
+    global xx, xy, preview_width, preview_height
+    global focus_history, focus_times, hfr_history, hfr_times, fwhm_history, fwhm_times
+    import math
+
+    rects = {}
+
+    # ── Polices ────────────────────────────────────────────────────────────────
+    for fk in (16, 18, 20):
+        if fk not in _font_cache:
+            _font_cache[fk] = pygame.font.Font(None, fk)
+    fnt_xs = _font_cache[16]   # très petite (labels statiques rangée 2)
+    fnt_sm = _font_cache[18]   # petite (sliders, segments)
+    fnt_md = _font_cache[20]   # moyenne (SNR)
+
+    # ── Dimensions barre 2 rangées ─────────────────────────────────────────────
+    row1_y, row1_h = 2, 26    # Rangée 1 : EXIT, sliders, RST, SNR
+    row2_y, row2_h = 31, 22   # Rangée 2 : sélecteurs algorithmes
+    bar_h = row2_y + row2_h + 3   # = 56
+
+    # Fond barre
+    bar_surf = pygame.Surface((sw, bar_h), pygame.SRCALPHA)
+    bar_surf.fill((14, 17, 26, 230))
+    windowSurfaceObj.blit(bar_surf, (0, 0))
+
+    # ── Helpers ────────────────────────────────────────────────────────────────
+    def _draw_btn(key, x, y, w, h, label, bg, border=(78, 80, 92)):
+        r = pygame.Rect(x, y, w, h)
+        bs = pygame.Surface((w, h), pygame.SRCALPHA)
+        bs.fill((*bg, 215))
+        windowSurfaceObj.blit(bs, (x, y))
+        pygame.draw.rect(windowSurfaceObj, border, r, 1, border_radius=4)
+        lbl = fnt_sm.render(label, True, (222, 222, 222))
+        windowSurfaceObj.blit(lbl, lbl.get_rect(center=r.center))
+        rects[key] = r
+        return r
+
+    def _draw_slider(key, x, y, w, h, label, ratio, color):
+        r = pygame.Rect(x, y, w, h)
+        bs = pygame.Surface((w, h), pygame.SRCALPHA)
+        bs.fill((26, 30, 44, 218))
+        windowSurfaceObj.blit(bs, (x, y))
+        pygame.draw.rect(windowSurfaceObj, (62, 68, 84), r, 1, border_radius=4)
+        fill_w = int(max(0.0, min(1.0, ratio)) * (w - 8))
+        if fill_w > 0:
+            pygame.draw.rect(windowSurfaceObj, color,
+                             pygame.Rect(x + 4, y + 4, fill_w, h - 8), border_radius=3)
+        lbl = fnt_sm.render(label, True, (212, 218, 228))
+        windowSurfaceObj.blit(lbl, lbl.get_rect(center=r.center))
+        rects[key] = r
+        return r
+
+    def _draw_seg(key, x, y, w, h, label, active, active_bg, active_border, active_col):
+        """Segment de sélecteur (onglet cliquable)."""
+        r = pygame.Rect(x, y, w, h)
+        if active:
+            bg, col, bdr = active_bg, active_col, active_border
+        else:
+            bg, col, bdr = (24, 27, 40), (85, 90, 108), (48, 52, 68)
+        bs = pygame.Surface((w, h), pygame.SRCALPHA)
+        bs.fill((*bg, 210))
+        windowSurfaceObj.blit(bs, (x, y))
+        pygame.draw.rect(windowSurfaceObj, bdr, r, 1, border_radius=3)
+        lbl = fnt_sm.render(label, True, col)
+        windowSurfaceObj.blit(lbl, lbl.get_rect(center=r.center))
+        rects[key] = r
+
+    # ══ RANGÉE 1 : EXIT | Gain | Expo | Zoom | HA | FRQ | RST | SNR ══════════
+    # ── Calcul des largeurs adaptatif (remplit sw) ────────────────────────────
+    _m       = 4    # marge entre éléments
+    _w_exit  = 48   # largeur bouton EXIT
+    _w_rst   = 48   # largeur bouton RST
+    _w_snr   = 120  # réserve droite pour affichage SNR
+    # 5 sliders partagent l'espace restant équitablement
+    # Marges : gauche(4) + 6 inter-éléments(4×6=24) + droite avant SNR(4) = 32
+    _sw5 = max(50, (sw - _m - _w_exit - 6 * _m - _w_rst - _m - _w_snr) // 5)
+
+    cx = _m
+
+    # EXIT
+    _draw_btn('focus_exit', cx, row1_y, _w_exit, row1_h, "EXIT", (82, 28, 28), (190, 55, 55))
+    cx += _w_exit + _m
+
+    # Gain (linéaire 0-300)
+    g_ratio = focus_gain / 300.0
+    _draw_slider('focus_gain', cx, row1_y, _sw5, row1_h, f"Gain:{focus_gain}", g_ratio, (118, 96, 50))
+    cx += _sw5 + _m
+
+    # Expo (log 1ms–1000ms)
+    _fexp = max(1000, min(1000000, focus_exposure_us))
+    _lmin, _lmax = math.log10(1000), math.log10(1000000)
+    e_ratio = (math.log10(_fexp) - _lmin) / (_lmax - _lmin)
+    _ems = _fexp / 1000.0
+    _draw_slider('focus_expo', cx, row1_y, _sw5, row1_h, f"Expo:{_ems:.0f}ms", e_ratio, (65, 112, 162))
+    cx += _sw5 + _m
+
+    # Zoom
+    z_ratio = focus_zoom_focus / 5.0
+    _draw_slider('focus_zoom', cx, row1_y, _sw5, row1_h, f"Z:{focus_zoom_focus}x", z_ratio, (62, 122, 132))
+    cx += _sw5 + _m
+
+    # HA (histarea 10-200px)
+    h_ratio = (max(10, min(200, histarea)) - 10) / 190.0
+    _draw_slider('focus_hist', cx, row1_y, _sw5, row1_h, f"HA:{histarea}", h_ratio, (88, 75, 128))
+    cx += _sw5 + _m
+
+    # FRQ (fréquence calcul 1-10 frames)
+    _frq_ratio = (metrics_interval - 1) / 9.0
+    _draw_slider('focus_frq', cx, row1_y, _sw5, row1_h, f"FRQ:{metrics_interval}", _frq_ratio, (52, 78, 102))
+    cx += _sw5 + _m
+
+    # RST
+    _draw_btn('focus_rst', cx, row1_y, _w_rst, row1_h, "RST", (46, 36, 56), (102, 80, 122))
+    cx += _w_rst + _m
+
+    # SNR (texte, prend l'espace restant jusqu'au bord droit)
+    if snr_display == 1 and _focus_cur_snr is not None:
+        snr_surf = fnt_md.render(f"SNR: {_focus_cur_snr:.1f}:1", True, (110, 210, 255))
+        windowSurfaceObj.blit(snr_surf, snr_surf.get_rect(midleft=(cx, row1_y + row1_h // 2)))
+
+    # ══ RANGÉE 2 : sélecteurs ÉTOILE et NETTETÉ ══════════════════════════════
+    seg_y = row2_y + 1
+    seg_h = row2_h - 2
+    sx = 5
+
+    # Label "ÉTOILE:"
+    lbl_et = fnt_xs.render("ÉTOILE:", True, (140, 148, 168))
+    windowSurfaceObj.blit(lbl_et, lbl_et.get_rect(midleft=(sx, row2_y + row2_h // 2)))
+    sx += lbl_et.get_width() + 5
+
+    # 3 segments ÉTOILE (index = star_metric)
+    _s_data = [
+        ("OFF",  (36, 38, 50),  (62, 65, 80),  (100, 105, 122)),
+        ("HFR",  (22, 68, 38),  (44, 152, 65),  (58, 218, 95)),
+        ("FWHM", (62, 20, 68),  (148, 44, 148), (218, 58, 218)),
+    ]
+    for i, (sl, sabg, sabdr, sacol) in enumerate(_s_data):
+        tw = max(fnt_sm.size(sl)[0] + 16, 46)
+        _draw_seg(f'focus_star_{i}', sx, seg_y, tw, seg_h, sl,
+                  star_metric == i, sabg, sabdr, sacol)
+        sx += tw + 2
+
+    sx += 14  # séparateur entre les deux groupes
+
+    # Label "NETTETÉ:"
+    lbl_nt = fnt_xs.render("NETTETÉ:", True, (140, 148, 168))
+    windowSurfaceObj.blit(lbl_nt, lbl_nt.get_rect(midleft=(sx, row2_y + row2_h // 2)))
+    sx += lbl_nt.get_width() + 5
+
+    # 5 segments NETTETÉ (index = focus_method)
+    _m_data = [
+        ("OFF",  (36, 38, 50),   (62, 65, 80),    (100, 105, 122)),
+        ("LAP",  (60, 56, 10),   (158, 145, 25),  (218, 202, 40)),
+        ("GRAD", (65, 40, 10),   (178, 98, 25),   (228, 132, 40)),
+        ("SOB",  (70, 20, 20),   (178, 46, 46),   (228, 68, 68)),
+        ("TEN",  (10, 55, 72),   (25, 142, 178),  (40, 188, 228)),
+    ]
+    for i, (ml, mabg, mabdr, macol) in enumerate(_m_data):
+        tw = max(fnt_sm.size(ml)[0] + 16, 46)
+        _draw_seg(f'focus_foc_{i}', sx, seg_y, tw, seg_h, ml,
+                  focus_method == i, mabg, mabdr, macol)
+        sx += tw + 2
+
+    # ── Graphiques en transparence sur le preview (même zone bas 25%) ──────────
+    band_y = int(sh * 0.75)
+    band_h = sh - band_y
+    # Pas de bandeau noir — les graphiques sont dessinés directement sur le preview
+
+    graph_w = max(60, (sw - 50) // 2)
+    graph_h = max(40, band_h - 6)
+
+    # Graphique gauche : ÉTOILE (HFR ou FWHM)
+    if star_metric == 1:
+        _draw_metric_graph_pygame(
+            10, band_y + 3, graph_w, graph_h,
+            hfr_history, hfr_times,
+            "HFR — étoiles", " px",
+            threshold_good=3.5, threshold_excellent=2.0,
+            y_max_default=8, border_col=(100, 255, 200), invert=True)
+    elif star_metric == 2:
+        _draw_metric_graph_pygame(
+            10, band_y + 3, graph_w, graph_h,
+            fwhm_history, fwhm_times,
+            "FWHM — étoiles", " px",
+            threshold_good=10, threshold_excellent=5,
+            y_max_default=15, border_col=(220, 100, 255), invert=True)
+
+    # Graphique droite : NETTETÉ (focus_method)
+    if focus_method > 0:
+        _mnames = ['', 'Laplacian', 'Gradient', 'Sobel', 'Tenengrad']
+        _draw_metric_graph_pygame(
+            30 + graph_w, band_y + 3, graph_w, graph_h,
+            focus_history, focus_times,
+            f"Netteté — {_mnames[focus_method % 5]}", "",
+            threshold_good=200, threshold_excellent=500,
+            y_max_default=600, border_col=(100, 200, 255), invert=False)
+
+    # ── Réticule déplaçable ────────────────────────────────────────────────────
+    try:
+        ratio_x = sw / max(1, preview_width)
+        ratio_y = sh / max(1, preview_height)
+        zoom_factors = {0: 1.0, 1: 1.6, 2: 2.4, 3: 3.0, 4: 3.9, 5: 5.8}
+        ha = min(int(histarea * zoom_factors.get(focus_zoom_focus, 1.0)), sw // 3)
+        cxf = int(xx * ratio_x)
+        cyf = int(xy * ratio_y)
+        cyf = min(cyf, band_y - ha - 2)
+        # Halo extérieur
+        pygame.draw.rect(windowSurfaceObj, (100, 25, 25),
+                         pygame.Rect(cxf - ha - 1, cyf - ha - 1, ha * 2 + 2, ha * 2 + 2), 1)
+        # Carré principal
+        pygame.draw.rect(windowSurfaceObj, (210, 50, 50),
+                         pygame.Rect(cxf - ha, cyf - ha, ha * 2, ha * 2), 2)
+        # Croix
+        pygame.draw.line(windowSurfaceObj, (255, 255, 255),
+                         (cxf - ha // 2, cyf), (cxf + ha // 2, cyf), 1)
+        pygame.draw.line(windowSurfaceObj, (255, 255, 255),
+                         (cxf, cyf - ha // 2), (cxf, cyf + ha // 2), 1)
+        # Point central
+        pygame.draw.circle(windowSurfaceObj, (255, 100, 100), (cxf, cyf), 2)
+    except Exception:
+        pass
+
+    return rects
+
+
+def handle_focus_overlay_click(mx, my):
+    """Gère les clics sur l'overlay focus."""
+    global focus_mode, focus_gain, focus_exposure_us, focus_zoom_focus
+    global focus_method, star_metric, metrics_interval, histarea, zoom
+    global _focus_overlay_rects
+    global xx, xy, preview_width, preview_height
+    global windowSurfaceObj, picam2
+    import math
+
+    rects = _focus_overlay_rects
+    if not rects:
+        return
+
+    sw, sh = windowSurfaceObj.get_size()
+    bar_h = 56   # hauteur barre 2 rangées (doit rester sync avec draw_focus_overlay)
+
+    # EXIT
+    r = rects.get('focus_exit')
+    if r and r.collidepoint(mx, my):
+        focus_mode = 0
+        print("[FOCUS] Mode désactivé")
+        return
+
+    # Gain slider
+    r = rects.get('focus_gain')
+    if r and r.collidepoint(mx, my):
+        ratio = max(0.0, min(1.0, (mx - r.x) / max(1, r.width)))
+        focus_gain = int(ratio * 300 + 0.5)
+        _apply_focus_controls()
+        return
+
+    # Expo slider
+    r = rects.get('focus_expo')
+    if r and r.collidepoint(mx, my):
+        ratio = max(0.0, min(1.0, (mx - r.x) / max(1, r.width)))
+        _lmin, _lmax = math.log10(1000), math.log10(1000000)
+        focus_exposure_us = int(10 ** (_lmin + ratio * (_lmax - _lmin)))
+        _apply_focus_controls()
+        return
+
+    # Zoom slider — mise à jour valeur seulement ; le restart caméra est
+    # géré exclusivement par le drag-end dans MOUSEBUTTONUP (focus_zoom)
+    r = rects.get('focus_zoom')
+    if r and r.collidepoint(mx, my):
+        ratio = max(0.0, min(1.0, (mx - r.x) / max(1, r.width)))
+        focus_zoom_focus = max(0, min(5, int(ratio * 5 + 0.5)))
+        return
+
+    # HA slider (histarea 10-200px)
+    r = rects.get('focus_hist')
+    if r and r.collidepoint(mx, my):
+        ratio = max(0.0, min(1.0, (mx - r.x) / max(1, r.width)))
+        histarea = max(10, min(200, int(10 + ratio * 190 + 0.5)))
+        return
+
+    # FRQ slider (metrics_interval 1-10)
+    r = rects.get('focus_frq')
+    if r and r.collidepoint(mx, my):
+        ratio = max(0.0, min(1.0, (mx - r.x) / max(1, r.width)))
+        metrics_interval = max(1, min(10, int(ratio * 9 + 1 + 0.5)))
+        try:
+            save_config_to_file()
+        except Exception:
+            pass
+        return
+
+    # RST
+    r = rects.get('focus_rst')
+    if r and r.collidepoint(mx, my):
+        reset_focus_history()
+        reset_hfr_history()
+        reset_fwhm_history()
+        return
+
+    # Segments ÉTOILE (star_metric 0/1/2 = OFF/HFR/FWHM)
+    for i in range(3):
+        r = rects.get(f'focus_star_{i}')
+        if r and r.collidepoint(mx, my):
+            star_metric = i
+            return
+
+    # Segments NETTETÉ (focus_method 0..4 = OFF/LAP/GRAD/SOB/TEN)
+    for i in range(5):
+        r = rects.get(f'focus_foc_{i}')
+        if r and r.collidepoint(mx, my):
+            focus_method = i
+            try:
+                save_config_to_file()
+            except Exception:
+                pass
+            return
+
+    # Clic dans la zone preview → déplacer réticule
+    band_y = int(sh * 0.75)
+    if my > bar_h and my < band_y:
+        for key, rect in rects.items():
+            if rect.collidepoint(mx, my):
+                return
+        ratio_x = max(1, preview_width) / max(1, sw)
+        ratio_y = max(1, preview_height) / max(1, sh)
+        xx = max(0, min(preview_width,  int(mx * ratio_x)))
+        xy = max(0, min(preview_height, int(my * ratio_y)))
+
+
+def draw_home_overlay(sw, sh, frame_bgr=None):
+    """Fonction maîtresse — dessine tout l'overlay du home screen."""
+    global _home_slider_rects, _home_btn_rects, _home_last_frame_bgr
+    global home_histogram_visible, home_settings_visible, home_binning, home_windowed
+    global _home_suppress_oldui
+    _home_suppress_oldui = False  # La capture est terminée, restaurer le rendu normal
+
+    if frame_bgr is not None:
+        _home_last_frame_bgr = frame_bgr
+
+    # 1. Histogramme bas-centre (si activé)
+    if home_histogram_visible and _home_last_frame_bgr is not None:
+        try:
+            draw_home_histogram(_home_last_frame_bgr, sw, sh)
+        except Exception:
+            pass
+
+    # 2. Boutons modes gauche/droite
+    left_rects  = draw_home_left_modes(sw, sh)
+    right_rects = draw_home_right_modes(sw, sh)
+
+    # 3. Barre d'action bas
+    bottom_rects = draw_home_bottom_bar(sw, sh)
+
+    # 4. Sliders gain/expo/zoom (haut-centre) + icônes coins
+    top_rects = draw_home_top_icons(sw, sh, home_settings_visible, home_histogram_visible, home_binning, home_windowed)
+    ge_rects  = draw_home_gain_exposure(sw, sh)
+
+    # 5. Panneau réglages (si visible)
+    if home_settings_visible:
+        try:
+            settings_rects = draw_home_settings_panel(sw, sh)
+        except Exception:
+            settings_rects = {}
+    else:
+        settings_rects = {}
+
+    # 6. Agréger tous les rects
+    _home_btn_rects    = {**left_rects, **right_rects, **bottom_rects, **top_rects}
+    _home_slider_rects = {**ge_rects, **settings_rects}
 
 
 def draw_jsk_slider(x, y, width, height, label, value, vmin, vmax, color=(100, 140, 180)):
@@ -8048,6 +9486,614 @@ def draw_jsk_slider(x, y, width, height, label, value, vmin, vmax, color=(100, 1
     return slider_rect
 
 
+def handle_home_click(mx, my):
+    """
+    Gère tous les clics sur l'écran d'accueil (home screen nouvelle interface).
+    Retourne True si le clic a été géré (ne pas propager), False sinon.
+    """
+    global home_settings_visible, home_settings_tab, home_histogram_visible
+    global home_binning, home_gain_scale_idx, home_expo_scale_idx, home_windowed
+    global _home_pending_capture
+    global gain, custom_sspeed, sspeed, zoom, menu, blue, red
+    global moon_mode, sun_mode, jsk_live_mode, lucky_interface_mode
+    global ls_interface_mode, stretch_mode, focus_mode
+    global windowSurfaceObj, _home_btn_rects, _home_slider_rects
+    global _home_last_frame_bgr
+    # Config params
+    global mode, speed, brightness, contrast, saturation, ev, awb, meter
+    global sharpness, denoise, quality, vformat, codec, vlen, fps, tinterval, tshots, extn, raw_format, str_cap
+    global vflip, hflip, rotate, IRF, profile, level, v3_hdr, v3_f_speed, v3_f_range
+    global ls_preview_refresh, ls_alignment_mode, ls_enable_qc, ls_max_fwhm, ls_min_sharpness
+    global ls_max_drift, ls_min_stars, ls_stack_method, ls_stack_kappa, ls_stack_iterations
+    global ls_save_progress, ls_save_final, ls_planetary_enable, ls_planetary_mode
+    global ls_planetary_disk_min, ls_planetary_disk_max
+    global ls_lucky_buffer, ls_lucky_keep, ls_lucky_score, ls_lucky_stack, ls_lucky_align, ls_lucky_roi
+    global ls_lucky_save_progress, ls_lucky_save_final
+    global use_native_sensor_mode, focus_method, star_metric, fix_bad_pixels
+    global fix_bad_pixels_sigma, fix_bad_pixels_min_adu, isp_enable, snr_display
+    global metrics_interval, allsky_mode, allsky_mean_target, allsky_max_gain, allsky_apply_stretch
+    global allsky_stack_enable, allsky_stack_count
+    global stretch_preset, stretch_p_low, stretch_p_high, stretch_factor
+    global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP, ghs_preset
+    global moon_saved_vwidth, moon_saved_vheight, moon_saved_zoom, moon_saved_use_native
+    global moon_saved_gain, moon_saved_exposure, moon_gain, moon_exposure_us
+    global moon_settings_visible, moon_binning, _moon_last_surface, _moon_slider_rects
+    global moon_wb_r, moon_wb_b, moon_processor, moon_recorder, moon_preset
+    global sun_mode, sun_saved_vwidth, sun_saved_vheight, sun_saved_zoom, sun_saved_use_native
+    global sun_saved_gain, sun_saved_exposure, sun_gain, sun_exposure_us
+    global sun_settings_visible, sun_binning, _sun_last_surface, _sun_slider_rects
+    global sun_processor, sun_recorder, sun_preset
+    global jsk_live_mode, jsk_saved_vwidth, jsk_saved_vheight, jsk_saved_zoom
+    global jsk_saved_use_native, jsk_saved_gain, jsk_saved_exposure
+    global jsk_gain, jsk_exposure_us, jsk_settings_visible, jsk_binning, jsk_crop_square
+    global _jsk_last_surface, _jsk_slider_rects, jsk_processor, jsk_recorder
+    global lucky_recorder, lucky_settings_visible, _lucky_slider_rects, _lucky_slider_dragging
+    global _lucky_ge_dragging, ls_gain, ls_exposure_us, ls_zoom, ls_settings_visible
+    global _ls_slider_rects, _ls_slider_dragging, _ls_ge_dragging, ls_sched_frames_done
+    global stretch_adjust_mode, _stretch_slider_rects, _raw_slider_rects
+    global collimation_mode, vwidth, vheight, preview_height, preview_width, bw, bh
+    global collimation_saved_zoom, collimation_saved_vwidth, collimation_saved_vheight
+    global collimation_saved_use_native, collimation_saved_gain, collimation_saved_exposure
+    global collimation_gain, collimation_exposure_us, collimation_zoom
+    global collimation_detector, collimation_last_surface, collimation_settings_visible
+    global collimation_sensitivity, collimation_detect_interval
+    global collimation_circle_enabled, collimation_circle_min_pct, collimation_circle_max_pct
+    global picam2, capture_thread, custom_sspeed, sspeed, restart
+    global focus_gain, focus_exposure_us, focus_zoom_focus
+
+    import math
+
+    # --- Sliders gain/expo/zoom (haut-centre) ---
+    for key, rect in _home_slider_rects.items():
+        if key not in ('home_gain', 'home_expo', 'home_zoom'):
+            continue
+        if rect.collidepoint(mx, my):
+            positions = _home_ge_slider_positions(rect.x + rect.w + 8, 0)  # dummy call to get geom
+            # Recalculate positions dynamically
+            display_modes = pygame.display.list_modes()
+            _sw, _sh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+            geom_list = _home_ge_slider_positions(_sw, _sh)
+            key_map = {0: 'home_gain', 1: 'home_expo', 2: 'home_zoom'}
+            for i, (sx, sy, slider_w, slider_h) in enumerate(geom_list):
+                r = pygame.Rect(sx, sy, slider_w, slider_h)
+                if r.collidepoint(mx, my):
+                    ratio = max(0.0, min(1.0, (mx - sx) / slider_w))
+                    if i == 0:  # Gain
+                        gain = max(1, min(300, int(1 + ratio * 299)))
+                        apply_controls_immediately(gain_value=gain)
+                    elif i == 1:  # Expo (log)
+                        min_exp_us, max_exp_us = 1000, 1000000
+                        log_min, log_max = math.log10(min_exp_us), math.log10(max_exp_us)
+                        custom_sspeed = max(min_exp_us, min(max_exp_us, int(10 ** (log_min + ratio * (log_max - log_min)))))
+                        apply_controls_immediately(exposure_time=custom_sspeed)
+                    elif i == 2:  # Zoom
+                        zoom = max(0, min(5, int(ratio * 5 + 0.5)))
+                    return True
+
+    # --- Panneau réglages — onglets ---
+    for key, rect in _home_slider_rects.items():
+        if key.startswith('home_tab_') and rect.collidepoint(mx, my):
+            home_settings_tab = int(key[-1])
+            return True
+
+    # --- Panneau réglages — boutons pavé numérique ---
+    for key, rect in _home_slider_rects.items():
+        if key.startswith('num_cfg_') and rect.collidepoint(mx, my):
+            if key == 'num_cfg_tinterval':
+                _open_numpad('cfg_tinterval')
+                return True
+            elif key == 'num_cfg_tshots':
+                _open_numpad('cfg_tshots')
+                return True
+
+    # --- Panneau réglages — sliders config ---
+    for key, rect in _home_slider_rects.items():
+        if not key.startswith('cfg_'):
+            continue
+        if rect.collidepoint(mx, my):
+            ratio = max(0.0, min(1.0, (mx - rect.x - 5) / max(1, rect.w - 15)))
+            changed = True
+            if key == 'cfg_mode':
+                _nm = len(modes)-1 if 'modes' in globals() else 2
+                mode = int(ratio * _nm + 0.5)
+                _home_cam_restart_with_msg()
+            elif key == 'cfg_extn':
+                _ne = len(extns)-1 if 'extns' in globals() else 5
+                extn = int(ratio * _ne + 0.5)
+            elif key == 'cfg_raw':
+                raw_format = int(ratio * 3 + 0.5)
+                _home_cam_restart_with_msg()
+            elif key == 'cfg_quality':
+                quality = int(ratio * 100 + 0.5)
+            elif key == 'cfg_vformat':
+                _nv = len(vwidths)-1 if 'vwidths' in globals() else 4
+                vformat = int(ratio * _nv + 0.5)
+                _home_cam_restart_with_msg()
+            elif key == 'cfg_codec':
+                _nc = len(codecs)-1 if 'codecs' in globals() else 6
+                codec = int(ratio * _nc + 0.5)
+            elif key == 'cfg_vlen':
+                vlen = max(1, int(ratio * 59 + 1 + 0.5))
+            elif key == 'cfg_fps':
+                fps = max(1, min(60, int(1 + ratio * 59 + 0.5)))
+            elif key == 'cfg_str_cap':
+                _ns = len(strs)-1 if 'strs' in globals() else 3
+                str_cap = int(ratio * _ns + 0.5)
+            elif key == 'cfg_gain_scale':
+                # Sélecteur d'échelle max du slider Gain de l'interface principale
+                home_gain_scale_idx = max(0, min(int(ratio * len(_HOME_GAIN_SCALES) + 0.5), len(_HOME_GAIN_SCALES)-1))
+                # Limiter le gain actuel à la nouvelle échelle
+                _new_gmax = _HOME_GAIN_SCALES[home_gain_scale_idx]
+                if gain > _new_gmax:
+                    gain = _new_gmax
+                    apply_controls_immediately(gain_value=gain)
+            elif key == 'cfg_expo_scale':
+                # Sélecteur d'échelle max du slider Expo de l'interface principale
+                home_expo_scale_idx = max(0, min(int(ratio * len(_HOME_EXPO_SCALES_MS) + 0.5), len(_HOME_EXPO_SCALES_MS)-1))
+            elif key == 'cfg_brightness':
+                brightness = int(-100 + ratio * 200 + 0.5)
+                _apply_home_live_controls()
+            elif key == 'cfg_contrast':
+                contrast = int(ratio * 200 + 0.5)
+                _apply_home_live_controls()
+            elif key == 'cfg_saturation':
+                saturation = int(ratio * 200 + 0.5)
+                _apply_home_live_controls()
+            elif key == 'cfg_ev':
+                ev = int(-10 + ratio * 20 + 0.5)
+                if picam2 is not None:
+                    try:
+                        picam2.set_controls({"ExposureValue": float(ev)})
+                    except Exception:
+                        pass
+            elif key == 'cfg_awb':
+                _na = len(awbs)-1 if 'awbs' in globals() else 7
+                awb = int(ratio * _na + 0.5)
+                _apply_home_live_controls()
+            elif key == 'cfg_meter':
+                _nm2 = len(meters)-1 if 'meters' in globals() else 2
+                meter = int(ratio * _nm2 + 0.5)
+                if picam2 is not None:
+                    try:
+                        picam2.set_controls({"AeMeteringMode": meter})
+                    except Exception:
+                        pass
+            elif key == 'cfg_blue':
+                blue = max(1, int(1 + ratio * 79 + 0.5))
+                _apply_home_live_controls()
+            elif key == 'cfg_red':
+                red = max(1, int(1 + ratio * 79 + 0.5))
+                _apply_home_live_controls()
+            elif key == 'cfg_sharpness':
+                sharpness = int(ratio * 32 + 0.5)
+                _apply_home_live_controls()
+            elif key == 'cfg_denoise':
+                denoise = int(ratio * 3 + 0.5)
+                if picam2 is not None:
+                    try:
+                        from picamera2 import controls as _pc
+                        _denoise_map = {
+                            0: _pc.NoiseReductionModeEnum.Off,
+                            1: _pc.NoiseReductionModeEnum.Off,
+                            2: _pc.NoiseReductionModeEnum.Fast,
+                            3: _pc.NoiseReductionModeEnum.HighQuality,
+                        }
+                        picam2.set_controls({"NoiseReductionMode": _denoise_map.get(int(denoise), _pc.NoiseReductionModeEnum.Off)})
+                    except Exception:
+                        pass
+            elif key == 'cfg_rotate':
+                rotate = int(ratio * 3 + 0.5)
+                _home_cam_restart_with_msg()
+            elif key == 'cfg_vflip':
+                vflip = int(ratio + 0.5)
+                _home_cam_restart_with_msg()
+            elif key == 'cfg_hflip':
+                hflip = int(ratio + 0.5)
+                _home_cam_restart_with_msg()
+            elif key == 'cfg_IRF':
+                IRF = int(ratio + 0.5)
+            elif key == 'cfg_ls_refresh':
+                ls_preview_refresh = max(1, int(ratio * 9 + 1 + 0.5))
+            elif key == 'cfg_ls_align':
+                ls_alignment_mode = int(ratio * 3 + 0.5)
+            elif key == 'cfg_ls_qc':
+                ls_enable_qc = int(ratio + 0.5)
+            elif key == 'cfg_ls_fwhm':
+                ls_max_fwhm = int(ratio * 500 + 0.5)
+            elif key == 'cfg_ls_sharp':
+                ls_min_sharpness = int(ratio * 100 + 0.5)
+            elif key == 'cfg_ls_drift':
+                ls_max_drift = max(100, int(100 + ratio * 4900 + 0.5))
+            elif key == 'cfg_ls_stars':
+                ls_min_stars = int(ratio * 50 + 0.5)
+            elif key == 'cfg_ls_method':
+                ls_stack_method = int(ratio * 4 + 0.5)
+            elif key == 'cfg_ls_kappa':
+                ls_stack_kappa = max(10, int(10 + ratio * 40 + 0.5))
+            elif key == 'cfg_ls_iter':
+                ls_stack_iterations = max(1, int(ratio * 9 + 1 + 0.5))
+            elif key == 'cfg_ls_saveprog':
+                ls_save_progress = int(ratio + 0.5)
+            elif key == 'cfg_ls_savefin':
+                ls_save_final = int(ratio + 0.5)
+            elif key == 'cfg_ls_planet':
+                ls_planetary_enable = int(ratio + 0.5)
+            elif key == 'cfg_ls_plmode':
+                _npm = len(planetary_modes)-1 if 'planetary_modes' in globals() else 2
+                ls_planetary_mode = int(ratio * _npm + 0.5)
+            elif key == 'cfg_ls_plmin':
+                ls_planetary_disk_min = max(10, int(10 + ratio * 990 + 0.5))
+            elif key == 'cfg_ls_plmax':
+                ls_planetary_disk_max = max(10, int(10 + ratio * 990 + 0.5))
+            elif key == 'cfg_lk_buffer':
+                ls_lucky_buffer = max(10, int(10 + ratio * 190 + 0.5))
+            elif key == 'cfg_lk_keep':
+                ls_lucky_keep = max(5, int(5 + ratio * 95 + 0.5))
+            elif key == 'cfg_lk_score':
+                ls_lucky_score = int(ratio * 3 + 0.5)
+            elif key == 'cfg_lk_stack':
+                ls_lucky_stack = int(ratio * 2 + 0.5)
+            elif key == 'cfg_lk_align':
+                ls_lucky_align = int(ratio + 0.5)
+            elif key == 'cfg_lk_roi':
+                ls_lucky_roi = int(ratio * 100 + 0.5)
+            elif key == 'cfg_lk_savepg':
+                ls_lucky_save_progress = int(ratio + 0.5)
+            elif key == 'cfg_lk_savefn':
+                ls_lucky_save_final = int(ratio + 0.5)
+            elif key == 'cfg_native':
+                use_native_sensor_mode = int(ratio + 0.5)
+            elif key == 'cfg_focus_m':
+                _nfm = len(focus_methods)-1 if 'focus_methods' in globals() else 4
+                focus_method = int(ratio * _nfm + 0.5)
+            elif key == 'cfg_star_m':
+                star_metric = int(ratio * 2 + 0.5)
+            elif key == 'cfg_v3speed':
+                _nvs = len(v3_f_speeds)-1 if 'v3_f_speeds' in globals() else 1
+                v3_f_speed = int(ratio * _nvs + 0.5)
+            elif key == 'cfg_v3range':
+                _nvr = len(v3_f_ranges)-1 if 'v3_f_ranges' in globals() else 2
+                v3_f_range = int(ratio * _nvr + 0.5)
+            elif key == 'cfg_v3hdr':
+                v3_hdr = int(ratio + 0.5)
+            elif key == 'cfg_fixbad':
+                fix_bad_pixels = int(ratio + 0.5)
+            elif key == 'cfg_fixsig':
+                fix_bad_pixels_sigma = max(10, int(10 + ratio * 90 + 0.5))
+            elif key == 'cfg_fixadu':
+                fix_bad_pixels_min_adu = max(10, int(10 + ratio * 490 + 0.5))
+            elif key == 'cfg_isp':
+                isp_enable = int(ratio + 0.5)
+            elif key == 'cfg_snr':
+                snr_display = int(ratio + 0.5)
+            elif key == 'cfg_metrics':
+                metrics_interval = max(1, int(ratio * 9 + 1 + 0.5))
+            elif key == 'cfg_allsky':
+                allsky_mode = int(ratio + 0.5)
+            elif key == 'cfg_allsky_tg':
+                allsky_mean_target = max(5, int(5 + ratio * 95 + 0.5))
+            elif key == 'cfg_allsky_gn':
+                allsky_max_gain = int(ratio * 300 + 0.5)
+            elif key == 'cfg_allsky_st':
+                allsky_apply_stretch = int(ratio + 0.5)
+            elif key == 'cfg_allsky_stk':
+                allsky_stack_enable = int(ratio + 0.5)
+            elif key == 'cfg_allsky_cnt':
+                allsky_stack_count = max(2, min(10, int(2 + ratio * 8 + 0.5)))
+            elif key == 'cfg_tinterval':
+                tinterval = max(1, int(1 + ratio * 3599 + 0.5))
+            elif key == 'cfg_tshots':
+                tshots = max(1, int(1 + ratio * 9998 + 0.5))
+            elif key == 'cfg_profile':
+                profile = int(ratio * 2 + 0.5)
+            elif key == 'cfg_level':
+                level = int(ratio * 2 + 0.5)
+            # --- Stretch ---
+            elif key == 'cfg_str_prev':
+                _nsp = len(stretch_presets)-1 if 'stretch_presets' in globals() else 2
+                stretch_preset = int(ratio * _nsp + 0.5)
+            elif key == 'cfg_str_low':
+                stretch_p_low = int(ratio * 2 + 0.5)
+            elif key == 'cfg_str_high':
+                stretch_p_high = max(9980, min(10000, int(9980 + ratio * 20 + 0.5)))
+            elif key == 'cfg_str_fac':
+                stretch_factor = int(ratio * 1500 + 0.5)
+            elif key == 'cfg_ghs_pre':
+                _ngp = len(ghs_presets)-1 if 'ghs_presets' in globals() else 3
+                ghs_preset = int(ratio * _ngp + 0.5)
+            elif key == 'cfg_ghs_D':
+                ghs_D = max(-10, min(100, int(-10 + ratio * 110 + 0.5)))
+            elif key == 'cfg_ghs_b':
+                ghs_b = max(-50, min(150, int(-50 + ratio * 200 + 0.5)))
+            elif key == 'cfg_ghs_SP':
+                ghs_SP = int(ratio * 100 + 0.5)
+            elif key == 'cfg_ghs_LP':
+                ghs_LP = int(ratio * 100 + 0.5)
+            elif key == 'cfg_ghs_HP':
+                ghs_HP = int(ratio * 100 + 0.5)
+            else:
+                changed = False
+            if changed:
+                global _home_save_pending, _home_save_deadline
+                _home_save_pending  = True
+                _home_save_deadline = pygame.time.get_ticks() + 800  # écriture après 800ms d'inactivité
+            return True
+
+    # --- Icônes haut-gauche/droite ---
+    for key, rect in _home_btn_rects.items():
+        if not rect.collidepoint(mx, my):
+            continue
+        if key == 'home_settings':
+            home_settings_visible = 1 - home_settings_visible
+            _home_slider_rects.clear()
+            return True
+        elif key == 'home_hist':
+            home_histogram_visible = 1 - home_histogram_visible
+            return True
+        elif key == 'home_binning':
+            home_binning = 1 - home_binning
+            if home_binning == 1:
+                vwidth = 1920; vheight = 1080; use_native_sensor_mode = 0
+            else:
+                vwidth = igw; vheight = igh; use_native_sensor_mode = 1
+            kill_preview_process()
+            preview()
+            # Restaurer le mode d'affichage (fullscreen ou fenêtré)
+            display_modes = pygame.display.list_modes()
+            _hw, _hh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+            _disp_flags = 0 if home_windowed else pygame.FULLSCREEN
+            windowSurfaceObj = pygame.display.set_mode((_hw, _hh), _disp_flags, 24)
+            windowSurfaceObj.fill((0, 0, 0))
+            if gain > 0:
+                apply_controls_immediately(gain_value=gain)
+            print(f"[HOME] Binning: {'2x2 (1920x1080)' if home_binning else 'Natif ({igw}x{igh})'}")
+            return True
+        elif key == 'home_windowed':
+            home_windowed = 1 - home_windowed
+            display_modes = pygame.display.list_modes()
+            _hw, _hh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+            _disp_flags = 0 if home_windowed else pygame.FULLSCREEN
+            windowSurfaceObj = pygame.display.set_mode((_hw, _hh), _disp_flags, 24)
+            windowSurfaceObj.fill((0, 0, 0))
+            print(f"[HOME] Mode affichage: {'fenêtré' if home_windowed else 'plein écran'}")
+            return True
+
+    # --- Boutons de modes (left/right) ---
+    for key, rect in _home_btn_rects.items():
+        if not rect.collidepoint(mx, my):
+            continue
+
+        if key == 'mode_livestack':
+            # Entrer dans le mode interface Live Stack
+            ls_interface_mode = 1
+            ls_settings_visible = 0
+            ls_sched_frames_done = 0
+            ls_gain = max(0, gain if gain > 0 else 10)
+            _init_expo = custom_sspeed if custom_sspeed > 0 else sspeed
+            ls_exposure_us = max(1000, min(100000, _init_expo if _init_expo > 0 else 10000))
+            ls_zoom = zoom
+            stretch_mode = 1
+            stretch_adjust_mode = 0
+            _stretch_slider_rects = {}
+            _raw_slider_rects = {}
+            _ls_slider_rects = {}
+            display_modes = pygame.display.list_modes()
+            _mw, _mh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+            windowSurfaceObj = pygame.display.set_mode((_mw, _mh), pygame.FULLSCREEN, 24)
+            print("[HOME] Mode interface Live Stack activé")
+            return True
+
+        elif key == 'mode_lucky':
+            # Entrer dans le mode interface Lucky Stack
+            if not luckystack_active and lucky_interface_mode == 0:
+                stretch_mode = 1
+                display_modes = pygame.display.list_modes()
+                _mw, _mh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+                windowSurfaceObj = pygame.display.set_mode((_mw, _mh), pygame.FULLSCREEN, 24)
+                lucky_interface_mode = 1
+                lucky_recorder = JSKVideoRecorder()
+                if raw_format >= 2:
+                    raw_format = 1
+                lucky_settings_visible = 0
+                ls_gain = max(0, gain if gain > 0 else 10)
+                _init_expo = custom_sspeed if custom_sspeed > 0 else sspeed
+                ls_exposure_us = max(1000, min(100000, _init_expo if _init_expo > 0 else 10000))
+                ls_zoom = zoom
+                _lucky_slider_rects = {}
+                _lucky_slider_dragging = False
+                _lucky_ge_dragging = None
+                print("[HOME] Mode interface Lucky Stack activé")
+            return True
+
+        elif key == 'mode_stretch':
+            # Entrer dans le mode stretch preview
+            stretch_mode = 1 - stretch_mode
+            if stretch_mode == 1:
+                display_modes = pygame.display.list_modes()
+                _mw, _mh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+                windowSurfaceObj = pygame.display.set_mode((_mw, _mh), pygame.FULLSCREEN, 24)
+            print(f"[HOME] Stretch mode: {stretch_mode}")
+            return True
+
+        elif key == 'mode_focus':
+            # Entrer dans le mode focus overlay
+            focus_mode = 1 - focus_mode
+            if focus_mode == 1:
+                # Réinitialiser tout état de drag résiduel avant d'entrer dans l'overlay
+                _focus_ge_dragging  = None
+                _home_ge_dragging   = None
+                focus_gain = max(0, gain)
+                _init_fexp = custom_sspeed if custom_sspeed > 0 else (sspeed if sspeed > 0 else 50000)
+                focus_exposure_us = max(1000, min(1000000, _init_fexp))
+                focus_zoom_focus = zoom
+                reset_focus_history()
+                reset_hfr_history()
+                reset_fwhm_history()
+                _focus_last_graph_surf = None
+                _focus_last_star_surf  = None
+                _apply_focus_controls()
+            print(f"[HOME] Focus mode: {focus_mode}")
+            return True
+
+        elif key == 'mode_jsk':
+            # Activer JSK LIVE mode
+            jsk_live_mode = 1
+            jsk_settings_visible = 0
+            jsk_binning = 1
+            jsk_crop_square = 0
+            jsk_saved_vwidth = vwidth
+            jsk_saved_vheight = vheight
+            jsk_saved_zoom = zoom
+            jsk_saved_use_native = use_native_sensor_mode
+            jsk_saved_gain = gain
+            jsk_saved_exposure = custom_sspeed if custom_sspeed > 0 else sspeed
+            jsk_gain = max(1, min(300, gain if gain > 0 else 10))
+            _init_expo = custom_sspeed if custom_sspeed > 0 else sspeed
+            jsk_exposure_us = max(1000, min(2000000, _init_expo if _init_expo > 0 else 10000))
+            vwidth = 1920; vheight = 1080; zoom = 0; use_native_sensor_mode = 0
+            kill_preview_process()
+            preview()
+            jsk_processor = JSKLiveProcessor()
+            jsk_processor.configure(
+                stack_count=jsk_stack_count, hdr_bits_clip=jsk_hdr_bits_clip,
+                hdr_method=jsk_hdr_method, denoise_type=jsk_denoise_type,
+                denoise_strength=jsk_denoise_strength, hdr_weights=jsk_hdr_weights,
+                color_enabled=jsk_color_enabled == 1,
+                r_gain=jsk_r_gain/100.0, g_gain=jsk_g_gain/100.0, b_gain=jsk_b_gain/100.0,
+                contrast=jsk_contrast/100.0)
+            jsk_recorder = JSKVideoRecorder()
+            if capture_thread is not None:
+                capture_thread.set_capture_params({'type': 'raw'})
+            display_modes = pygame.display.list_modes()
+            _mw, _mh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+            windowSurfaceObj = pygame.display.set_mode((_mw, _mh), pygame.FULLSCREEN, 24)
+            windowSurfaceObj.fill((0, 0, 0))
+            pygame.display.update()
+            print("[HOME] Mode JSK LIVE activé")
+            return True
+
+        elif key == 'mode_sun':
+            # Activer SOLAR mode
+            sun_mode = 1
+            sun_settings_visible = 0
+            _sun_last_surface = None
+            _sun_slider_rects = {}
+            sun_saved_vwidth = vwidth; sun_saved_vheight = vheight; sun_saved_zoom = zoom
+            sun_saved_use_native = use_native_sensor_mode; sun_saved_gain = gain
+            sun_saved_exposure = custom_sspeed if custom_sspeed > 0 else sspeed
+            sun_gain = max(0, min(400, gain if gain > 0 else 80))
+            _init_expo = custom_sspeed if custom_sspeed > 0 else sspeed
+            sun_exposure_us = max(1000, min(20000, _init_expo if _init_expo > 0 else 5000))
+            sun_binning = 1; vwidth = 1920; vheight = 1080; zoom = 0; use_native_sensor_mode = 0
+            kill_preview_process(); preview()
+            if capture_thread is not None:
+                capture_thread.set_capture_params({'type': 'main'})
+            sun_processor = SolarProcessor()
+            sun_processor.apply_preset(sun_preset)
+            sun_recorder = JSKVideoRecorder()
+            display_modes = pygame.display.list_modes()
+            _mw, _mh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+            windowSurfaceObj = pygame.display.set_mode((_mw, _mh), pygame.FULLSCREEN, 24)
+            windowSurfaceObj.fill((0, 0, 0)); pygame.display.update()
+            print(f"[HOME] Mode SOLAR activé — preset: {SOLAR_PRESETS[sun_preset]['name']}")
+            return True
+
+        elif key == 'mode_moon':
+            # Activer MOON mode
+            moon_mode = 1
+            moon_settings_visible = 0
+            moon_binning = 1
+            _moon_last_surface = None
+            _moon_slider_rects = {}
+            moon_saved_vwidth = vwidth; moon_saved_vheight = vheight; moon_saved_zoom = zoom
+            moon_saved_use_native = use_native_sensor_mode; moon_saved_gain = gain
+            moon_saved_exposure = custom_sspeed if custom_sspeed > 0 else sspeed
+            moon_gain = max(1, min(300, gain if gain > 0 else 50))
+            _init_expo = custom_sspeed if custom_sspeed > 0 else sspeed
+            moon_exposure_us = max(1000, min(1000000, _init_expo if _init_expo > 0 else 100000))
+            vwidth = 1920; vheight = 1080; zoom = 0; use_native_sensor_mode = 0
+            kill_preview_process(); preview()
+            if picam2 is not None:
+                try:
+                    picam2.set_controls({"AwbEnable": False,
+                                         "ColourGains": (moon_wb_b/100.0, moon_wb_r/100.0)})
+                except Exception:
+                    pass
+            if capture_thread is not None:
+                capture_thread.set_capture_params({'type': 'main'})
+            moon_processor = MineralMoonProcessor()
+            moon_processor.apply_preset(moon_preset)
+            moon_recorder = JSKVideoRecorder()
+            display_modes = pygame.display.list_modes()
+            _mw, _mh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+            windowSurfaceObj = pygame.display.set_mode((_mw, _mh), pygame.FULLSCREEN, 24)
+            windowSurfaceObj.fill((0, 0, 0)); pygame.display.update()
+            print(f"[HOME] Mode MOON activé — preset: {MOON_PRESETS[moon_preset]['name']}")
+            return True
+
+        elif key == 'mode_colim':
+            # Activer COLLIMATION mode (même séquence que l'ancienne interface)
+            collimation_mode = 1
+            collimation_saved_zoom = zoom
+            collimation_saved_vwidth = vwidth
+            collimation_saved_vheight = vheight
+            collimation_saved_use_native = use_native_sensor_mode
+            collimation_saved_gain = gain
+            collimation_saved_exposure = custom_sspeed if custom_sspeed > 0 else sspeed
+            collimation_gain = gain
+            collimation_exposure_us = custom_sspeed if custom_sspeed > 0 else sspeed
+            collimation_zoom = 0
+            zoom = 0
+            sync_video_resolution_with_zoom()
+            collimation_detector = CollimationDetector()
+            collimation_detector.set_sensitivity(collimation_sensitivity)
+            collimation_detector.set_detect_interval(collimation_detect_interval)
+            for cname in ['focuser', 'secondary', 'primary', 'camera']:
+                collimation_detector.set_circle_enabled(cname, collimation_circle_enabled.get(cname, False))
+                collimation_detector.set_circle_radius_range(
+                    cname, collimation_circle_min_pct.get(cname, 10),
+                    collimation_circle_max_pct.get(cname, 49))
+            collimation_last_surface = None
+            collimation_settings_visible = 0
+            display_modes = pygame.display.list_modes()
+            _mw, _mh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+            windowSurfaceObj = pygame.display.set_mode((_mw, _mh), pygame.FULLSCREEN, 24)
+            windowSurfaceObj.fill((0, 0, 0))
+            pygame.display.update()
+            restart = 1
+            print(f"[HOME] Mode COLLIMATION activé (zoom=0, gain={collimation_gain})")
+            return True
+
+    # --- Barre d'action bas ---
+    for key, rect in _home_btn_rects.items():
+        if not rect.collidepoint(mx, my):
+            continue
+
+        if key == 'action_exit':
+            if picam2 is not None:
+                try:
+                    picam2.stop(); picam2.close()
+                except Exception:
+                    pass
+            kill_preview_process()
+            pygame.display.quit()
+            sys.exit()
+
+        elif key == 'action_still':
+            _home_pending_capture = 0
+            return True
+
+        elif key == 'action_video':
+            _home_pending_capture = 1
+            return True
+
+        elif key == 'action_timelapse':
+            _home_pending_capture = 2
+            return True
+
+    return False
+
+
 def handle_jsk_slider_click(mousex, mousey, control_rects):
     """
     Gère le clic sur un slider JSK LIVE.
@@ -8076,8 +10122,8 @@ def handle_jsk_slider_click(mousex, mousey, control_rects):
             ratio = max(0, min(1, rel_x / slider_width))
 
             if name == 'jsk_stack':
-                jsk_stack_count = int(1 + ratio * 5)
-                jsk_stack_count = max(1, min(6, jsk_stack_count))
+                jsk_stack_count = int(1 + ratio * 9)
+                jsk_stack_count = max(1, min(10, jsk_stack_count))
             elif name == 'jsk_hdr_clip':
                 jsk_hdr_bits_clip = int(ratio * 3)
                 jsk_hdr_bits_clip = max(0, min(3, jsk_hdr_bits_clip))
@@ -11290,11 +13336,14 @@ def preview():
             # Préparer les contrôles à changer
             fast_controls = {}
 
-            # Exposition et gain (mode manuel)
+            # Exposition et gain (mode manuel) ou AE automatique
             if mode == 0:
                 fast_controls["FrameDurationLimits"] = (min_frame_duration, max(max_frame_duration, speed2))
                 fast_controls["ExposureTime"] = speed2
                 fast_controls["AnalogueGain"] = float(gain)
+            else:
+                # Mode AE normal ou sport : ré-activer l'AE
+                fast_controls["AeEnable"] = True
 
             # Brightness & Contrast
             fast_controls["Brightness"] = brightness / 100
@@ -11302,10 +13351,12 @@ def preview():
 
             # AWB
             if awb == 0:
+                fast_controls["AwbEnable"] = False
                 fast_controls["ColourGains"] = (red/10, blue/10)
                 if show_cmds == 1:
                     print(f"  DEBUG AWB: Mode manuel (awb=0), ColourGains=({red/10}, {blue/10})")
             else:
+                fast_controls["AwbEnable"] = True
                 awb_modes = {
                     1: controls.AwbModeEnum.Auto, 2: controls.AwbModeEnum.Incandescent,
                     3: controls.AwbModeEnum.Tungsten, 4: controls.AwbModeEnum.Fluorescent,
@@ -11599,8 +13650,8 @@ def preview():
             controls_dict["ExposureTime"] = speed2
             controls_dict["AnalogueGain"] = float(gain)
         else:
-            # Mode auto - ne rien définir, laisser l'AE gérer
-            pass
+            # Mode auto - activer explicitement l'AE
+            controls_dict["AeEnable"] = True
 
         # Framerate
         # NE PAS définir FrameRate en mode manuel pour permettre les longues expositions
@@ -11612,14 +13663,15 @@ def preview():
             controls_dict["FrameRate"] = fps
 
         # AWB (Balance des blancs)
-        # Ne PAS utiliser AwbEnable qui n'est pas supporté sur toutes les caméras
         if awb == 0:
-            # AWB manuel - définir ColourGains désactive automatiquement AWB
+            # AWB manuel - ColourGains + désactivation explicite AWB auto
+            controls_dict["AwbEnable"] = False
             controls_dict["ColourGains"] = (red/10, blue/10)
             if show_cmds == 1:
                 print(f"  DEBUG AWB [FULL]: Mode manuel (awb=0), ColourGains=({red/10}, {blue/10})")
         else:
-            # AWB auto - utiliser AwbMode
+            # AWB auto - réactiver AWB puis définir le mode
+            controls_dict["AwbEnable"] = True
             awb_modes = {
                 1: controls.AwbModeEnum.Auto,
                 2: controls.AwbModeEnum.Incandescent,
@@ -12158,781 +14210,19 @@ def save_config_to_file():
     with open(config_file, 'w') as f:
         for item in range(0, len(titles)):
             f.write(titles[item] + " : " + str(config[item]) + "\n")
-    time.sleep(1)
 
 
 def Menu():
     global vwidths2,vheights2,Pi_Cam,scientif,mode,v3_hdr,scientific,tinterval,zoom,vwidth,vheight,preview_width,preview_height,ft,fv,focus,fxz,v3_hdr,v3_hdrs,bw,bh,ft,fv,cam1,v3_f_mode,v3_af,button_row,xx,xy,use_native_sensor_mode
     global allsky_mode,allsky_mean_target,allsky_mean_threshold,allsky_video_fps,allsky_max_gain,allsky_apply_stretch,allsky_cleanup_jpegs,allsky_modes,allsky_stack_enable,allsky_stack_count
-    pygame.draw.rect(windowSurfaceObj,(0,0,0),Rect(preview_width,0,bw,preview_height))
-    if menu > 0: 
-        # set button sizes
-        bw = int(preview_width/5.66)
-        bh = int(preview_height/10)
-        ft = int(preview_width/46)
-        fv = int(preview_width/46)
-        for d in range(1,9):
-            button(0,0,0,4)
-            if menu == 1:
-                button(0,d,0,4)
-            elif menu == 2:
-                button(0,d,0,4)
-            elif menu == 3 or menu == 4:
-                button(0,d,6,4)
-            elif menu == 5:
-                button(0,d,7,4)
-            elif menu == 6:
-                button(0,d,8,4)
-            elif menu == 7:
-                button(0,d,0,4)
-            elif menu == 8:
-                button(0,d,0,4)
-            elif menu == 9:
-                button(0,d,0,4)
-            elif menu == 10:
-                button(0,d,0,4)
-            elif menu == 11:
-                button(0,d,0,4)
-        text(0,0,1,0,1,"MAIN MENU ",ft,7)
-      
-    # ========== MENU 0 - MAIN MENU ==========
-    if menu == 0:
-        # set button sizes
-        bw = int(preview_width/5.66)
-        bh = int(preview_height/9)  # 9 buttons instead of 8
-        ft = int(preview_width/46)
-        fv = int(preview_width/46)
-        # Effacer la zone des boutons pour éviter les sliders résiduels
-        pygame.draw.rect(windowSurfaceObj,blackColor,Rect(preview_width,0,bw,preview_height))
-        button(0,0,4,4)  # STILL
-        button(0,1,2,4)  # VIDEO
-        button(0,2,3,4)  # TIMELAPSE
-        button(0,3,9,4)  # LIVE STACK
-        button(0,4,10,4)  # LUCKY STACK button - bleu marine avec texte rouge
-        button(0,5,5,4)  # STRETCH
-        button(0,6,0,4)  # CAMERA Settings
-        button(0,7,0,4)  # OTHER Settings
-        # Bouton row 8 divisé en deux: EXIT (gauche) et PAGE2 (droite)
-        # Dessiner les deux demi-boutons manuellement
-        bx = preview_width
-        by = 8 * bh
-        half_bw = int(bw / 2)
-        # Demi-bouton gauche - EXIT (gris)
-        pygame.draw.rect(windowSurfaceObj, greyColor, Rect(bx+1, by, half_bw-2, bh))
-        pygame.draw.line(windowSurfaceObj, whiteColor, (bx, by), (bx, by+bh-1), 2)
-        pygame.draw.line(windowSurfaceObj, whiteColor, (bx, by), (bx+half_bw-1, by), 1)
-        pygame.draw.line(windowSurfaceObj, dgryColor, (bx, by+bh-1), (bx+half_bw-1, by+bh-1), 1)
-        pygame.draw.line(windowSurfaceObj, dgryColor, (bx+half_bw-2, by), (bx+half_bw-2, by+bh), 2)
-        # Demi-bouton droit - PAGE2 (bleu)
-        pygame.draw.rect(windowSurfaceObj, blueColor, Rect(bx+half_bw+1, by, half_bw-2, bh))
-        pygame.draw.line(windowSurfaceObj, whiteColor, (bx+half_bw, by), (bx+half_bw, by+bh-1), 2)
-        pygame.draw.line(windowSurfaceObj, whiteColor, (bx+half_bw, by), (bx+bw-1, by), 1)
-        pygame.draw.line(windowSurfaceObj, dgryColor, (bx+half_bw, by+bh-1), (bx+bw-1, by+bh-1), 1)
-        pygame.draw.line(windowSurfaceObj, dgryColor, (bx+bw-2, by), (bx+bw-2, by+bh), 2)
-        pygame.display.update()
+    if _home_suppress_oldui:
+        return
+    pass
 
-        text(0,0,8,0,1,"         STILL ",ft,1)
-        text(0,1,8,0,1,"         VIDEO",ft,2)
-        text(0,2,8,0,1,"       TIMELAPSE",ft-1,4)
-        text(0,3,1,0,1,"     LIVE STACK",ft,1)
-        text(0,4,3,0,1,"    LUCKY STACK",ft,1)  # Texte rouge (fColor=3)
-        text(0,5,1,0,1,"       STRETCH",ft,1)
-        text(0,6,1,0,1,"      CAMERA",ft,7)
-        text(0,6,1,1,1,"    Settings",ft,7)
-        text(0,7,1,0,1,"       OTHER",ft,7)
-        text(0,7,1,1,1,"    Settings",ft,7)
-        # Textes pour les demi-boutons EXIT et PAGE2
-        # EXIT sur la moitié gauche
-        fontObj = pygame.font.Font(None, fv+10)
-        renderedText = fontObj.render("EXIT", True, whiteColor)
-        textRect = renderedText.get_rect()
-        textRect.center = (bx + int(half_bw/2), by + int(bh/2))
-        windowSurfaceObj.blit(renderedText, textRect)
-        # PAGE2 sur la moitié droite
-        renderedText2 = fontObj.render("PAGE2", True, whiteColor)
-        textRect2 = renderedText2.get_rect()
-        textRect2.center = (bx + half_bw + int(half_bw/2), by + int(bh/2))
-        windowSurfaceObj.blit(renderedText2, textRect2)
-        pygame.display.update()
-      
-    # ========== MENU 1 - CAMERA SETTINGS ==========
-    elif menu == 1:
-      text(0,1,1,0,1,"STILL",ft,7)
-      text(0,1,1,1,1,"Settings",ft,7)
-      text(0,2,1,0,1,"VIDEO",ft,7)
-      text(0,2,1,1,1,"Settings",ft,7)
-      text(0,3,1,0,1,"TIMELAPSE",ft,7)
-      text(0,3,1,1,1,"Settings",ft,7)
-      text(0,6,1,0,1,"LIVE STACK",ft,7)
-      text(0,6,1,1,1,"Settings",ft,7)
-      text(0,7,1,0,1,"LUCKY STACK",ft,7)
-      text(0,7,1,1,1,"Settings",ft,7)
-      text(0,8,1,0,1,"STRETCH",ft,7)
-      text(0,8,1,1,1,"Settings",ft,7)
-      if zoom == 0:
-          button(0,4,0,9)
-          text(0,4,5,0,1,"Zoom",ft,7)
-          text(0,4,3,1,1,"",fv,7)
-          # determine if camera native format
-          vw = 0
-          x = 0
-          while x < len(vwidths2) and vw == 0:
-              if vwidth == vwidths2[x]:
-                  if vheight == vheights2[x]:
-                      vw = 1
-              x += 1
-      elif zoom < 10:
-          button(0,4,1,9)
-          text(0,4,2,0,1,"ZOOMED",ft,0)
-          # Afficher la résolution ROI au lieu du numéro de zoom
-          text(0,4,3,1,1,zoom_res_labels.get(zoom, str(zoom)),fv,0)
-          draw_Vbar(0,4,greyColor,'zoom',zoom)
-      if Pi_Cam == 3 and v3_af == 1:
-          if fxz != 1:
-              text(0,5,3,1,1,"Spot",fv,7)
-          else:
-              text(0,5,3,1,1,str(v3_f_modes[v3_f_mode]),fv,7)
-          if v3_f_mode == 1 :
-              button(0,5,1,9)
-              draw_Vbar(0,5,dgryColor,'v3_focus',v3_focus-pmin)
-              fd = 1/(v3_focus/100)
-              text(0,5,3,0,1,'<<< ' + str(fd)[0:5] + "m" + ' >>>',fv,7)
-          elif v3_f_mode == 0 or v3_f_mode == 2:
-              button(0,5,0,9)
-              text(0,5,5,0,1,"FOCUS",ft,7)
-          text(0,7,2,0,1,"Focus Speed",ft,7)
-          text(0,7,3,1,1,v3_f_speeds[v3_f_speed],fv,7)
-          text(0,7,2,0,1,"Focus Range",ft,7)
-          text(0,7,3,1,1,v3_f_ranges[v3_f_range],fv,7)
-          
-      else:
-          button(0,5,0,9)
-          text(0,5,5,0,1,"FOCUS",ft,7)
-          text(0,5,3,1,1,"    ",fv,7)
-          
-      draw_Vbar(0,4,greyColor,'zoom',zoom)
-      if Pi_Cam == 3:
-          draw_bar(0,6,greyColor,'v3_f_speed',v3_f_speed)
-          draw_Vbar(0,7,greyColor,'v3_f_range',v3_f_range)
-        
-                 
-    # ========== MENU 2 - OTHER SETTINGS ==========
-    elif menu == 2:
-        if cam1 != "1":
-            text(0,1,2,0,1,"Switch Camera",ft,7)
-            text(0,1,3,1,1,str(camera),fv,7)
-        # Ligne 2 - Accès menu METRICS
-        button(0,2,0,2)
-        text(0,2,5,0,1,"METRICS",ft,7)
-        text(0,2,3,1,1,"Settings >",fv,7)
+print(f"[INIT] Caméra: {cameras[Pi_Cam]}")
 
-        # Ligne 3 - Histogram
-        text(0,3,3,0,1,"Histogram",ft,7)
-        text(0,3,3,1,1,histograms[histogram],fv,7)
-        draw_bar(0,3,greyColor,'histogram',histogram)
-
-        # Ligne 4 - Hist Area
-        text(0,4,2,0,1,"Hist Area",ft,7)
-        text(0,4,3,1,1,str(histarea),fv,7)
-        draw_Vbar(0,4,greyColor,'histarea',histarea)
-
-        # Ligne 5 - Vert Flip
-        text(0,5,5,0,1,"Vert Flip",ft,7)
-        text(0,5,3,1,1,str(vflip),fv,7)
-
-        # Ligne 6 - Horiz Flip
-        text(0,6,5,0,1,"Horiz Flip",ft,7)
-        text(0,6,3,1,1,str(hflip),fv,7)
-
-        # Ligne 7 - RAW Format (remplace STILL -t time)
-        text(0,7,5,0,1,"RAW Format",ft,7)
-        text(0,7,3,1,1,raw_formats[raw_format],fv,7)
-        draw_Vbar(0,7,greyColor,'raw_format',raw_format)
-
-        # Ligne 8 - Sensor Mode
-        text(0,8,2,0,1,"Sensor Mode",ft,7)
-        if use_native_sensor_mode == 0:
-            text(0,8,3,1,1,"Binning",fv,7)
-        else:
-            text(0,8,3,1,1,"Native",fv,7)
-        draw_Vbar(0,8,greyColor,'use_native_sensor_mode',use_native_sensor_mode)
-
-        # Ligne 9 - SAVE CONFIG
-        button(0,9,0,4)
-        text(0,9,2,0,1,"SAVE CONFIG",fv,7)
-      
-    # ========== MENU 3 - STILL SETTINGS (Page 1) ==========
-    elif menu == 3:
-      text(0,1,5,0,1,"Mode",ft,10)
-      text(0,1,3,1,1,modes[mode],fv,10)
-      if mode == 0:
-          text(0,2,5,0,1,"Shutter S",ft,10)
-          if shutters[speed] < 0:
-              text(0,2,3,1,1,"1/" + str(abs(shutters[speed])),fv,10)
-          else:
-              text(0,2,3,1,1,str(shutters[speed]),fv,10)
-      else:
-          text(0,2,5,0,1,"eV",ft,10)
-          text(0,2,3,1,1,str(ev),fv,10)
-      text(0,3,5,0,1,"Gain    A/D",ft,10)
-      if gain > 0:
-          text(0,3,5,0,1,"Gain    A/D",ft,10)
-          if gain <= mag:
-              text(0,3,3,1,1,str(gain) + " :  " + str(gain) + "/1",fv,10)
-          else:
-              text(0,3,3,1,1,str(gain) + " :  " + str(int(mag)) + "/" + str(((gain/mag)*10)/10)[0:3],fv,10)
-      else:
-          text(0,3,5,0,1,"Gain",ft,10)
-          text(0,3,3,1,1,"Auto",fv,10)
-      text(0,4,5,0,1,"Brightness",ft,10)
-      text(0,4,3,1,1,str(brightness/100)[0:4],fv,10)
-      text(0,5,5,0,1,"Contrast",ft,10)
-      text(0,5,3,1,1,str(contrast/100)[0:4],fv,10)
-      text(0,6,5,0,1,"AWB",ft,10)
-      text(0,6,3,1,1,awbs[awb],fv,10)
-      text(0,7,5,0,1,"Blue",ft,10)
-      text(0,7,3,1,1,str(blue/10)[0:3],fv,10)
-      text(0,8,5,0,1,"Red",ft,10)
-      text(0,8,3,1,1,str(red/10)[0:3],fv,10)
-      button(0,9,0,9) 
-      text(0,9,1,0,1,"Page 2 ",ft,7)
-      draw_bar(0,2,lgrnColor,'mode',mode)
-      if mode == 0:
-            draw_bar(0,2,lgrnColor,'speed',speed)  # Affiche la barre du shutter en mode manuel
-      else:
-            draw_bar(0,2,lgrnColor,'ev',ev)
-      draw_bar(0,3,lgrnColor,'gain',gain)
-      draw_bar(0,4,lgrnColor,'brightness',brightness)
-      draw_bar(0,5,lgrnColor,'contrast',contrast)
-      draw_bar(0,6,lgrnColor,'awb',awb)
-      draw_bar(0,7,lgrnColor,'blue',blue)
-      draw_bar(0,8,lgrnColor,'red',red)
-                
-    # ========== MENU 4 - STILL SETTINGS (Page 2) ==========
-    elif menu == 4:
-
-        # Ligne 1 - Page 1 (retour)
-        button(0,1,0,9)
-        text(0,1,1,0,1,"Page 1 ",ft,7)
-
-        # Ligne 2 - Metering
-        text(0,2,5,0,1,"Metering",ft,10)
-        text(0,2,3,1,1,meters[meter],fv,10)
-        draw_bar(0,2,lgrnColor,'meter',meter)
-
-        # Ligne 3 - Quality
-        text(0,3,5,0,1,"Quality",ft,10)
-        text(0,3,3,1,1,str(quality)[0:3],fv,10)
-        draw_bar(0,3,lgrnColor,'quality',quality)
-
-        # Ligne 4 - Saturation
-        text(0,4,5,0,1,"Saturation",ft,10)
-        text(0,4,3,1,1,str(saturation/10),fv,10)
-        draw_bar(0,4,lgrnColor,'saturation',saturation)
-
-        # Ligne 5 - Denoise
-        text(0,5,5,0,1,"Denoise",ft,10)
-        text(0,5,3,1,1,denoises[denoise],fv,10)
-        draw_bar(0,5,lgrnColor,'denoise',denoise)
-
-        # Ligne 6 - Sharpness
-        text(0,6,5,0,1,"Sharpness",ft,10)
-        text(0,6,3,1,1,str(sharpness/10),fv,10)
-        draw_bar(0,6,lgrnColor,'sharpness',sharpness)
-
-        # Ligne 7 - HDR / IR Filter / Scientific (selon caméra)
-        if (Pi_Cam == 3 or Pi == 5):
-            button(0,7,6,4)
-            text(0,7,5,0,1,"HDR",ft,10)
-            text(0,7,3,1,1,v3_hdrs[v3_hdr],fv,10)
-            draw_bar(0,7,lgrnColor,'v3_hdr',v3_hdr)
-        elif Pi_Cam == 9:
-            button(0,7,6,4)
-            text(0,7,5,0,1,"IR Filter",ft,10)
-            if IRF == 0:
-                text(0,7,3,1,1,"Off",fv,10)
-            else:
-                text(0,7,3,1,1,"ON ",fv,10)
-        elif Pi_Cam == 4 and scientif == 1:
-            button(0,7,6,4)
-            text(0,7,5,0,1,"Scientific",ft,10)
-            if scientific == 0:
-                text(0,7,3,1,1,"Off",fv,10)
-            else:
-                text(0,7,3,1,1,"ON ",fv,10)
-
-        # Ligne 8 - File Format
-        text(0,8,5,0,1,"File Format",ft,10)
-        text(0,8,3,1,1,extns[extn],fv,10)
-        draw_bar(0,8,lgrnColor,'extn',extn)
-
-        # Ligne 9 - SAVE CONFIG
-        button(0,9,6,4)
-        text(0,9,2,0,1,"SAVE CONFIG",fv,10)
-      
-    # ========== MENU 5 - VIDEO SETTINGS ==========
-    elif menu == 5:
-        text(0,1,5,0,1,"V_Length",ft,11)
-        td = timedelta(seconds=vlen)
-        text(0,1,3,1,1,str(td),fv,11)
-        text(0,2,5,0,1,"V_FPS",ft,11)
-        text(0,2,3,1,1,str(fps),fv,11)
-        text(0,3,5,0,1,"V_Format",ft,11)
-        text(0,4,5,0,1,"V_Codec",ft,11)
-        text(0,4,3,1,1,codecs[codec],fv,11)
-        text(0,5,5,0,1,"h264 Profile",ft,11)
-        text(0,5,3,1,1,str(h264profiles[profile]),fv,11)
-        text(0,7,5,0,1,"V_Preview",ft,11)
-        text(0,7,3,1,1,"ON ",fv,11)
-        draw_Vbar(0,3,lpurColor,'vformat',vformat)
-        button(0,8,7,4)
-        text(0,8,2,0,1,"SAVE CONFIG",fv,11)
-        # determine if camera native format
-        vw = 0
-        x = 0
-        while x < len(vwidths2) and vw == 0:
-            if vwidth == vwidths2[x]:
-                if vheight == vheights2[x]:
-                    vw = 1
-            x += 1
-        if vw == 0:
-            text(0,3,3,1,1,str(vwidth) + "x" + str(vheight),fv,11)
-        if vw == 1:
-            text(0,3,1,1,1,str(vwidth) + "x" + str(vheight),fv,11)
-        draw_Vbar(0,1,lpurColor,'vlen',vlen)
-        draw_Vbar(0,2,lpurColor,'fps',fps)
-        draw_Vbar(0,3,lpurColor,'vformat',vformat)
-        draw_Vbar(0,4,lpurColor,'codec',codec)
-        draw_Vbar(0,5,lpurColor,'profile',profile)
-      
-    # ========== MENU 6 - TIMELAPSE SETTINGS ==========
-    elif menu == 6:
-        # TIMELAPSE Settings - Multi-pages
-        current_page = menu_page.get(6, 1)  # Page par défaut = 1
-
-        if current_page == 1:
-            # ========== PAGE 1 - Standard Timelapse Parameters ==========
-            # Ligne 1 - Duration
-            td = timedelta(seconds=tduration)
-            text(0,1,5,0,1,"Duration",ft,12)
-            text(0,1,3,1,1,str(td),fv,12)
-            draw_Vbar(0,1,lyelColor,'tduration',tduration)
-
-            # Ligne 2 - Interval
-            td = timedelta(seconds=tinterval)
-            text(0,2,5,0,1,"Interval",ft,12)
-            text(0,2,3,1,1,str(td),fv,12)
-            draw_Vbar(0,2,lyelColor,'tinterval',tinterval)
-
-            # Ligne 3 - No. of Shots
-            text(0,3,5,0,1,"No. of Shots",ft,12)
-            if tinterval > 0:
-                text(0,3,3,1,1,str(tshots),fv,12)
-            else:
-                text(0,3,3,1,1," ",fv,12)
-            draw_Vbar(0,3,lyelColor,'tshots',tshots)
-
-            # Ligne 6 - Stack Frames (only if Allsky ON)
-            text(0,6,5,0,1,"Stack Frames",ft,12)
-            if allsky_mode > 0:
-                stack_text = "ON" if allsky_stack_enable == 1 else "OFF"
-                text(0,6,3,1,1,stack_text,fv,12)
-                draw_Vbar(0,6,greyColor,'allsky_stack_enable',allsky_stack_enable)
-            else:
-                text(0,6,3,1,1,"N/A",fv,12)
-
-            # Ligne 7 - Stack Count (only if Stack ON and Allsky ON)
-            text(0,7,5,0,1,"Stack Count",ft,12)
-            if allsky_mode > 0 and allsky_stack_enable == 1:
-                text(0,7,3,1,1,str(allsky_stack_count),fv,12)
-                draw_Vbar(0,7,greyColor,'allsky_stack_count',allsky_stack_count)
-            else:
-                text(0,7,3,1,1,"N/A",fv,12)
-
-            # Ligne 8 - SAVE CONFIG
-            button(0,8,8,4)
-            text(0,8,2,0,1,"SAVE CONFIG",fv,12)
-
-            # Ligne 9 - Navigation to Page 2
-            button(0,9,0,9)
-            text(0,9,3,0,1,"ALLSKY",ft,12)
-            text(0,9,3,1,1,"Page 2 ->",fv,12)
-
-        elif current_page == 2:
-            # ========== PAGE 2 - Allsky Parameters ==========
-            # Ligne 1 - Navigation retour
-            button(0,1,0,1)
-            text(0,1,3,0,1,"<- Page 1",ft,10)
-            text(0,1,3,1,1,"Standard",fv,10)
-
-            # Ligne 2 - Allsky Mode
-            text(0,2,5,0,1,"Allsky Mode",ft,10)
-            text(0,2,3,1,1,allsky_modes[allsky_mode],fv,10)
-            draw_Vbar(0,2,greyColor,'allsky_mode',allsky_mode)
-
-            # Ligne 3 - Mean Target (only if Auto-Gain)
-            text(0,3,5,0,1,"Mean Target",ft,10)
-            if allsky_mode == 2:
-                text(0,3,3,1,1,str(allsky_mean_target/100.0)[0:4],fv,10)
-                draw_Vbar(0,3,greyColor,'allsky_mean_target',allsky_mean_target)
-            else:
-                text(0,3,3,1,1,"N/A",fv,10)
-
-            # Ligne 4 - Mean Threshold (only if Auto-Gain)
-            text(0,4,5,0,1,"Mean Thresh",ft,10)
-            if allsky_mode == 2:
-                text(0,4,3,1,1,str(allsky_mean_threshold/100.0)[0:4],fv,10)
-                draw_Vbar(0,4,greyColor,'allsky_mean_threshold',allsky_mean_threshold)
-            else:
-                text(0,4,3,1,1,"N/A",fv,10)
-
-            # Ligne 5 - Video FPS (only if Allsky ON or Auto-Gain)
-            text(0,5,5,0,1,"Video FPS",ft,10)
-            if allsky_mode > 0:
-                text(0,5,3,1,1,str(allsky_video_fps),fv,10)
-                draw_Vbar(0,5,greyColor,'allsky_video_fps',allsky_video_fps)
-            else:
-                text(0,5,3,1,1,"N/A",fv,10)
-
-            # Ligne 6 - Max Gain (only if Auto-Gain)
-            text(0,6,5,0,1,"Max Gain",ft,10)
-            if allsky_mode == 2:
-                text(0,6,3,1,1,str(allsky_max_gain),fv,10)
-                draw_Vbar(0,6,greyColor,'allsky_max_gain',allsky_max_gain)
-            else:
-                text(0,6,3,1,1,"N/A",fv,10)
-
-            # Ligne 7 - Apply Stretch (only if Allsky ON or Auto-Gain)
-            text(0,7,5,0,1,"Apply Stretch",ft,10)
-            if allsky_mode > 0:
-                stretch_text = "ON" if allsky_apply_stretch == 1 else "OFF"
-                text(0,7,3,1,1,stretch_text,fv,10)
-                draw_Vbar(0,7,greyColor,'allsky_apply_stretch',allsky_apply_stretch)
-            else:
-                text(0,7,3,1,1,"N/A",fv,10)
-
-            # Ligne 8 - Cleanup JPEGs (only if Allsky ON or Auto-Gain)
-            text(0,8,5,0,1,"Cleanup JPEGs",ft,10)
-            if allsky_mode > 0:
-                cleanup_text = "YES" if allsky_cleanup_jpegs == 1 else "NO"
-                text(0,8,3,1,1,cleanup_text,fv,10)
-                draw_Vbar(0,8,greyColor,'allsky_cleanup_jpegs',allsky_cleanup_jpegs)
-            else:
-                text(0,8,3,1,1,"N/A",fv,10)
-
-            # Ligne 9 - SAVE CONFIG (on Page 2)
-            button(0,9,0,4)
-            text(0,9,2,0,1,"SAVE CONFIG",fv,10)
-
-    # ========== MENU 7 - STRETCH SETTINGS ==========
-    elif menu == 7:
-        # STRETCH Settings - Multi-pages (Phase 2)
-        current_page = menu_page.get(7, 1)  # Page par défaut = 1
-
-        if current_page == 1:
-            # ========== PAGE 1 - Paramètres Arcsinh + Preset ==========
-            # Ligne 1 - Stretch Low %
-            text(0,1,5,0,1,"Stretch Low %",ft,7)
-            text(0,1,3,1,1,str(stretch_p_low/10)[0:4],fv,7)
-            draw_Vbar(0,1,greyColor,'stretch_p_low',stretch_p_low)
-
-            # Ligne 2 - Stretch High %
-            text(0,2,5,0,1,"Stretch High %",ft,7)
-            text(0,2,3,1,1,str(stretch_p_high/100)[0:6],fv,7)
-            draw_Vbar(0,2,greyColor,'stretch_p_high',stretch_p_high)
-
-            # Ligne 3 - Stretch Factor
-            text(0,3,5,0,1,"Stretch Factor",ft,7)
-            text(0,3,3,1,1,str(stretch_factor/10)[0:4],fv,7)
-            draw_Vbar(0,3,greyColor,'stretch_factor',stretch_factor)
-
-            # Ligne 4 - Preset
-            text(0,4,5,0,1,"Preset",ft,7)
-            text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
-            draw_Vbar(0,4,greyColor,'stretch_preset',stretch_preset)
-
-            # Ligne 8 - SAVE CONFIG
-            button(0,8,0,4)
-            text(0,8,2,0,1,"SAVE CONFIG",fv,7)
-
-            # Ligne 9 - Navigation
-            if stretch_preset == 1:  # GHS sélectionné - montrer accès page 2
-                button(0,9,0,9)
-                text(0,9,3,0,1,"GHS Params",ft,7)
-                text(0,9,3,1,1,"Page 2 ->",ft,7)
-            else:
-                button(0,9,0,9)
-                text(0,9,1,0,1,"CAMERA",ft,7)
-                text(0,9,1,1,1,"Settings",ft,7)
-
-        elif current_page == 2:
-            # ========== PAGE 2 - Paramètres GHS complets (D, b, SP, LP, HP) ==========
-            # Ligne 1 - Navigation retour
-            button(0,1,0,1)
-            text(0,1,3,0,1,"<- Page 1",ft,7)
-            text(0,1,3,1,1,"Arcsinh",ft,7)
-
-            # Ligne 2 - GHS D (Stretch Factor)
-            text(0,2,5,0,1,"GHS D (Force)",ft,7)
-            text(0,2,3,1,1,str(ghs_D/10.0)[0:5],fv,7)
-            draw_Vbar(0,2,greyColor,'ghs_D',ghs_D)
-
-            # Ligne 3 - GHS b (Local Intensity)
-            text(0,3,5,0,1,"GHS b (Focus)",ft,7)
-            text(0,3,3,1,1,str(ghs_b/10.0)[0:5],fv,7)
-            draw_Vbar(0,3,greyColor,'ghs_b',ghs_b)
-
-            # Ligne 4 - GHS SP (Symmetry Point)
-            text(0,4,5,0,1,"GHS SP (Sym)",ft,7)
-            text(0,4,3,1,1,str(ghs_SP/100.0)[0:5],fv,7)
-            draw_Vbar(0,4,greyColor,'ghs_SP',ghs_SP)
-
-            # Ligne 5 - GHS LP (Protect Shadows)
-            text(0,5,5,0,1,"GHS LP (Shad)",ft,7)
-            text(0,5,3,1,1,str(ghs_LP/100.0)[0:5],fv,7)
-            draw_Vbar(0,5,greyColor,'ghs_LP',ghs_LP)
-
-            # Ligne 6 - GHS HP (Protect Highlights)
-            text(0,6,5,0,1,"GHS HP (High)",ft,7)
-            text(0,6,3,1,1,str(ghs_HP/100.0)[0:5],fv,7)
-            draw_Vbar(0,6,greyColor,'ghs_HP',ghs_HP)
-
-            # Ligne 7 - GHS Preset
-            text(0,7,5,0,1,"GHS Preset",ft,7)
-            text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
-            draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
-
-            # Ligne 8 - SAVE CONFIG
-            button(0,8,0,4)
-            text(0,8,2,0,1,"SAVE CONFIG",fv,7)
-
-            # Ligne 9 - Retour menu principal
-            button(0,9,0,9)
-            text(0,9,1,0,1,"CAMERA",ft,7)
-            text(0,9,1,1,1,"Settings",ft,7)
-
-    # ========== MENU 8 - LIVE STACK SETTINGS ==========
-    elif menu == 8:
-        # LIVE STACK Settings - Multi-pages
-        current_page = menu_page.get(8, 1)  # Page par défaut = 1
-
-        if current_page == 1:
-            # PAGE 1 - Paramètres existants + Stack Method
-            text(0,1,5,0,1,"Preview Refresh",ft,7)
-            text(0,1,3,1,1,str(ls_preview_refresh),fv,7)
-            draw_Vbar(0,1,greyColor,'ls_preview_refresh',ls_preview_refresh)
-
-            text(0,2,5,0,1,"Alignment Mode",ft,7)
-            text(0,2,3,1,1,ls_alignment_modes[ls_alignment_mode],fv,7)
-            draw_Vbar(0,2,greyColor,'ls_alignment_mode',ls_alignment_mode)
-
-            text(0,3,5,0,1,"Max FWHM",ft,7)
-            if ls_max_fwhm == 0:
-                text(0,3,3,1,1,"OFF",fv,7)
-            else:
-                text(0,3,3,1,1,str(ls_max_fwhm/10)[0:4],fv,7)
-            draw_Vbar(0,3,greyColor,'ls_max_fwhm',ls_max_fwhm)
-
-            text(0,4,5,0,1,"Min Sharpness",ft,7)
-            if ls_min_sharpness == 0:
-                text(0,4,3,1,1,"OFF",fv,7)
-            else:
-                text(0,4,3,1,1,str(ls_min_sharpness/1000)[0:5],fv,7)
-            draw_Vbar(0,4,greyColor,'ls_min_sharpness',ls_min_sharpness)
-
-            text(0,5,5,0,1,"Max Drift",ft,7)
-            if ls_max_drift == 0:
-                text(0,5,3,1,1,"OFF",fv,7)
-            else:
-                text(0,5,3,1,1,str(ls_max_drift),fv,7)
-            draw_Vbar(0,5,greyColor,'ls_max_drift',ls_max_drift)
-
-            text(0,6,5,0,1,"Min Stars",ft,7)
-            if ls_min_stars == 0:
-                text(0,6,3,1,1,"OFF",fv,7)
-            else:
-                text(0,6,3,1,1,str(ls_min_stars),fv,7)
-            draw_Vbar(0,6,greyColor,'ls_min_stars',ls_min_stars)
-
-            text(0,7,5,0,1,"Quality Control",ft,7)
-            if ls_enable_qc == 0:
-                text(0,7,3,1,1,"OFF",fv,7)
-            else:
-                text(0,7,3,1,1,"ON",fv,7)
-            draw_Vbar(0,7,greyColor,'ls_enable_qc',ls_enable_qc)
-
-            # Ligne 8 - Navigation Page 2
-            button(0,8,0,9)
-            text(0,8,1,0,1,"Page 2",ft,7)
-            text(0,8,1,1,1,">>>",ft,7)
-
-        else:  # Page 2
-            # PAGE 2 - Stacker + Planetary
-            text(0,1,5,0,1,"Stack Method",ft,7)
-            text(0,1,3,1,1,stack_methods[ls_stack_method],fv,7)
-            draw_Vbar(0,1,greyColor,'ls_stack_method',ls_stack_method)
-
-            text(0,2,5,0,1,"Stack Kappa",ft,7)
-            text(0,2,3,1,1,str(ls_stack_kappa/10.0)[0:4],fv,7)
-            draw_Vbar(0,2,greyColor,'ls_stack_kappa',ls_stack_kappa)
-
-            text(0,3,5,0,1,"Stack Iterations",ft,7)
-            text(0,3,3,1,1,str(ls_stack_iterations),fv,7)
-            draw_Vbar(0,3,greyColor,'ls_stack_iterations',ls_stack_iterations)
-
-            text(0,4,5,0,1,"Planetary Enable",ft,7)
-            if ls_planetary_enable == 0:
-                text(0,4,3,1,1,"OFF",fv,7)
-            else:
-                text(0,4,3,1,1,"ON",fv,7)
-            draw_Vbar(0,4,greyColor,'ls_planetary_enable',ls_planetary_enable)
-
-            text(0,5,5,0,1,"Planetary Mode",ft,7)
-            text(0,5,3,1,1,planetary_modes[ls_planetary_mode],fv,7)
-            draw_Vbar(0,5,greyColor,'ls_planetary_mode',ls_planetary_mode)
-
-            text(0,6,5,0,1,"Planet Disk Min",ft,7)
-            text(0,6,3,1,1,str(ls_planetary_disk_min),fv,7)
-            draw_Vbar(0,6,greyColor,'ls_planetary_disk_min',ls_planetary_disk_min)
-
-            text(0,7,5,0,1,"Planet Disk Max",ft,7)
-            text(0,7,3,1,1,str(ls_planetary_disk_max),fv,7)
-            draw_Vbar(0,7,greyColor,'ls_planetary_disk_max',ls_planetary_disk_max)
-
-            # Ligne 8 - SAVE CONFIG
-            button(0,8,6,4)
-            text(0,8,2,0,1,"SAVE CONFIG",fv,7)
-
-            # Ligne 9 - Retour Page 1
-            button(0,9,0,9)
-            text(0,9,1,0,1,"<<< Page 1",ft,7)
-            text(0,9,1,1,1,"",ft,7)
-
-    # ========== MENU 9 - LUCKY STACK SETTINGS ==========
-    elif menu == 9:
-        # LUCKY STACK Settings - Complet
-        # (Lucky Enable géré par le bouton LUCKY STACK lui-même)
-
-        # Ligne 1 - Lucky Buffer
-        text(0,1,5,0,1,"Buffer Size",ft,7)
-        text(0,1,3,1,1,str(ls_lucky_buffer),fv,7)
-        draw_Vbar(0,1,greyColor,'ls_lucky_buffer',ls_lucky_buffer)
-
-        # Ligne 2 - Lucky Keep %
-        text(0,2,5,0,1,"Keep Best %",ft,7)
-        text(0,2,3,1,1,str(ls_lucky_keep)+"%",fv,7)
-        draw_Vbar(0,2,greyColor,'ls_lucky_keep',ls_lucky_keep)
-
-        # Ligne 3 - Lucky Score Method
-        text(0,3,5,0,1,"Score Method",ft,7)
-        text(0,3,3,1,1,lucky_score_methods[ls_lucky_score],fv,7)
-        draw_Vbar(0,3,greyColor,'ls_lucky_score',ls_lucky_score)
-
-        # Ligne 4 - Lucky Stack Method
-        text(0,4,5,0,1,"Stack Method",ft,7)
-        text(0,4,3,1,1,lucky_stack_methods[ls_lucky_stack],fv,7)
-        draw_Vbar(0,4,greyColor,'ls_lucky_stack',ls_lucky_stack)
-
-        # Ligne 5 - Lucky Align
-        text(0,5,5,0,1,"Align Images",ft,7)
-        _aln = ['OFF','Surface','Disque','Hybrid']
-        text(0,5,3,1,1,_aln[ls_lucky_align] if 0<=ls_lucky_align<4 else "?",fv,7)
-        draw_Vbar(0,5,greyColor,'ls_lucky_align',ls_lucky_align)
-
-        # Ligne 6 - Lucky ROI %
-        text(0,6,5,0,1,"ROI %",ft,7)
-        text(0,6,3,1,1,str(ls_lucky_roi)+"%",fv,7)
-        draw_Vbar(0,6,greyColor,'ls_lucky_roi',ls_lucky_roi)
-
-        # Ligne 7 - (vide pour l'instant)
-
-        # Ligne 8 - SAVE CONFIG
-        button(0,8,0,4)
-        text(0,8,2,0,1,"SAVE CONFIG",fv,7)
-
-        # Ligne 9 - Retour
-        button(0,9,0,9)
-        text(0,9,1,0,1,"CAMERA",ft,7)
-        text(0,9,1,1,1,"Settings",ft,7)
-
-    # ========== MENU 10 - METRICS SETTINGS ==========
-    elif menu == 10:
-        # ========== MENU 10 - METRICS Settings ==========
-
-        # Ligne 1 - Focus Method
-        text(0,1,5,0,1,"Focus Method",ft,10)
-        text(0,1,3,1,1,focus_methods[focus_method],fv,10)
-        draw_bar(0,1,lgrnColor,'focus_method',focus_method)
-
-        # Ligne 2 - Star Metric
-        text(0,2,5,0,1,"Star Metric",ft,10)
-        text(0,2,3,1,1,star_metrics[star_metric],fv,10)
-        draw_bar(0,2,lgrnColor,'star_metric',star_metric)
-
-        # Ligne 3 - SNR Display
-        text(0,3,5,0,1,"SNR Display",ft,10)
-        if snr_display == 0:
-            text(0,3,3,1,1,"OFF",fv,10)
-        else:
-            text(0,3,3,1,1,"ON",fv,10)
-        draw_bar(0,3,lgrnColor,'snr_display',snr_display)
-
-        # Ligne 4 - Calc Interval
-        text(0,4,5,0,1,"Calc Interval",ft,10)
-        text(0,4,3,1,1,str(metrics_interval),fv,10)
-        draw_bar(0,4,lgrnColor,'metrics_interval',metrics_interval)
-
-        # Ligne 8 - SAVE CONFIG
-        button(0,8,6,4)
-        text(0,8,2,0,1,"SAVE CONFIG",fv,10)
-
-        # Ligne 9 - Retour OTHER Settings
-        button(0,9,0,9)
-        text(0,9,1,0,1,"OTHER",ft,10)
-        text(0,9,1,1,1,"Settings",ft,10)
-
-    # ========== MENU 11 - PAGE 2 (Extensions futures) ==========
-    elif menu == 11:
-        # Effacer la zone des boutons
-        pygame.draw.rect(windowSurfaceObj, blackColor, Rect(preview_width, 0, bw, preview_height))
-
-        # Boutons avec le même style que le menu principal (9 boutons)
-        bh = int(preview_height/9)
-
-        # Bouton 0 - Retour PAGE 1 (menu principal)
-        button(0,0,0,4)
-        text(0,0,1,0,1,"     PAGE 1",ft,7)
-
-        # Bouton 1 - JSK LIVE (vert comme STILL)
-        button(0,1,4,4)
-        text(0,1,8,0,1,"      JSK LIVE",ft,1)
-
-        # Bouton 2 - COLIM (jaune comme VIDEO)
-        button(0,2,2,4)
-        text(0,2,8,0,1,"        COLIM",ft,2)
-
-        # Bouton 3 - MOON (bleu marine)
-        button(0,3,10,4)
-        text(0,3,6,0,1,"        MOON",ft,13)
-
-        # Bouton 4 - SUN (même couleurs que LIVE STACK page 1)
-        button(0,4,9,4)
-        text(0,4,1,0,1,"           SUN",ft,5)
-
-        # Boutons 5-7 vides pour futures extensions
-        button(0,5,0,4)
-        button(0,6,0,4)
-        button(0,7,0,4)
-
-        # Bouton 8 - EXIT
-        button(0,8,0,4)
-        text(0,8,2,0,1,"      EXIT",fv+10,7)
-
-text(0,0,6,2,1,"Please Wait, checking camera",int(fv* 1.7),1)
-text(0,0,6,2,1,"Found " + str(cameras[Pi_Cam]),int(fv*1.7),1)
-
-Menu()
-
+# Nouvel écran d'accueil : ne pas dessiner l'ancienne interface
+windowSurfaceObj.fill((0, 0, 0))
 time.sleep(1)
 pygame.display.update()
 
@@ -12974,7 +14264,7 @@ fyz = 1
 old_histarea = histarea
 
 # start preview
-text(0,0,6,2,1,"Please Wait for preview...",int(fv*1.7),1)
+print("[INIT] Démarrage du preview...")
 preview()
 
 # Créer une image noire par défaut pour éviter NameError au premier passage
@@ -14363,6 +15653,8 @@ while True:
                     # Transposer car pygame utilise (width, height, channels) et opencv utilise (height, width, channels)
                     image_array = np.transpose(image_array, (1, 0, 2))
                     snr_value = calculate_snr(image_array)
+                    if focus_mode == 1:
+                        _focus_cur_snr = snr_value
 
                     # Seuils pour ratio linéaire (adapté à l'astrophotographie)
                     snr_color = 0  # couleur par défaut (gris foncé)
@@ -14430,114 +15722,92 @@ while True:
                     star_line = 3 if focus_mode == 0 else 4
                     text(20, star_line, 0, 2, 0, f"{star_label}: N/A", fv * 2, 0)
 
-            # En mode focus : afficher 2 graphiques élégants dans le bandeau noir
-            # Graphique 1 (gauche) : HFR ou FWHM selon star_metric
-            # Graphique 2 (droite) : Focus selon focus_method
-            # CORRECTION : Afficher seulement en mode focus (focus_mode == 1)
+            # Mise à jour vars partagées + historique pour draw_focus_overlay
             if focus_mode == 1:
-                try:
-                    graph_y = int(preview_height * 0.75) + 1
-                    graph_height = preview_height - graph_y - 2
+                _focus_cur_foc  = foc
+                _focus_cur_hfr  = hfr_val
+                _focus_cur_fwhm = fwhm_val
+                _t = time.time()
+                if foc is not None and focus_method > 0:
+                    if focus_start_time == 0:
+                        focus_start_time = _t
+                    focus_history.append(foc)
+                    focus_times.append(_t - focus_start_time)
+                if star_metric == 1 and hfr_val is not None:
+                    if hfr_start_time == 0:
+                        hfr_start_time = _t
+                    hfr_history.append(hfr_val)
+                    hfr_times.append(_t - hfr_start_time)
+                elif star_metric == 2 and fwhm_val is not None:
+                    if fwhm_start_time == 0:
+                        fwhm_start_time = _t
+                    fwhm_history.append(fwhm_val)
+                    fwhm_times.append(_t - fwhm_start_time)
 
-                    # Largeur de chaque graphique = moitié du bandeau moins marges
-                    graph_width = int((preview_width - 40) / 2)  # -40 pour marges (10+10+10+10)
+    # Masqué en home screen (overlay prend la place)
+    _home_active = (moon_mode == 0 and sun_mode == 0 and jsk_live_mode == 0 and
+                    collimation_mode == 0 and stretch_mode == 0 and
+                    ls_interface_mode == 0 and lucky_interface_mode == 0)
 
-                    # Graphique 1 (gauche) : Métrique stellaire (HFR ou FWHM selon star_metric)
-                    star_surface = None
-                    if star_metric == 1 and hfr_val is not None:  # HFR
-                        star_surface = update_star_metric_graph(hfr_val, 'HFR')
-                    elif star_metric == 2 and fwhm_val is not None:  # FWHM
-                        star_surface = update_star_metric_graph(fwhm_val, 'FWHM')
-
-                    if star_surface is not None and alt_dis < 2:
-                        graph1_x = 10
-                        graph1_resized = pygame.transform.scale(star_surface, (graph_width, graph_height))
-
-                        # Cadre élégant avec couleur gradient
-                        pygame.draw.rect(windowSurfaceObj, (100, 255, 200),
-                                       Rect(graph1_x - 2, graph_y - 2,
-                                            graph1_resized.get_width() + 4,
-                                            graph1_resized.get_height() + 4), 2)
-
-                        windowSurfaceObj.blit(graph1_resized, (graph1_x, graph_y))
-
-                    # Graphique 2 (droite) : Focus selon focus_method
-                    if focus_method > 0 and foc is not None:
-                        focus_surface = update_focus_graph(foc, focus_methods[focus_method])
-                        if focus_surface is not None and alt_dis < 2:
-                            graph2_x = 10 + graph_width + 20  # Après le premier graphique + marge
-                            graph2_resized = pygame.transform.scale(focus_surface, (graph_width, graph_height))
-
-                            # Cadre élégant avec couleur gradient
-                            pygame.draw.rect(windowSurfaceObj, (100, 200, 255),
-                                           Rect(graph2_x - 2, graph_y - 2,
-                                                graph2_resized.get_width() + 4,
-                                                graph2_resized.get_height() + 4), 2)
-
-                            windowSurfaceObj.blit(graph2_resized, (graph2_x, graph_y))
-
-                except Exception as e:
-                    pass  # Ignorer les erreurs d'affichage des graphiques silencieusement
-
-        # Rectangle rouge et croix d'analyse - SEULEMENT en mode focus
-        if focus_mode == 1:
-            # Adapter la taille d'affichage du réticule au zoom
-            # Le réticule doit être PLUS GRAND à l'écran quand on zoome
-            # pour représenter la même zone physique du capteur (car l'image est agrandie)
-            zoom_factors = {0: 1.0, 1: 1.6, 2: 2.4, 3: 3.0, 4: 3.9, 5: 5.8}
-            zoom_factor = zoom_factors.get(zoom, 1.0)
-            histarea_display = int(histarea * zoom_factor)
-
-            # Limiter la taille max pour éviter un réticule trop grand
-            histarea_display = min(histarea_display, int(preview_width / 3))
-
-            pygame.draw.rect(windowSurfaceObj,redColor,Rect(xx-histarea_display,xy-histarea_display,histarea_display*2,histarea_display*2),1)
-            pygame.draw.line(windowSurfaceObj,(255,255,255),(xx-int(histarea_display/2),xy),(xx+int(histarea_display/2),xy),1)
-            pygame.draw.line(windowSurfaceObj,(255,255,255),(xx,xy-int(histarea_display/2)),(xx,xy+int(histarea_display/2)),1)
-
-    # Mode preview (zoom == 0 ET focus_mode == 0) - Ne pas afficher en mode stretch ni en modes fullscreen
-    if zoom == 0 and focus_mode == 0 and stretch_mode == 0 and moon_mode == 0 and sun_mode == 0 and jsk_live_mode == 0:
-        text(0,0,6,2,0,"Preview",fv* 2,0)
-
-    # Mode preview (zoom == 0)
-    if zoom == 0 and moon_mode == 0 and sun_mode == 0 and jsk_live_mode == 0:
-        #pygame.draw.rect(windowSurfaceObj,blackColor,Rect(0,0,int(preview_width/4.5),int(preview_height/8)),0)
-        # Ne pas afficher le texte en mode stretch
-        if stretch_mode == 0:
-            text(0,0,6,2,0,"Preview",fv* 2,0)
-        zxp = (zx -((preview_width/2) / (igw/preview_width)))
-        zyp = (zy -((preview_height/2) / (igh/preview_height)))
-        zxq = (zx - zxp) * 2
-        zyq = (zy - zyp) * 2
-        if zxp + zxq > preview_width:
-            zx = preview_width - int(zxq/2)
-            zxp = (zx -((preview_width/2) / (igw/preview_width)))
-            zxq = (zx - zxp) * 2
-        if zyp + zyq > preview_height:
-            zy = preview_height - int(zyq/2)
-            zyp = (zy -((preview_height/2) / (igh/preview_height)))
-            zyq = (zy - zyp) * 2
-        if zxp < 0:
-            zx = int(zxq/2) + 1
-            zxp = 0
-            zxq = (zx - zxp) * 2
-        if zyp < 0:
-            zy = int(zyq/2) + 1
-            zyp = 0
-            zyq = (zy - zyp) * 2
-        if preview_width < 800:
-            gw = 2
-        else:
-            gw = 1
-        # Ne pas afficher le rectangle de focus en mode stretch (déjà géré plus bas)
-        if ((Pi_Cam == 3 and v3_af == 1) or ((Pi_Cam == 5 or Pi_Cam == 6)) or Pi_Cam == 8) and fxz != 1 and zoom == 0 and stretch_mode == 0:
-            pygame.draw.rect(windowSurfaceObj,(200,0,0),Rect(int(fxx*preview_width),int(fxy*preview_height*.75),int(fxz*preview_width),int(fyz*preview_height)),1)
+    # === HOME SCREEN OVERLAY ===
+    if _home_active:
+        try:
+            # Utiliser la taille ACTUELLE de la fenêtre (adaptée windowed ou fullscreen)
+            _hw, _hh = windowSurfaceObj.get_size()
+            if _hw <= 0 or _hh <= 0:
+                _hw, _hh = 1024, 600
+            # Obtenir la frame BGR pour l'histogramme (si disponible depuis la frame en cours)
+            _home_frame_bgr = None
+            try:
+                if 'array' in globals() and array is not None and hasattr(array, 'shape') and len(array.shape) == 3:
+                    _arr8 = array.astype(np.uint8) if array.dtype != np.uint8 else array
+                    _home_frame_bgr = cv2.cvtColor(_arr8, cv2.COLOR_RGB2BGR)
+                elif _home_last_frame_bgr is not None:
+                    _home_frame_bgr = _home_last_frame_bgr
+            except Exception:
+                _home_frame_bgr = _home_last_frame_bgr
+            # Blit image preview plein écran (toujours couvrir l'écran entier)
+            try:
+                if 'image' in globals() and image is not None:
+                    _home_img_scaled = pygame.transform.scale(image, (_hw, _hh))
+                    windowSurfaceObj.blit(_home_img_scaled, (0, 0))
+                else:
+                    windowSurfaceObj.fill((0, 0, 0))
+            except Exception:
+                windowSurfaceObj.fill((0, 0, 0))
+            if focus_mode == 1:
+                _focus_overlay_rects = draw_focus_overlay(_hw, _hh)
+            else:
+                draw_home_overlay(_hw, _hh, _home_frame_bgr)
+            if _numpad_active:
+                draw_numpad_overlay()
+        except Exception as _he:
+            pass
 
     # *** CRUCIAL : Mettre à jour l'affichage pygame ***
     pygame.display.update()
-    
-    # *** CETTE PARTIE EST CRUCIALE : Mode preview (zoom == 0) ***
-    if zoom == 0 and moon_mode == 0 and sun_mode == 0 and jsk_live_mode == 0:
+
+    # Debounce sauvegarde config (home screen sliders — évite time.sleep bloquant)
+    if _home_save_pending and pygame.time.get_ticks() >= _home_save_deadline:
+        _home_save_pending = False
+        try:
+            save_config_to_file()
+        except Exception:
+            pass
+
+    # Capture déclenchée depuis le home screen (boutons STILL/VIDEO/TIMELAPSE)
+    if _home_pending_capture >= 0:
+        _home_passthrough = True
+        _home_suppress_oldui = True   # Supprimer le rendu de l'ancienne interface pendant la capture
+        draw_home_capture_banner(_home_pending_capture)  # Afficher les infos de capture
+        _bh = max(1, bh if bh > 0 else int(preview_height / 10))
+        _cap_y = int(_home_pending_capture * _bh + _bh // 2)
+        pygame.event.post(pygame.event.Event(pygame.MOUSEBUTTONUP,
+            {"button": 1, "pos": (preview_width + 1, _cap_y)}))
+        _home_pending_capture = -1
+
+    # *** CETTE PARTIE EST CRUCIALE : Mode preview (zoom == 0) — masqué en home screen ***
+    if zoom == 0 and moon_mode == 0 and sun_mode == 0 and jsk_live_mode == 0 and not _home_active:
         #pygame.draw.rect(windowSurfaceObj,blackColor,Rect(0,0,int(preview_width/4.5),int(preview_height/8)),0)
         # Ne pas afficher le texte en mode stretch
         if stretch_mode == 0:
@@ -14595,6 +15865,61 @@ while True:
           pygame.quit()
       # === MOON / JSK LIVE: gestion du drag des sliders (MOUSEBUTTONDOWN + MOUSEMOTION) ===
       elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+        # === HOME SCREEN : Drag sliders gain/expo/zoom ===
+        if focus_mode == 0 and moon_mode == 0 and sun_mode == 0 and jsk_live_mode == 0 and collimation_mode == 0 and stretch_mode == 0 and ls_interface_mode == 0 and lucky_interface_mode == 0:
+            mx, my = event.pos
+            display_modes = pygame.display.list_modes()
+            _fs_w, _fs_h = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+            geom_list = _home_ge_slider_positions(_fs_w, _fs_h)
+            key_names = ['home_gain', 'home_expo', 'home_zoom']
+            _matched_home = False
+            import math as _math_home
+            for _i, (_sx, _sy, _sw, _sh) in enumerate(geom_list):
+                if _sx <= mx <= _sx + _sw and _sy <= my <= _sy + _sh:
+                    _ratio = max(0.0, min(1.0, (mx - _sx) / _sw))
+                    if _i == 0:
+                        _gmax = _HOME_GAIN_SCALES[max(0, min(home_gain_scale_idx, len(_HOME_GAIN_SCALES)-1))]
+                        gain = max(1, min(_gmax, int(1 + _ratio * (_gmax - 1))))
+                        apply_controls_immediately(gain_value=gain)
+                        _home_ge_dragging = 'home_gain'
+                    elif _i == 1:
+                        _emax_ms = _HOME_EXPO_SCALES_MS[max(0, min(home_expo_scale_idx, len(_HOME_EXPO_SCALES_MS)-1))]
+                        _mi, _ma = 1000, _emax_ms * 1000
+                        custom_sspeed = max(_mi, min(_ma, int(10 ** (_math_home.log10(_mi) + _ratio * (_math_home.log10(_ma) - _math_home.log10(_mi))))))
+                        apply_controls_immediately(exposure_time=custom_sspeed)
+                        _home_ge_dragging = 'home_expo'
+                    elif _i == 2:
+                        zoom = max(0, min(5, int(_ratio * 5 + 0.5)))
+                        _home_ge_dragging = 'home_zoom'
+                    _matched_home = True
+                    break
+            if _matched_home:
+                continue
+        # Focus overlay drag start
+        if focus_mode == 1 and _focus_overlay_rects and moon_mode == 0 and sun_mode == 0 and jsk_live_mode == 0 and collimation_mode == 0:
+            mx, my = event.pos
+            import math as _math_foc
+            for _fkey in ('focus_gain', 'focus_expo', 'focus_zoom', 'focus_hist', 'focus_frq'):
+                _fr = _focus_overlay_rects.get(_fkey)
+                if _fr and _fr.collidepoint(mx, my):
+                    _ratio = max(0.0, min(1.0, (mx - _fr.x) / max(1, _fr.width)))
+                    if _fkey == 'focus_gain':
+                        focus_gain = max(0, min(300, int(_ratio * 300 + 0.5)))
+                        _apply_focus_controls()
+                    elif _fkey == 'focus_expo':
+                        _lmin, _lmax = _math_foc.log10(1000), _math_foc.log10(1000000)
+                        focus_exposure_us = int(10 ** (_lmin + _ratio * (_lmax - _lmin)))
+                        _apply_focus_controls()
+                    elif _fkey == 'focus_zoom':
+                        focus_zoom_focus = max(0, min(5, int(_ratio * 5 + 0.5)))
+                    elif _fkey == 'focus_hist':
+                        histarea = max(10, min(200, int(10 + _ratio * 190 + 0.5)))
+                    elif _fkey == 'focus_frq':
+                        metrics_interval = max(1, min(10, int(_ratio * 9 + 1 + 0.5)))
+                    _focus_ge_dragging = _fkey
+                    break
+            if _focus_ge_dragging is not None:
+                continue
         if moon_mode == 1:
             mx, my = event.pos
             display_modes = pygame.display.list_modes()
@@ -14734,6 +16059,57 @@ while True:
                 _lucky_ge_dragging = 'zoom'
                 continue
       elif event.type == pygame.MOUSEMOTION:
+        # === HOME SCREEN : Drag sliders gain/expo/zoom ===
+        if _home_ge_dragging is not None and focus_mode == 0:
+            buttons = pygame.mouse.get_pressed()
+            if buttons[0]:
+                mx, my = event.pos
+                display_modes = pygame.display.list_modes()
+                _fs_w, _fs_h = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+                geom_list = _home_ge_slider_positions(_fs_w, _fs_h)
+                idx_map = {'home_gain': 0, 'home_expo': 1, 'home_zoom': 2}
+                _hi = idx_map.get(_home_ge_dragging, -1)
+                if _hi >= 0:
+                    _sx, _sy, _sw, _sh = geom_list[_hi]
+                    _ratio = max(0.0, min(1.0, (mx - _sx) / _sw))
+                    import math as _math_hm
+                    if _hi == 0:
+                        _gmax = _HOME_GAIN_SCALES[max(0, min(home_gain_scale_idx, len(_HOME_GAIN_SCALES)-1))]
+                        gain = max(1, min(_gmax, int(1 + _ratio * (_gmax - 1))))
+                        apply_controls_immediately(gain_value=gain)
+                    elif _hi == 1:
+                        _emax_ms = _HOME_EXPO_SCALES_MS[max(0, min(home_expo_scale_idx, len(_HOME_EXPO_SCALES_MS)-1))]
+                        _mi, _ma = 1000, _emax_ms * 1000
+                        custom_sspeed = max(_mi, min(_ma, int(10 ** (_math_hm.log10(_mi) + _ratio * (_math_hm.log10(_ma) - _math_hm.log10(_mi))))))
+                        apply_controls_immediately(exposure_time=custom_sspeed)
+                    elif _hi == 2:
+                        zoom = max(0, min(5, int(_ratio * 5 + 0.5)))
+                continue
+            else:
+                _home_ge_dragging = None
+        # Drag sliders focus overlay
+        if _focus_ge_dragging is not None and focus_mode == 1:
+            if event.buttons[0]:
+                import math as _math_fd
+                mx, my = event.pos
+                _fr = _focus_overlay_rects.get(_focus_ge_dragging)
+                if _fr:
+                    _ratio = max(0.0, min(1.0, (mx - _fr.x) / max(1, _fr.width)))
+                    if _focus_ge_dragging == 'focus_gain':
+                        focus_gain = max(0, min(300, int(_ratio * 300 + 0.5)))
+                        _apply_focus_controls()
+                    elif _focus_ge_dragging == 'focus_expo':
+                        _lmin, _lmax = _math_fd.log10(1000), _math_fd.log10(1000000)
+                        focus_exposure_us = int(10 ** (_lmin + _ratio * (_lmax - _lmin)))
+                        _apply_focus_controls()
+                    elif _focus_ge_dragging == 'focus_zoom':
+                        focus_zoom_focus = max(0, min(5, int(_ratio * 5 + 0.5)))
+                    elif _focus_ge_dragging == 'focus_hist':
+                        histarea = max(10, min(200, int(10 + _ratio * 190 + 0.5)))
+                    elif _focus_ge_dragging == 'focus_frq':
+                        metrics_interval = max(1, min(10, int(_ratio * 9 + 1 + 0.5)))
+                continue
+            # Ne pas effacer _focus_ge_dragging ici — MOUSEBUTTONUP s'en charge
         # Drag sliders gain/expo Moon
         if _moon_ge_dragging is not None and moon_mode == 1:
             buttons = pygame.mouse.get_pressed()
@@ -14920,6 +16296,57 @@ while True:
       # MOVE HISTAREA
       elif (event.type == MOUSEBUTTONUP):
         mousex, mousey = event.pos
+        # === PAVÉ NUMÉRIQUE — prioritaire sur tous les autres clics ===
+        if _numpad_active:
+            handle_numpad_click(mousex, mousey)
+            continue
+        # === HOME SCREEN : Fin du drag sliders gain/expo/zoom ===
+        if _home_ge_dragging is not None and focus_mode == 0:
+            _prev_home_drag = _home_ge_dragging
+            _home_ge_dragging = None
+            if _prev_home_drag == 'home_zoom':
+                # Appliquer le zoom (reconfiguration caméra si nécessaire)
+                sync_video_resolution_with_zoom()
+                display_modes = pygame.display.list_modes()
+                _dw, _dh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+                windowSurfaceObj.fill((0, 0, 0))
+                _ck_r = 36
+                if _ck_r not in _font_cache:
+                    _font_cache[_ck_r] = pygame.font.Font(None, _ck_r)
+                _msg_r = _font_cache[_ck_r].render("Reconfiguration camera...", True, (200, 200, 200))
+                windowSurfaceObj.blit(_msg_r, _msg_r.get_rect(center=(_dw // 2, _dh // 2)))
+                pygame.display.update()
+                kill_preview_process()
+                preview()
+                # Restaurer fullscreen (preview() peut changer le mode d'affichage)
+                display_modes = pygame.display.list_modes()
+                _dw2, _dh2 = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+                windowSurfaceObj = pygame.display.set_mode((_dw2, _dh2), pygame.FULLSCREEN, 24)
+                windowSurfaceObj.fill((0, 0, 0))
+            continue
+        # === HOME SCREEN : Clic simple (boutons + settings) ===
+        # _home_passthrough=True : événement synthétique interne (STILL/VIDEO/TL) — bypass le bloc home
+        # Fin du drag focus overlay
+        if _focus_ge_dragging is not None:
+            _prev_focus_drag = _focus_ge_dragging
+            _focus_ge_dragging = None
+            if _prev_focus_drag == 'focus_zoom' and focus_zoom_focus != zoom:
+                zoom = focus_zoom_focus
+                sync_video_resolution_with_zoom()
+                kill_preview_process()
+                preview()
+                display_modes = pygame.display.list_modes()
+                _dw, _dh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+                windowSurfaceObj = pygame.display.set_mode((_dw, _dh), pygame.FULLSCREEN, 24)
+            continue
+        if _home_passthrough:
+            _home_passthrough = False  # laisser passer vers les anciens handlers
+        elif moon_mode == 0 and sun_mode == 0 and jsk_live_mode == 0 and collimation_mode == 0 and stretch_mode == 0 and ls_interface_mode == 0 and lucky_interface_mode == 0:
+            if focus_mode == 1:
+                handle_focus_overlay_click(mousex, mousey)
+            else:
+                handle_home_click(mousex, mousey)
+            continue  # Toujours consommer le clic — évite les anciens handlers
         # Fin du drag LS gain/expo/zoom
         if _ls_ge_dragging is not None:
             _prev_ls_drag = _ls_ge_dragging
@@ -15048,18 +16475,12 @@ while True:
                 if hasattr(pygame, '_ls_prev_accepted'):
                     del pygame._ls_prev_accepted
             print("[LIVESTACK] Mode désactivé (clic)")
-            # Restaurer le mode d'affichage normal (avec l'interface)
-            if frame == 1:
-                if fullscreen == 1:
-                    windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.FULLSCREEN, 24)
-                else:
-                    windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), 0, 24)
-            else:
-                windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.NOFRAME, 24)
-            # Effacer l'écran (remplir de noir)
+            # Retour en plein écran pour le home screen
+            display_modes = pygame.display.list_modes()
+            _hw, _hh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+            windowSurfaceObj = pygame.display.set_mode((_hw, _hh), pygame.FULLSCREEN, 24)
             windowSurfaceObj.fill((0, 0, 0))
-            # Redessiner le menu pour restaurer l'affichage normal
-            Menu()
+            menu = 0
             pygame.display.update()
 
             # *** Reconfigurer caméra pour revenir au mode ISP après le RAW ***
@@ -15097,18 +16518,12 @@ while True:
                     print("[LUCKYSTACK] Sauvegarde finale désactivée (ls_lucky_save_final=0)")
                 luckystack.stop()
             print("[LUCKYSTACK] Mode désactivé (clic)")
-            # Restaurer le mode d'affichage normal (avec l'interface)
-            if frame == 1:
-                if fullscreen == 1:
-                    windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.FULLSCREEN, 24)
-                else:
-                    windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), 0, 24)
-            else:
-                windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.NOFRAME, 24)
-            # Effacer l'écran (remplir de noir)
+            # Retour en plein écran pour le home screen
+            display_modes = pygame.display.list_modes()
+            _hw, _hh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+            windowSurfaceObj = pygame.display.set_mode((_hw, _hh), pygame.FULLSCREEN, 24)
             windowSurfaceObj.fill((0, 0, 0))
-            # Redessiner le menu pour restaurer l'affichage normal
-            Menu()
+            menu = 0
             pygame.display.update()
 
             # *** Reconfigurer caméra pour revenir au mode ISP après le RAW ***
@@ -15342,6 +16757,12 @@ while True:
                     kill_preview_process()
                     preview()
 
+                # Restaurer affichage fullscreen pour le home screen
+                display_modes = pygame.display.list_modes()
+                _hw, _hh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+                windowSurfaceObj = pygame.display.set_mode((_hw, _hh), pygame.FULLSCREEN, 24)
+                windowSurfaceObj.fill((0, 0, 0))
+                menu = 0
                 print("[LS INTERFACE] Mode interface LS désactivé")
                 continue
 
@@ -15619,16 +17040,12 @@ while True:
                     kill_preview_process()
                     preview()
 
-                # Restaurer le mode d'affichage normal
-                if frame == 1:
-                    if fullscreen == 1:
-                        windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.FULLSCREEN, 24)
-                    else:
-                        windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), 0, 24)
-                else:
-                    windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.NOFRAME, 24)
+                # Restaurer affichage fullscreen pour le home screen
+                display_modes = pygame.display.list_modes()
+                _hw, _hh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+                windowSurfaceObj = pygame.display.set_mode((_hw, _hh), pygame.FULLSCREEN, 24)
                 windowSurfaceObj.fill((0, 0, 0))
-                Menu()
+                menu = 0
                 pygame.display.update()
                 print("[LUCKY INTERFACE] Mode interface Lucky désactivé")
                 continue
@@ -15735,18 +17152,12 @@ while True:
             raw_adjust_mode = 0
             _stretch_slider_rects = {}
             _raw_slider_rects = {}
-            # Restaurer le mode d'affichage normal (avec l'interface)
-            if frame == 1:
-                if fullscreen == 1:
-                    windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.FULLSCREEN, 24)
-                else:
-                    windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), 0, 24)
-            else:
-                windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.NOFRAME, 24)
-            # Effacer l'écran (remplir de noir)
+            # Restaurer affichage fullscreen pour le home screen
+            display_modes = pygame.display.list_modes()
+            _hw, _hh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+            windowSurfaceObj = pygame.display.set_mode((_hw, _hh), pygame.FULLSCREEN, 24)
             windowSurfaceObj.fill((0, 0, 0))
-            # Redessiner le menu pour restaurer l'affichage normal
-            Menu()
+            menu = 0
             pygame.display.update()
 
             # Si on était en mode RAW preview (sans stacking), revenir en mode ISP normal
@@ -15791,20 +17202,15 @@ while True:
                 kill_preview_process()
                 preview()
 
-                # Restaurer le mode d'affichage normal
-                if frame == 1:
-                    if fullscreen == 1:
-                        windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.FULLSCREEN, 24)
-                    else:
-                        windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), 0, 24)
-                else:
-                    windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.NOFRAME, 24)
+                # Retour en plein écran pour le home screen
+                display_modes = pygame.display.list_modes()
+                _hw, _hh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+                windowSurfaceObj = pygame.display.set_mode((_hw, _hh), pygame.FULLSCREEN, 24)
 
                 windowSurfaceObj.fill((0, 0, 0))
-                menu = 11  # Retour a PAGE 2
-                Menu()
+                menu = 0  # Retour à l'écran d'accueil
                 pygame.display.update()
-                print("[COLIM] Mode collimation desactive")
+                print("[COLIM] Mode collimation desactive → Home screen")
                 continue
 
             # Clic sur slider sensibilite
@@ -16032,10 +17438,9 @@ while True:
                 preview()
 
                 windowSurfaceObj.fill((0, 0, 0))
-                menu = 11
-                Menu()
+                menu = 0  # Retour à l'écran d'accueil
                 pygame.display.update()
-                print("[MOON] Mode désactivé")
+                print("[MOON] Mode désactivé → Home screen")
                 continue
 
             # Sliders Gain/Expo/Zoom
@@ -16200,10 +17605,9 @@ while True:
                 preview()
 
                 windowSurfaceObj.fill((0, 0, 0))
-                menu = 11
-                Menu()
+                menu = 0  # Retour à l'écran d'accueil
                 pygame.display.update()
-                print("[SOLAR] Mode désactivé")
+                print("[SOLAR] Mode désactivé → Home screen")
                 continue
 
             # Sliders Gain/Expo/Zoom
@@ -16359,20 +17763,15 @@ while True:
                 if capture_thread is not None:
                     capture_thread.set_capture_params({'type': 'main'})
 
-                # Restaurer le mode d'affichage normal
-                if frame == 1:
-                    if fullscreen == 1:
-                        windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.FULLSCREEN, 24)
-                    else:
-                        windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), 0, 24)
-                else:
-                    windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.NOFRAME, 24)
+                # Retour en plein écran pour le home screen
+                display_modes = pygame.display.list_modes()
+                _hw, _hh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+                windowSurfaceObj = pygame.display.set_mode((_hw, _hh), pygame.FULLSCREEN, 24)
 
                 windowSurfaceObj.fill((0, 0, 0))
-                menu = 11  # Retour à PAGE 2
-                Menu()
+                menu = 0  # Retour à l'écran d'accueil
                 pygame.display.update()
-                print("[JSK LIVE] Mode désactivé")
+                print("[JSK LIVE] Mode désactivé → Home screen")
                 continue
 
             # Gerer les clics sur les sliders Gain/Expo (toujours visibles)
@@ -16455,11 +17854,8 @@ while True:
                     button_row = 2
                 str_btn = 0
               
-            if button_row == 0 and menu > 0:
-                menu = 0
-                Menu()
             # MENU 0
-            elif menu == 0: 
+            if menu == 0:
                 if button_row == 0:
                     # TAKE STILL
                     still = 1
@@ -17507,10 +18903,21 @@ while True:
                               vlength = int(time.monotonic()-start_video)
                           td = timedelta(seconds=vlength)
                           text(0,1,1,1,1,str(td),fv,0)
+                          if _home_suppress_oldui:
+                              _elapsed = int(time.monotonic() - start_video)
+                              _remaining = max(0, vlen - _elapsed) if vlen > 0 else _elapsed
+                              _draw_home_capture_update(
+                                  f"Ecoulé: {_elapsed}s   Restant: {_remaining}s",
+                                  "Cliquer n'importe où pour arrêter")
                           for event in pygame.event.get():
                               if (event.type == MOUSEBUTTONUP):
                                   mousex, mousey = event.pos
-                                  # stop video recording
+                                  # stop video recording — en home mode, tout clic arrête
+                                  if _home_suppress_oldui:
+                                      if p is not None:
+                                          os.killpg(p.pid, signal.SIGTERM)
+                                      stop = 1
+                                      continue
                                   if mousex > preview_width:
                                       button_row = int((mousey)/bh)
                                       if mousex > preview_width + (bw/2):
@@ -17981,10 +19388,15 @@ while True:
                                             # Note: Le nouveau gain sera utilisé pour la PROCHAINE capture
 
                                 text(0,2,1,1,1,str(tshots - count),fv,0)
+                                if _home_suppress_oldui:
+                                    tdur = tinterval * (tshots - count)
+                                    _draw_home_capture_update(
+                                        f"Photo {count}/{tshots}   Restant: {int(tdur)}s",
+                                        "Cliquer n'importe où pour arrêter")
                                 tdur = tinterval * (tshots - count)
                                 td = timedelta(seconds=tdur)
                             time.sleep(0.1)
-                            if buttonSTR.is_pressed: # 
+                            if buttonSTR.is_pressed: #
                                 type = pygame.MOUSEBUTTONUP
                                 if str_cap == 2:
                                     click_event = pygame.event.Event(type, {"button": 3, "pos": (0,0)})
@@ -17997,6 +19409,12 @@ while True:
                                     pass
                                 elif (event.type == MOUSEBUTTONUP):
                                     mousex, mousey = event.pos
+                                    # En home mode : tout clic arrête le timelapse
+                                    if _home_suppress_oldui:
+                                        if p is not None:
+                                            os.killpg(p.pid, signal.SIGTERM)
+                                        stop = 1; count = tshots
+                                        continue
                                     # stop timelapse or capture STILL
                                     if mousex > preview_width:
                                         button_row = int((mousey)/bh)
@@ -18279,6 +19697,11 @@ while True:
                                             # Note: Le nouveau gain sera utilisé pour la PROCHAINE capture
 
                                 text(0,2,1,1,1,str(tshots - count),fv,12)
+                                if _home_suppress_oldui:
+                                    tdur_m = tinterval * (tshots - count)
+                                    _draw_home_capture_update(
+                                        f"Photo {count}/{tshots}   Restant: {int(tdur_m)}s",
+                                        "Cliquer n'importe où pour arrêter")
                                 tdur = tinterval * (tshots - count)
                                 td = timedelta(seconds=tdur)
                             time.sleep(0.1)
@@ -18288,6 +19711,12 @@ while True:
                                     pass
                                 elif (event.type == MOUSEBUTTONUP):
                                     mousex, mousey = event.pos
+                                    # En home mode : tout clic arrête le timelapse
+                                    if _home_suppress_oldui:
+                                        if p is not None:
+                                            os.killpg(p.pid, signal.SIGTERM)
+                                        stop = 1; count = tshots
+                                        continue
                                     # stop timelapse
                                     if mousex > preview_width:
                                         button_row = int((mousey)/bh)
@@ -18587,18 +20016,12 @@ while True:
                             if hasattr(pygame, '_ls_prev_accepted'):
                                 del pygame._ls_prev_accepted
 
-                        # Restaurer le mode d'affichage normal (avec l'interface)
-                        if frame == 1:
-                            if fullscreen == 1:
-                                windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.FULLSCREEN, 24)
-                            else:
-                                windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), 0, 24)
-                        else:
-                            windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.NOFRAME, 24)
-
-                        # Effacer l'écran et redessiner le menu
+                        # Restaurer affichage fullscreen pour le home screen
+                        display_modes = pygame.display.list_modes()
+                        _hw, _hh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+                        windowSurfaceObj = pygame.display.set_mode((_hw, _hh), pygame.FULLSCREEN, 24)
                         windowSurfaceObj.fill((0, 0, 0))
-                        Menu()
+                        menu = 0
                         pygame.display.update()
                         print("[LIVESTACK] Mode désactivé")
 
@@ -18683,18 +20106,12 @@ while True:
                                 print("[LUCKYSTACK] Sauvegarde finale désactivée (ls_lucky_save_final=0)")
                             luckystack.stop()
 
-                        # Restaurer le mode d'affichage normal (avec l'interface)
-                        if frame == 1:
-                            if fullscreen == 1:
-                                windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.FULLSCREEN, 24)
-                            else:
-                                windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), 0, 24)
-                        else:
-                            windowSurfaceObj = pygame.display.set_mode((preview_width + bw, dis_height), pygame.NOFRAME, 24)
-
-                        # Effacer l'écran et redessiner le menu
+                        # Restaurer affichage fullscreen pour le home screen
+                        display_modes = pygame.display.list_modes()
+                        _hw, _hh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
+                        windowSurfaceObj = pygame.display.set_mode((_hw, _hh), pygame.FULLSCREEN, 24)
                         windowSurfaceObj.fill((0, 0, 0))
-                        Menu()
+                        menu = 0
                         pygame.display.update()
                         print("[LUCKYSTACK] Mode désactivé")
 
@@ -18723,18 +20140,10 @@ while True:
                         max_width, max_height = screen_info.current_w, screen_info.current_h
                     windowSurfaceObj = pygame.display.set_mode((max_width, max_height), pygame.FULLSCREEN, 24)
 
-                elif button_row == 6:
-                    menu = 1
-                    Menu()
-
-                elif button_row == 7:
-                    menu = 2
-                    Menu()
-
                 elif button_row == 8:
-                    # Bouton divisé: EXIT (gauche) / PAGE2 (droite)
+                    # EXIT
                     if button_pos == 0:
-                        # Moitié gauche - EXIT
+                        # EXIT
                         kill_preview_process()
                         if picam2 is not None:
                             try:
@@ -18744,3145 +20153,6 @@ while True:
                                 pass
                         pygame.display.quit()
                         sys.exit()
-                    else:
-                        # Moitié droite - Accès PAGE 2 (menu 11)
-                        menu = 11
-                        Menu()
-
-
-            # MENU 1
-            elif menu == 1:
-              if button_row == 1:
-                  menu = 3
-                  Menu()
-              elif button_row == 2:
-                  menu = 5
-                  Menu()
-              elif button_row == 3:
-                  menu = 6
-                  Menu()
-              elif button_row == 6:
-                  menu = 8
-                  Menu()
-              elif button_row == 7:
-                  # LUCKY STACK Settings - menu placeholder
-                  menu = 9  # Nouveau menu pour LUCKY STACK Settings
-                  Menu()
-              elif button_row == 8:
-                  menu = 7  # STRETCH Settings (décalé)
-                  Menu()
-
-              elif button_row == 4:
-                # ZOOM
-                for f in range(0,len(video_limits)-1,3):
-                    if video_limits[f] == 'zoom':
-                        pmin = video_limits[f+1]
-                        pmax = video_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    zoom = int(((mousex-preview_width) / bw) * (pmax+1-pmin))###
-                    # Zoom manuel supprimé: simplifié la condition
-                    if igw/igh > 1.5 and alt_dis == 0:
-                        pygame.draw.rect(windowSurfaceObj,(0,0,0),Rect(0,int(preview_height * .75),preview_width,preview_height))
-                elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
-                    zoom = int(((mousex-((button_row -9)*bw)) / bw) * (pmax+1-pmin))
-                    # Zoom manuel supprimé: simplifié la condition
-                    if igw/igh > 1.5:
-                        pygame.draw.rect(windowSurfaceObj,(0,0,0),Rect(0,int(preview_height * .75),preview_width,preview_height/4))
-                elif (mousey > preview_height * .75 + (bh*3)  and mousey < preview_height * .75 + (bh*3) + int(bh/3)) and alt_dis == 2:
-                    zoom = int(((mousex-((button_row -9)*bw)) / bw) * (pmax+1-pmin))
-                # Zoom manuel supprimé: simplifié la condition
-                elif (alt_dis == 0 and mousex > preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 1):
-                    zoom +=1
-                    zoom = min(zoom,pmax)
-                elif alt_dis == 0 and mousex < preview_width + (bw/2)  and zoom > 0:
-                    zoom -=1
-                    # Zoom manuel supprimé: simplifié la condition
-                    if igw/igh > 1.5 and alt_dis == 0:
-                        pygame.draw.rect(windowSurfaceObj,(0,0,0),Rect(0,int(preview_height * .75),preview_width,preview_height))
-                # Synchroniser la résolution vidéo avec le zoom
-                sync_video_resolution_with_zoom()
-                print(zoom)
-                if zoom < 2:
-                    if zoom == 0:
-                        button(0,4,0,9)
-                        text(0,4,5,0,1,"Zoom",ft,7)
-                        text(0,4,3,1,1,"",fv,7)
-                        draw_Vbar(0,4,greyColor,'zoom',zoom)
-                    else:
-                        button(0,4,1,9)
-                        text(0,4,2,0,1,"ZOOMED",ft,0)
-                        text(0,4,3,1,1,zoom_res_labels.get(zoom, str(zoom)),fv,0)
-                        draw_Vbar(0,4,dgryColor,'zoom',zoom)
-
-                    if foc_man == 0 and focus_mode == 0:
-                        button(0,5,0,9)
-                        text(0,5,5,0,1,"FOCUS",ft,7)
-                    # determine if camera native format
-                    vw = 0
-                    x = 0
-                    while x < len(vwidths2) and vw == 0:
-                        if vwidth == vwidths2[x]:
-                             if vheight == vheights2[x]:
-                                vw = 1
-                        x += 1
-                    
-                else:
-                    button(0,4,1,9)
-                    text(0,4,2,0,1,"ZOOMED",ft,0)
-                    text(0,4,3,1,1,zoom_res_labels.get(zoom, str(zoom)),fv,0)
-                    draw_Vbar(0,4,dgryColor,'zoom',zoom)
-
-                # Maintenir le bouton Focus actif si on est en mode focus
-                if focus_mode == 1:
-                    # NE PAS recentrer le réticule - l'utilisateur peut l'avoir déplacé
-                    # xx = int(preview_width/2)
-                    # xy = int(preview_height/2)
-                    button(0,5,1,9)
-                    text(0,5,3,0,1,"FOCUS",ft,0)
-
-                if zoom > 0:
-                    fxx = 0
-                    fxy = 0
-                    fxz = 1
-                    fyz = 1
-                    if (Pi_Cam == 3 and v3_af == 1) and v3_f_mode == 0:
-                        text(0,5,3,1,1,str(v3_f_modes[v3_f_mode]),fv,7)
-                restart = 1
-                time.sleep(.2)
-                                         
-                             
-              elif button_row == 5:
-                # FOCUS
-                if (Pi_Cam == 3 and v3_af == 1):
-                    for f in range(0,len(video_limits)-1,3):
-                        if video_limits[f] == 'v3_focus':
-                            pmin = video_limits[f+1]
-                            pmax = video_limits[f+2]
-                if Pi_Cam == 5 or Pi_Cam == 6 or Pi_Cam == 8:
-                    if Pi_Cam == 5:
-                      for f in range(0,len(video_limits)-1,3):
-                        if video_limits[f] == 'v5_focus':
-                            pmin = video_limits[f+1]
-                            pmax = video_limits[f+2]
-                    if Pi_Cam == 6 or Pi_Cam == 8:
-                      for f in range(0,len(video_limits)-1,3):
-                        if video_limits[f] == 'v6_focus':
-                            pmin = video_limits[f+1]
-                            pmax = video_limits[f+2]
-                # arducam manual focus slider
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + (bh/3)) and ((Pi_Cam == 5 and v5_af == 1) or Pi_Cam == 6 or Pi_Cam == 8) and foc_man == 1:
-                    focus = int(((mousex-preview_width) / bw) * pmax)
-                    if Pi_Cam == 5:
-                        draw_Vbar(0,5,dgryColor,'v5_focus',focus)
-                    elif Pi_Cam == 6 or Pi_Cam == 8:
-                        draw_Vbar(0,5,dgryColor,'v6_focus',focus)
-                    v3_focus = focus
-                    restart = 1
-                    text(0,5,3,0,1,'<<< ' + str(focus) + ' >>>',fv,0)
-                #arducam manual focus buttons    
-                elif mousex > preview_width and mousey > ((button_row)*bh) + (bh/3) and mousey < ((button_row)*bh) + (bh/1.5) and ((Pi_Cam == 5 and v5_af == 1) or Pi_Cam == 6 or Pi_Cam == 8) and foc_man == 1:
-                    if button_pos == 2:
-                        focus -= 10
-                        focus = max(focus,pmin)
-                    elif button_pos == 3:
-                        focus += 10
-                        focus = min(focus,pmax)
-                    if Pi_Cam == 5:
-                        draw_Vbar(0,3,dgryColor,'v5_focus',focus)
-                    elif Pi_Cam == 6 or Pi_Cam == 8:
-                        draw_Vbar(0,3,dgryColor,'v6_focus',focus)
-                    v3_focus = focus
-                    restart = 1
-                    text(0,5,3,0,1,'<<< ' + str(focus) + ' >>>',fv,0)
-                # Pi v3 manual focus slider
-                elif (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + (bh/3)) and (Pi_Cam == 3 and v3_af == 1) and foc_man == 1:
-                    v3_focus = int(((mousex-preview_width) / bw) * (pmax+1-pmin)) + pmin
-                    draw_Vbar(0,5,dgryColor,'v3_focus',v3_focus-pmin)
-                    fd = 1/(v3_focus/100)
-                    text(0,5,3,0,1,'<<< ' + str(fd)[0:5] + "m" + ' >>>',fv,0)
-                    restart = 1
-                # Pi v3 manual focus buttons
-                elif mousex > preview_width and mousey > ((button_row)*bh) + (bh/3) and mousey < ((button_row)*bh) + (bh/1.5) and (Pi_Cam == 3 and v3_af == 1)  and foc_man == 1:
-                    if button_pos == 2:
-                        v3_focus -= 1
-                        v3_focus = max(v3_focus,pmin)
-                    elif button_pos == 3:
-                        v3_focus += 1
-                        v3_focus = min(v3_focus,pmax)
-                    draw_Vbar(0,3,dgryColor,'v3_focus',v3_focus-pmin)
-                    fd = 1/(v3_focus/100)
-                    text(0,5,3,0,1,'<<< ' + str(fd)[0:5] + "m" + ' >>>',fv,0)
-                    restart = 1
-
-                elif alt_dis == 0:
-                    # determine if camera native format
-                    vw = 0
-                    x = 0
-                    while x < len(vwidths2) and vw == 0:
-                        if vwidth == vwidths2[x]:
-                             if vheight == vheights2[x]:
-                                vw = 1
-                        x += 1
-                    # FOCUS button NON AF camera (ajout IMX585 = Pi_Cam 10)
-                    if (Pi_Cam < 3 or Pi_Cam == 4 or Pi_Cam == 7 or Pi_Cam == 9 or Pi_Cam == 10 or (Pi_Cam ==3 and v3_af == 0)) and focus_mode == 0:
-                        zoom = 4
-                        sync_video_resolution_with_zoom()
-                        focus_mode = 1
-                        # Recentrer le réticule (activation initiale du mode focus)
-                        xx = int(preview_width/2)
-                        xy = int(preview_height/2)
-                        button(0,5,1,9)
-                        text(0,5,3,0,1,"FOCUS",ft,0)
-                        button(0,4,1,9)
-                        text(0,4,2,0,1,"ZOOMED",ft,0)
-                        text(0,4,3,1,1,zoom_res_labels.get(zoom, str(zoom)),fv,0)
-                        draw_Vbar(0,4,dgryColor,'zoom',zoom)
-                        time.sleep(0.25)
-                        restart = 1
-                    # CANCEL FOCUS NON AF camera (ajout IMX585 = Pi_Cam 10)
-                    elif (Pi_Cam < 3 or Pi_Cam == 4 or Pi_Cam == 7 or Pi_Cam == 9 or Pi_Cam == 10 or (Pi_Cam ==3 and v3_af == 0)) and focus_mode == 1:
-                        zoom = 0
-                        sync_video_resolution_with_zoom()
-                        focus_mode = 0
-                        reset_fwhm_history()
-                        reset_hfr_history()
-                        pygame.draw.rect(windowSurfaceObj,(0,0,0),Rect(0,int(preview_height * .75),preview_width,preview_height/4))
-                        button(0,5,0,9)
-                        button(0,4,0,9)
-                        text(0,5,5,0,1,"FOCUS",ft,7)
-                        text(0,5,3,1,1,"",fv,7)
-                        text(0,4,5,0,1,"Zoom",ft,7)
-                        text(0,4,3,1,1,"",fv,7)
-                        draw_Vbar(0,4,greyColor,'zoom',zoom)
-                        restart = 1
-                    # Pi V3 manual focus
-                    elif Pi_Cam == 3 and v3_af == 1 and v3_f_mode == 0:
-                        focus_mode = 1
-                        v3_f_mode = 1
-                        foc_man = 1
-                        # Recentrer le réticule (activation initiale du mode focus)
-                        xx = int(preview_width/2)
-                        xy = int(preview_height/2)
-                        restart = 1
-                        button(0,5,1,9)
-                        time.sleep(0.25)
-                        draw_Vbar(0,5,dgryColor,'v3_focus',v3_focus-pmin)
-                        fd = 1/(v3_focus/100)
-                        text(0,5,3,0,1,'<<< ' + str(fd)[0:5] + "m" + ' >>>',fv,0)
-                        text(0,5,3,1,1,str(v3_f_modes[v3_f_mode]),fv,0)
-                        time.sleep(0.25)
-                    # ARDUCAM manual focus
-                    elif ((Pi_Cam == 5 and v5_af == 1) or Pi_Cam == 6 or Pi_Cam == 8) and v3_f_mode == 0:
-                        focus_mode = 1
-                        v3_f_mode = 1
-                        foc_man = 1
-                        # Recentrer le réticule (activation initiale du mode focus)
-                        xx = int(preview_width/2)
-                        xy = int(preview_height/2)
-                        text(0,5,3,0,1,'<<< ' + str(focus) + ' >>>',fv,0)
-                        if Pi_Cam == 5:
-                            draw_Vbar(0,5,dgryColor,'v5_focus',focus)
-                        if Pi_Cam == 6 or Pi_Cam == 8:
-                            draw_Vbar(0,5,dgryColor,'v6_focus',focus)
-                        text(0,5,3,1,1,"manual",fv,0)
-                        time.sleep(0.25)
-                        restart = 1
-                    # ARDUCAM cancel manual focus
-                    elif ((Pi_Cam == 5 and v5_af == 1) or Pi_Cam == 6 or Pi_Cam == 8) and foc_man == 1:
-                        focus_mode = 0
-                        reset_fwhm_history()
-                        reset_hfr_history()
-                        foc_man = 0
-                        if Pi_Cam == 8:
-                            v3_f_mode = 2 # continuous focus
-                        else:
-                            v3_f_mode = 0
-                        zoom = 0
-                        sync_video_resolution_with_zoom()
-                        fxx = 0
-                        fxy = 0
-                        fxz = 1
-                        fyz = 0.75
-                        button(0,5,0,9)
-                        text(0,5,5,0,1,"FOCUS",ft,7)
-                        text(0,5,3,1,1,str(v3_f_modes[v3_f_mode]),fv,7)
-                        button(0,4,0,9)
-                        text(0,4,5,0,1,"Zoom",ft,7)
-                        text(0,4,3,1,1,"",fv,7)
-                        time.sleep(0.25)
-                        restart = 1
-                    # Pi V3 cancel manual focus
-                    elif (Pi_Cam == 3 and v3_af == 1)  and v3_f_mode == 1:
-                        focus_mode = 0
-                        reset_fwhm_history()
-                        reset_hfr_history()
-                        v3_f_mode = 2 # continuous focus
-                        foc_man = 0
-                        zoom = 0
-                        sync_video_resolution_with_zoom()
-                        fxx = 0
-                        fxy = 0
-                        fxz = 1
-                        fyz = 0.75
-                        pygame.draw.rect(windowSurfaceObj,(0,0,0),Rect(0,0,preview_width,preview_height))
-                        button(0,5,0,9)
-                        text(0,5,5,0,1,"FOCUS",ft,7)
-                        text(0,5,3,1,1,str(v3_f_modes[v3_f_mode]),fv,7)
-                        button(0,4,0,9)
-                        text(0,4,5,0,1,"Zoom",ft,7)
-                        text(0,4,3,1,1,"",fv,7)
-                        time.sleep(0.25)
-                        restart = 1
-                    # AF camera to AUTO
-                    elif ((Pi_Cam == 3 and v3_af == 1) or (((Pi_Cam == 5 and v5_af == 1) or Pi_Cam == 6 or Pi_Cam == 8))) and v3_f_mode == 2:
-                        focus_mode = 0
-                        reset_fwhm_history()
-                        reset_hfr_history()
-                        v3_f_mode = 0 # auto focus
-                        foc_man = 0
-                        zoom = 0
-                        sync_video_resolution_with_zoom()
-                        fxx = 0
-                        fxy = 0
-                        fxz = 1
-                        fyz = 0.75
-                        pygame.draw.rect(windowSurfaceObj,(0,0,0),Rect(0,0,preview_width,preview_height))
-                        button(0,5,0,9)
-                        text(0,5,5,0,1,"FOCUS",ft,7)
-                        text(0,5,3,1,1,str(v3_f_modes[v3_f_mode]),fv,7)
-                        button(0,4,0,9)
-                        text(0,4,5,0,1,"Zoom",ft,7)
-                        text(0,4,3,1,1,"",fv,7)
-                        time.sleep(0.25)
-                        restart = 1
-                time.sleep(.25)
-                
-                              
-              elif button_row == 6 and Pi_Cam == 3 and v3_af == 1:
-                # V3 FOCUS SPEED 
-                for f in range(0,len(still_limits)-1,3):
-                    if still_limits[f] == 'v3_f_speed':
-                        pmin = still_limits[f+1]
-                        pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    v3_f_speed = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height + bh  and mousey < preview_height + bh + int(bh/3)) and alt_dis == 1:
-                    v3_f_speed = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75 + bh  and mousey < preview_height * .75 + bh + int(bh/3)) and alt_dis == 2:
-                    v3_f_speed = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        v3_f_speed-=1
-                        v3_f_speed = max(v3_f_speed,pmin)
-                    else:
-                        v3_f_speed +=1
-                        v3_f_speed = min(v3_f_speed,pmax)
-                text(0,7,3,1,1,v3_f_speeds[v3_f_speed],fv,7)
-                draw_bar(0,6,greyColor,'v3_f_speed',v3_f_speed)
-                restart = 1
-                time.sleep(.25)
-                
-              elif button_row == 7 and Pi_Cam == 3 and v3_af == 1:
-                # V3 FOCUS RANGE 
-                for f in range(0,len(video_limits)-1,3):
-                    if video_limits[f] == 'v3_f_range':
-                        pmin = video_limits[f+1]
-                        pmax = video_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    v3_f_range = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height + bh  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
-                    v3_f_range = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75 + bh  and mousey < preview_height * .75 + (bh*3) + int(bh/3)) and alt_dis == 2:
-                    v3_f_range = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        v3_f_range-=1
-                        v3_f_range = max(v3_f_range,pmin)
-                    else:
-                        v3_f_range +=1
-                        v3_f_range = min(v3_f_range,pmax)
-                text(0,7,3,1,1,v3_f_ranges[v3_f_range],fv,7)
-                draw_Vbar(0,7,greyColor,'v3_f_range',v3_f_range)
-                restart = 1
-                time.sleep(.25)
-            
-            elif menu == 2:
-              if button_row == 1 and cam1 != "1":
-                # SWITCH CAMERA
-                camera += 1
-                if camera > max_camera:
-                    camera = 0
-                text(0,1,3,1,1,str(camera),fv,7)
-                if not use_picamera2 and p is not None:
-                    poll = p.poll()
-                    if poll == None:
-                        os.killpg(p.pid, signal.SIGTERM)
-                focus_mode = 0
-                reset_fwhm_history()
-                reset_hfr_history()
-                v3_f_mode = 0 
-                foc_man = 0
-                fxx = 0
-                fxy = 0
-                fxz = 1
-                fyz = 1
-                Camera_Version()
-                Menu()
-                restart = 1
-                
-              elif button_row == 2:
-                # Accès menu METRICS Settings
-                menu = 10
-                Menu()
-
-              elif button_row == 3:
-                # HISTOGRAM
-                for f in range(0,len(still_limits)-1,3):
-                    if still_limits[f] == 'histogram':
-                        pmin = still_limits[f+1]
-                        pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    histogram = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height + bh  and mousey < preview_height + bh + int(bh/3)) and alt_dis == 1:
-                    histogram = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75 + bh  and mousey < preview_height * .75 + bh + int(bh/3)) and alt_dis == 2:
-                    histogram = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        histogram -=1
-                        histogram = max(histogram,pmin)
-                    else:
-                        histogram +=1
-                        histogram = min(histogram,pmax)
-                text(0,3,3,1,1,histograms[histogram],fv,7)
-                draw_bar(0,3,greyColor,'histogram',histogram)
-                time.sleep(.25)
-
-              elif button_row == 4:
-                # HISTOGRAM SIZE
-                for f in range(0,len(video_limits)-1,3):
-                    if video_limits[f] == 'histarea':
-                        pmin = video_limits[f+1]
-                        pmax = video_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    histarea = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                    histarea = max(histarea,pmin)
-                elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
-                    histarea = int(((mousex-((button_row -9)*bw)) / bw) * (pmax+1-pmin))
-                    histarea = max(histarea,pmin)
-                elif (mousey > preview_height * .75 + (bh*3)  and mousey < preview_height * .75 + (bh*3) + int(bh/3)) and alt_dis == 2:
-                    histarea = int(((mousex-((button_row -9)*bw)) / bw) * (pmax+1-pmin))
-                    histarea = max(histarea,pmin)
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        histarea -=1
-                        histarea = max(histarea,pmin)
-                    else:
-                        histarea +=1
-                        histarea = min(histarea,pmax)
-                if xx - histarea < 0 or xy - histarea < 0:
-                    histarea = old_histarea
-                if xy + histarea > preview_height or xx + histarea > preview_width:
-                    histarea = old_histarea
-                if (Pi_Cam == 3 and v3_af == 1) and (xy + histarea > preview_height * 0.75 or xx + histarea > preview_width):
-                    histarea = old_histarea
-                text(0,4,3,1,1,str(histarea),fv,7)
-                draw_Vbar(0,4,greyColor,'histarea',histarea)
-                old_histarea = histarea
-                time.sleep(.25)
-
-              elif button_row == 5:
-                # VERTICAL FLIP
-                vflip +=1
-                if vflip > 1:
-                    vflip = 0
-                text(0,5,3,1,1,str(vflip),fv,7)
-                restart = 1
-                time.sleep(.25)
-
-              elif button_row == 6:
-                # HORIZONTAL FLIP
-                hflip += 1
-                if hflip > 1:
-                    hflip = 0
-                text(0,6,3,1,1,str(hflip),fv,7)
-                restart = 1
-                time.sleep(.25)
-
-              elif button_row == 7:
-                # RAW Format (YUV420/XRGB8888/SRGGB12/SRGGB16)
-                if alt_dis == 0 and mousex < preview_width + (bw/2):
-                    raw_format -= 1
-                    if raw_format < 0:
-                        raw_format = 3
-                else:
-                    raw_format += 1
-                    if raw_format > 3:
-                        raw_format = 0
-                text(0,7,3,1,1,raw_formats[raw_format],fv,7)
-                draw_Vbar(0,7,greyColor,'raw_format',raw_format)
-                # Mettre à jour camera_params si livestack/luckystack actif
-                if livestack is not None and livestack_active:
-                    livestack.camera_params['raw_format'] = raw_formats[raw_format]
-                if luckystack is not None and luckystack_active:
-                    luckystack.camera_params['raw_format'] = raw_formats[raw_format]
-                time.sleep(0.25)
-
-              elif button_row == 8:
-                # SENSOR MODE (Native/Binning)
-                use_native_sensor_mode = 1 - use_native_sensor_mode  # Toggle 0/1
-                if use_native_sensor_mode == 0:
-                    text(0,8,3,1,1,"Binning",fv,7)
-                else:
-                    text(0,8,3,1,1,"Native",fv,7)
-                draw_Vbar(0,8,greyColor,'use_native_sensor_mode',use_native_sensor_mode)
-                restart = 1  # Forcer recréation de la caméra
-                time.sleep(.25)
-
-              elif button_row == 9:
-                   # SAVE CONFIG
-                   text(0,9,3,0,1,"SAVE Config",fv,7)
-                   save_config_to_file()
-                   text(0,9,2,0,1,"SAVE CONFIG",fv,7)
-
-            # MENU 3
-            elif menu == 3:
-              if button_row == 9:
-                  menu = 4
-                  Menu()
-              elif button_row == 1:
-                # MODE
-                for f in range(0,len(still_limits)-1,3):
-                    if still_limits[f] == 'mode':
-                        pmin = still_limits[f+1]
-                        pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    mode = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
-                    mode = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75 and mousey < preview_height * .75 + int(bh/3)) and alt_dis == 2:
-                    mode = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        mode -=1
-                        mode  = max(mode ,pmin)
-                    else:
-                        mode  +=1
-                        mode = min(mode ,pmax)
-                if mode == 0:
-                    text(0,2,5,0,1,"Shutter S",ft,10)
-                    draw_bar(0,2,lgrnColor,'speed',speed)
-                    if shutters[speed] < 0:
-                        text(0,2,3,1,1,"1/" + str(abs(shutters[speed])),fv,10)
-                    else:
-                        text(0,2,3,1,1,str(shutters[speed]),fv,10)
-                    if gain == 0:
-                        gain = 1
-                        text(0,3,5,0,1,"Gain    A/D",ft,10)
-                        if gain <= mag:
-                            text(0,3,3,1,1,str(gain) + " :  " + str(gain) + "/1",fv,10)
-                        else:
-                            text(0,3,3,1,1,str(gain) + " :  " + str(int(mag)) + "/" + str(((gain/mag)*10)/10)[0:3],fv,10)
-                        draw_bar(0,3,lgrnColor,'gain',gain)
-                else:
-                    text(0,2,5,0,1,"eV",ft,10)
-                    text(0,2,3,1,1,str(ev),fv,10)
-                    draw_bar(0,2,lgrnColor,'ev',ev)
-                    gain = 0
-                    text(0,3,5,0,1,"Gain ",ft,10)
-                    text(0,3,3,1,1,"Auto",fv,10)
-                    draw_bar(0,3,lgrnColor,'gain',gain)
-                text(0,1,3,1,1,modes[mode],fv,10)
-                draw_bar(0,2,lgrnColor,'mode',mode)
-                td = timedelta(seconds=tinterval)
-                if tinterval > 0:
-                    tduration = tinterval * tshots
-                if mode == 0 and tinterval == 0 :
-                    speed = 15
-                    custom_sspeed = 0  # Réinitialiser car on passe en mode manuel
-                    shutter = shutters[speed]
-                    if shutter < 0:
-                        shutter = abs(1/shutter)
-                    sspeed = int(shutter * 1000000)
-                    if (shutter * 1000000) - int(shutter * 1000000) > 0.5:
-                        sspeed +=1
-                    if shutters[speed] < 0:
-                        text(0,2,3,1,1,"1/" + str(abs(shutters[speed])),fv,10)
-                    else:
-                        text(0,2,3,1,1,str(shutters[speed]),fv,10)
-                    draw_bar(0,2,lgrnColor,'speed',speed)
-
-                time.sleep(.25)
-                restart = 1
-
-              elif button_row == 2:
-                # SHUTTER SPEED or EV (dependent on MODE set)
-                if mode == 0 :
-                    for f in range(0,len(still_limits)-1,3):
-                        if still_limits[f] == 'speed':
-                            pmin = still_limits[f+1]
-                            pmax = max_speed
-
-                    # Vérifier si c'est un clic sur le slider (zone de la barre)
-                    clicked_on_slider = False
-                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                        clicked_on_slider = True
-                    elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
-                        clicked_on_slider = True
-                    elif (mousey > preview_height * .75 and mousey < preview_height * .75  + int(bh/3)) and alt_dis == 2:
-                        clicked_on_slider = True
-
-                    # Détecter le double-clic sur le slider
-                    current_time = time.time()
-                    is_double_click = False
-                    if clicked_on_slider and last_click_row == button_row:
-                        time_diff = current_time - last_click_time
-                        print(f"[DEBUG SPEED] Double-clic détecté? time_diff={time_diff:.3f}s, DELAY={DOUBLE_CLICK_DELAY}")
-                        if time_diff < DOUBLE_CLICK_DELAY:
-                            is_double_click = True
-                            print("[DEBUG SPEED] DOUBLE-CLIC CONFIRMÉ!")
-
-                    # Mettre à jour les variables de détection du double-clic
-                    if clicked_on_slider:
-                        print(f"[DEBUG SPEED] Clic sur slider détecté, button_row={button_row}")
-                        last_click_time = current_time
-                        last_click_row = button_row
-                        last_click_x = mousex
-                        last_click_y = mousey
-
-                    # Si double-clic, afficher le dialogue de saisie PRECISE en millisecondes
-                    if is_double_click:
-                        print("[DEBUG SPEED] Ouverture du dialogue de saisie PRECISE en ms...")
-                        # Afficher la valeur actuelle (custom ou standard)
-                        if custom_sspeed > 0:
-                            current_ms = custom_sspeed / 1000.0
-                        else:
-                            current_ms = shutter_index_to_ms(speed)
-                        # Calculer les limites en ms
-                        min_ms = shutter_index_to_ms(pmin)  # ~0.25ms pour 1/4000s
-                        max_ms = shutter_index_to_ms(pmax)  # Dépend de max_speed
-                        new_ms = numeric_input_dialog(f"Expo en ms ({min_ms:.1f}-{max_ms:.0f})", round(current_ms, 1), 0, int(max_ms) + 1)
-                        if new_ms is not None:
-                            # Stocker la valeur PRECISE en microsecondes
-                            custom_sspeed = int(float(new_ms) * 1000)
-                            # Trouver l'index le plus proche pour l'affichage du slider uniquement
-                            speed = ms_to_shutter_index(float(new_ms))
-                            speed = max(speed, pmin)
-                            speed = min(speed, pmax)
-                            print(f"[DEBUG SPEED] Nouvelle expo PRECISE: {new_ms}ms = {custom_sspeed}µs (slider index {speed})")
-                        # Réinitialiser pour éviter un triple-clic
-                        last_click_time = 0
-                        last_click_row = -1
-                    elif clicked_on_slider:
-                        # Clic simple sur le slider - réinitialiser custom_sspeed
-                        custom_sspeed = 0
-                        if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                            speed = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                        elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
-                            speed = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
-                        elif (mousey > preview_height * .75 and mousey < preview_height * .75  + int(bh/3)) and alt_dis == 2:
-                            speed = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
-                    else:
-                        # Clic sur les boutons +/- ou zone centrale (main)
-                        # Zone divisée en 3: gauche (0-33%) = "-", centre (33%-66%) = "main", droite (66%-100%) = "+"
-                        click_zone_x = mousex - preview_width
-                        if alt_dis == 0:
-                            if click_zone_x < bw/3:
-                                # Zone gauche: diminuer - réinitialiser custom_sspeed
-                                custom_sspeed = 0
-                                speed -= 1
-                                speed = max(speed, pmin)
-                            elif click_zone_x < 2*bw/3:
-                                # Zone centrale: ouvrir le pavé numérique pour saisie PRECISE en ms
-                                print("[DEBUG SPEED] Clic sur zone centrale (main) - ouverture du pavé numérique")
-                                # Afficher la valeur actuelle (custom ou standard)
-                                if custom_sspeed > 0:
-                                    current_ms = custom_sspeed / 1000.0
-                                else:
-                                    current_ms = shutter_index_to_ms(speed)
-                                min_ms = shutter_index_to_ms(pmin)
-                                max_ms = shutter_index_to_ms(pmax)
-                                new_ms = numeric_input_dialog(f"Expo en ms ({min_ms:.1f}-{max_ms:.0f})", round(current_ms, 1), 0, int(max_ms) + 1)
-                                if new_ms is not None:
-                                    # Stocker la valeur PRECISE en microsecondes
-                                    custom_sspeed = int(float(new_ms) * 1000)
-                                    # Trouver l'index le plus proche pour l'affichage du slider uniquement
-                                    speed = ms_to_shutter_index(float(new_ms))
-                                    speed = max(speed, pmin)
-                                    speed = min(speed, pmax)
-                                    print(f"[DEBUG SPEED] Nouvelle expo PRECISE: {new_ms}ms = {custom_sspeed}µs (slider index {speed})")
-                            else:
-                                # Zone droite: augmenter - réinitialiser custom_sspeed
-                                custom_sspeed = 0
-                                speed += 1
-                                speed = min(speed, pmax)
-                        elif alt_dis > 0 and button_pos == 0:
-                            custom_sspeed = 0
-                            speed -= 1
-                            speed = max(speed, pmin)
-                        else:
-                            custom_sspeed = 0
-                            speed += 1
-                            speed = min(speed, pmax)
-
-                    # Calculer sspeed: utiliser custom_sspeed si défini, sinon depuis shutters[speed]
-                    if custom_sspeed > 0:
-                        sspeed = custom_sspeed
-                        # Afficher la valeur en ms
-                        if sspeed >= 1000000:
-                            text(0,2,3,1,1,f"{sspeed/1000000:.1f}s",fv,10)
-                        else:
-                            text(0,2,3,1,1,f"{sspeed/1000:.1f}ms",fv,10)
-                    else:
-                        shutter = shutters[speed]
-                        if shutter < 0:
-                            shutter = abs(1/shutter)
-                        sspeed = int(shutter * 1000000)
-                        if (shutter * 1000000) - int(shutter * 1000000) > 0.5:
-                            sspeed +=1
-                        if shutters[speed] < 0:
-                            text(0,2,3,1,1,"1/" + str(abs(shutters[speed])),fv,10)
-                        else:
-                            text(0,2,3,1,1,str(shutters[speed]),fv,10)
-                    draw_bar(0,2,lgrnColor,'speed',speed)
-                    if tinterval > 0:
-                        tinterval = int(sspeed/1000000)
-                        tinterval = max(tinterval,1)
-                        td = timedelta(seconds=tinterval)
-                        tduration = tinterval * tshots
-                        td = timedelta(seconds=tduration)
-
-                    time.sleep(.25)
-                    restart = 1
-                else:
-                    # EV
-                    for f in range(0,len(still_limits)-1,3):
-                        if still_limits[f] == 'ev':
-                            pmin = still_limits[f+1]
-                            pmax = still_limits[f+2]
-
-                    # Vérifier si c'est un clic sur le slider (zone de la barre)
-                    clicked_on_slider = False
-                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                        clicked_on_slider = True
-                    elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
-                        clicked_on_slider = True
-                    elif (mousey > preview_height * .75  and mousey < preview_height * .75 + int(bh/3)) and alt_dis == 2:
-                        clicked_on_slider = True
-
-                    # Détecter le double-clic sur le slider
-                    current_time = time.time()
-                    is_double_click = False
-                    if clicked_on_slider and last_click_row == button_row:
-                        time_diff = current_time - last_click_time
-                        print(f"[DEBUG EV] Double-clic détecté? time_diff={time_diff:.3f}s, DELAY={DOUBLE_CLICK_DELAY}")
-                        if time_diff < DOUBLE_CLICK_DELAY:
-                            is_double_click = True
-                            print("[DEBUG EV] DOUBLE-CLIC CONFIRMÉ!")
-
-                    # Mettre à jour les variables de détection du double-clic
-                    if clicked_on_slider:
-                        print(f"[DEBUG EV] Clic sur slider détecté, button_row={button_row}")
-                        last_click_time = current_time
-                        last_click_row = button_row
-                        last_click_x = mousex
-                        last_click_y = mousey
-
-                    # Si double-clic, afficher le dialogue de saisie
-                    if is_double_click:
-                        print("[DEBUG EV] Ouverture du dialogue de saisie...")
-                        new_ev = numeric_input_dialog("Saisir EV (" + str(pmin) + " a " + str(pmax) + ")", ev, pmin, pmax)
-                        if new_ev is not None:
-                            ev = int(new_ev)
-                            print(f"[DEBUG EV] Nouvelle valeur EV saisie: {ev}")
-                        # Réinitialiser pour éviter un triple-clic
-                        last_click_time = 0
-                        last_click_row = -1
-                    elif clicked_on_slider:
-                        # Clic simple sur le slider
-                        if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                            ev = int(((mousex-preview_width) / bw) * (pmax+1-pmin)) + pmin
-                        elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
-                            ev = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin)) + pmin
-                        elif (mousey > preview_height * .75  and mousey < preview_height * .75 + int(bh/3)) and alt_dis == 2:
-                            ev = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin)) + pmin
-                    else:
-                        # Clic sur les boutons +/- ou zone centrale (main)
-                        # Zone divisée en 3: gauche (0-33%) = "-", centre (33%-66%) = "main", droite (66%-100%) = "+"
-                        click_zone_x = mousex - preview_width
-                        if alt_dis == 0:
-                            # Mode normal: calculer la position relative dans la zone de bouton
-                            if click_zone_x < bw/3:
-                                # Zone gauche: diminuer
-                                ev -= 1
-                                ev = max(ev, pmin)
-                            elif click_zone_x < 2*bw/3:
-                                # Zone centrale: ouvrir le pavé numérique
-                                print("[DEBUG EV] Clic sur zone centrale (main) - ouverture du pavé numérique")
-                                new_ev = numeric_input_dialog("Saisir EV (" + str(pmin) + " a " + str(pmax) + ")", ev, pmin, pmax)
-                                if new_ev is not None:
-                                    ev = int(new_ev)
-                                    print(f"[DEBUG EV] Nouvelle valeur EV saisie: {ev}")
-                            else:
-                                # Zone droite: augmenter
-                                ev += 1
-                                ev = min(ev, pmax)
-                        elif alt_dis > 0 and button_pos == 0:
-                            ev -= 1
-                            ev = max(ev, pmin)
-                        else:
-                            ev += 1
-                            ev = min(ev, pmax)
-                    text(0,2,3,1,1,str(ev),fv,10)
-                    draw_bar(0,2,lgrnColor,'ev',ev)
-                    time.sleep(0.25)
-                    restart = 1
-
-              elif button_row == 3:
-                # GAIN
-                for f in range(0,len(still_limits)-1,3):
-                    if still_limits[f] == 'gain':
-                        pmin = still_limits[f+1]
-                        pmax = still_limits[f+2]
-
-                # Vérifier si c'est un clic sur le slider (zone de la barre)
-                clicked_on_slider = False
-                if (mousex > preview_width and mousex < preview_width + bw and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    clicked_on_slider = True
-                elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
-                    clicked_on_slider = True
-                elif (mousey > preview_height * .75  and mousey < preview_height * .75 + int(bh/3)) and alt_dis == 2:
-                    clicked_on_slider = True
-
-                # Détecter le double-clic sur le slider
-                current_time = time.time()
-                is_double_click = False
-                if clicked_on_slider and last_click_row == button_row:
-                    time_diff = current_time - last_click_time
-                    print(f"[DEBUG GAIN] Double-clic détecté? time_diff={time_diff:.3f}s, DELAY={DOUBLE_CLICK_DELAY}")
-                    if time_diff < DOUBLE_CLICK_DELAY:
-                        is_double_click = True
-                        print("[DEBUG GAIN] DOUBLE-CLIC CONFIRMÉ!")
-
-                # Mettre à jour les variables de détection du double-clic
-                if clicked_on_slider:
-                    print(f"[DEBUG GAIN] Clic sur slider détecté, button_row={button_row}")
-                    last_click_time = current_time
-                    last_click_row = button_row
-                    last_click_x = mousex
-                    last_click_y = mousey
-
-                # Si double-clic, afficher le dialogue de saisie
-                if is_double_click:
-                    print("[DEBUG GAIN] Ouverture du dialogue de saisie...")
-                    new_gain = numeric_input_dialog("Saisir le Gain (1-" + str(pmax) + ")", gain, 1, pmax)
-                    if new_gain is not None:
-                        gain = int(new_gain)
-                        print(f"[DEBUG GAIN] Nouveau gain saisi: {gain}")
-                    # Réinitialiser pour éviter un triple-clic
-                    last_click_time = 0
-                    last_click_row = -1
-                elif clicked_on_slider:
-                    # Clic simple sur le slider : ajuster la valeur
-                    if (mousex > preview_width and mousex < preview_width + bw and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                        slider_val = min(int(((mousex-preview_width) / bw) * (pmax+1-pmin)), pmax)
-                        gain = slider_to_gain_nonlinear(slider_val, pmax)
-                    elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
-                        slider_val = min(int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin)), pmax)
-                        gain = slider_to_gain_nonlinear(slider_val, pmax)
-                    elif (mousey > preview_height * .75  and mousey < preview_height * .75 + int(bh/3)) and alt_dis == 2:
-                        slider_val = min(int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin)), pmax)
-                        gain = slider_to_gain_nonlinear(slider_val, pmax)
-                else:
-                    # Clic sur les boutons +/- ou zone centrale (main)
-                    # Zone divisée en 3: gauche (0-33%) = "-", centre (33%-66%) = "main", droite (66%-100%) = "+"
-                    click_zone_x = mousex - preview_width
-                    if alt_dis == 0:
-                        if click_zone_x < bw/3:
-                            # Zone gauche: diminuer
-                            if gain <= 1000:
-                                gain = max(gain - 1, 1)
-                            else:
-                                gain = max(gain - 10, 1000)
-                        elif click_zone_x < 2*bw/3:
-                            # Zone centrale: ouvrir le pavé numérique
-                            print("[DEBUG GAIN] Clic sur zone centrale (main) - ouverture du pavé numérique")
-                            new_gain = numeric_input_dialog("Saisir le Gain (1-" + str(pmax) + ")", gain, 1, pmax)
-                            if new_gain is not None:
-                                gain = int(new_gain)
-                                print(f"[DEBUG GAIN] Nouveau gain saisi: {gain}")
-                        else:
-                            # Zone droite: augmenter
-                            if gain < 1000:
-                                gain = min(gain + 1, pmax)
-                            else:
-                                gain = min(gain + 10, pmax)
-                    elif alt_dis > 0 and button_pos == 0:
-                        if gain <= 1000:
-                            gain = max(gain - 1, 1)
-                        else:
-                            gain = max(gain - 10, 1000)
-                    else:
-                        if gain < 1000:
-                            gain = min(gain + 1, pmax)
-                        else:
-                            gain = min(gain + 10, pmax)
-                if gain > 0:
-                    text(0,3,5,0,1,"Gain    A/D",ft,10)
-                    if gain <= mag:
-                        text(0,3,3,1,1,str(gain) + " :  " + str(gain) + "/1",fv,10)
-                    else:
-                        text(0,3,3,1,1,str(gain) + " :  " + str(int(mag)) + "/" + str(((gain/mag)*10)/10)[0:3],fv,10)
-                else:
-                    if gain == 0:
-                        text(0,3,5,0,1,"Gain ",ft,10)
-                    else:
-                        text(0,3,5,0,1,"Gain    A/D",ft,10)
-                    text(0,3,3,1,1,"Auto",fv,10)
-                time.sleep(.25)
-                draw_bar(0,3,lgrnColor,'gain',gain)
-                restart = 1
-                
-              elif button_row == 4:
-                # BRIGHTNESS
-                for f in range(0,len(still_limits)-1,3):
-                    if still_limits[f] == 'brightness':
-                        pmin = still_limits[f+1]
-                        pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    brightness = int(((mousex-preview_width) / bw) * (pmax+1-pmin)) + pmin 
-                elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
-                    brightness = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin)) + pmin
-                elif (mousey > preview_height * .75  and mousey < preview_height * .75+ int(bh/3)) and alt_dis == 2:
-                    brightness = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin)) + pmin 
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        brightness -=1
-                        brightness  = max(brightness ,pmin)
-                    else:
-                        brightness  +=1
-                        brightness = min(brightness ,pmax)
-                text(0,4,3,1,1,str(brightness/100),fv,10)
-                draw_bar(0,4,lgrnColor,'brightness',brightness)
-                time.sleep(0.025)
-                restart = 1
-                
-              elif button_row == 5:
-                # CONTRAST
-                for f in range(0,len(still_limits)-1,3):
-                    if still_limits[f] == 'contrast':
-                        pmin = still_limits[f+1]
-                        pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    contrast = int(((mousex-preview_width) / bw) * (pmax+1-pmin)) 
-                elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
-                    contrast = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75  and mousey < preview_height * .75 + int(bh/3)) and alt_dis == 2:
-                    contrast = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        contrast -=1
-                        contrast  = max(contrast ,pmin)
-                    else:
-                        contrast  +=1
-                        contrast = min(contrast ,pmax)
-                text(0,5,3,1,1,str(contrast/100)[0:4],fv,10)
-                draw_bar(0,5,lgrnColor,'contrast',contrast)
-                time.sleep(0.025)
-                restart = 1
-                
-              elif button_row == 6:
-                # AWB
-                for f in range(0,len(still_limits)-1,3):
-                    if still_limits[f] == 'awb':
-                        pmin = still_limits[f+1]
-                        pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    awb = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height and mousey < preview_height + int(bh/3)) and alt_dis == 1:
-                    awb = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75 and mousey < preview_height * .75 + int(bh/3)) and alt_dis == 2:
-                    awb = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        awb -=1
-                        awb  = max(awb ,pmin)
-                    else:
-                        awb  +=1
-                        awb = min(awb ,pmax)
-                text(0,6,3,1,1,awbs[awb],fv,10)
-                draw_bar(0,6,lgrnColor,'awb',awb)
-                # Pas de restart nécessaire : le fast path applique instantanément via set_controls
-                preview()  # Appel direct pour mise à jour immédiate
-                time.sleep(.25)
-                
-              elif button_row == 7:
-                # BLUE
-                for f in range(0,len(still_limits)-1,3):
-                    if still_limits[f] == 'blue':
-                        pmin = still_limits[f+1]
-                        pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    blue = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
-                    blue = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75  and mousey < preview_height * .75 + int(bh/3)) and alt_dis == 2:
-                    blue = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        blue -=1
-                        blue  = max(blue ,pmin)
-                    else:
-                        blue  +=1
-                        blue = min(blue ,pmax)
-                text(0,7,3,1,1,str(blue/10)[0:3],fv,10)
-                draw_bar(0,7,lgrnColor,'blue',blue)
-                time.sleep(.25)
-                restart = 1
-
-
-              elif button_row == 8 :
-                # RED
-                for f in range(0,len(still_limits)-1,3):
-                    if still_limits[f] == 'red':
-                        pmin = still_limits[f+1]
-                        pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    red = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height + bh  and mousey < preview_height + bh + int(bh/3)) and alt_dis == 1:
-                    red = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75 + bh  and mousey < preview_height * .75 + bh + int(bh/3)) and alt_dis == 2:
-                    red = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        red -=1
-                        red  = max(red ,pmin)
-                    else:
-                        red  +=1
-                        red = min(red ,pmax)
-                text(0,8,3,1,1,str(red/10)[0:3],fv,10)
-                draw_bar(0,8,lgrnColor,'red',red)
-                time.sleep(.25)
-                restart = 1
-                           
-            # MENU 4
-            elif menu == 4:
-              if button_row == 1:
-                  # Page 1 - retour au menu 3
-                  menu = 3
-                  Menu()
-
-              elif button_row == 2:
-                # METER
-                for f in range(0,len(still_limits)-1,3):
-                    if still_limits[f] == 'meter':
-                        pmin = still_limits[f+1]
-                        pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    meter = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height + bh  and mousey < preview_height + bh + int(bh/3)) and alt_dis == 1:
-                    meter = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75 + bh  and mousey < preview_height * .75 + bh + int(bh/3)) and alt_dis == 2:
-                    meter = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        meter -=1
-                        meter  = max(meter ,pmin)
-                    else:
-                        meter  +=1
-                        meter = min(meter ,pmax)
-                text(0,2,3,1,1,meters[meter],fv,10)
-                draw_bar(0,2,lgrnColor,'meter',meter)
-                time.sleep(.25)
-                restart = 1
-              
-              elif button_row == 3:
-                # QUALITY
-                for f in range(0,len(still_limits)-1,3):
-                    if still_limits[f] == 'quality':
-                        pmin = still_limits[f+1]
-                        pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    quality = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height + bh  and mousey < preview_height + bh + int(bh/3)) and alt_dis == 1:
-                    quality = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75 + bh  and mousey < preview_height * .75 + bh + int(bh/3)) and alt_dis == 2:
-                    quality = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        quality -=1
-                        quality  = max(quality ,pmin)
-                    else:
-                        quality  +=1
-                        quality = min(quality ,pmax)
-                text(0,3,3,1,1,str(quality)[0:3],fv,10)
-                draw_bar(0,3,lgrnColor,'quality',quality)
-                time.sleep(.25)
-                restart = 1
-
-              elif button_row == 4:
-                # SATURATION
-                for f in range(0,len(still_limits)-1,3):
-                    if still_limits[f] == 'saturation':
-                        pmin = still_limits[f+1]
-                        pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    saturation = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height + bh  and mousey < preview_height + bh + int(bh/3)) and alt_dis == 1:
-                    saturation = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75 + bh  and mousey < preview_height * .75 + bh + int(bh/3)) and alt_dis == 2:
-                    saturation = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        saturation -=1
-                        saturation  = max(saturation ,pmin)
-                    else:
-                        saturation  +=1
-                        saturation = min(saturation ,pmax)
-                text(0,4,3,1,1,str(saturation/10),fv,10)
-                draw_bar(0,4,lgrnColor,'saturation',saturation)
-                time.sleep(.25)
-                restart = 1
-
-              elif button_row == 5:
-                # DENOISE
-                for f in range(0,len(still_limits)-1,3):
-                    if still_limits[f] == 'denoise':
-                        pmin = still_limits[f+1]
-                        pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    denoise = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height  and mousey < preview_height + int(bh/3)) and alt_dis == 1:
-                    denoise = int(((mousex-((button_row -1)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75  and mousey < preview_height * .75 + int(bh/3)) and alt_dis == 2:
-                    denoise = int(((mousex-((button_row -1)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        denoise -=1
-                        denoise = max(denoise,pmin)
-                    else:
-                        denoise +=1
-                        denoise = min(denoise,pmax)
-                text(0,5,3,1,1,denoises[denoise],fv,10)
-                draw_bar(0,5,lgrnColor,'denoise',denoise)
-                time.sleep(.25)
-                restart = 1
-
-              elif button_row == 6:
-                # SHARPNESS
-                for f in range(0,len(still_limits)-1,3):
-                    if still_limits[f] == 'sharpness':
-                        pmin = still_limits[f+1]
-                        pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    sharpness = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height + (bh)  and mousey < preview_height + (bh) + int(bh/3)) and alt_dis == 1:
-                    sharpness = int(((mousex-((button_row -9)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75 + (bh)  and mousey < preview_height * .75 + (bh) + int(bh/3)) and alt_dis == 2:
-                    sharpness = int(((mousex-((button_row -9)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        sharpness -=1
-                        sharpness = max(sharpness,pmin)
-                    else:
-                        sharpness +=1
-                        sharpness = min(sharpness,pmax)
-
-                text(0,6,3,1,1,str(sharpness/10),fv,10)
-                draw_bar(0,6,lgrnColor,'sharpness',sharpness)
-                time.sleep(.25)
-                restart = 1
-                
-              elif button_row == 7 and Pi_Cam == 9:
-                # Waveshare imx290 IR Filter
-                if mousex < preview_width + (bw/2):
-                    IRF -=1
-                    IRF = max(IRF ,0)
-                else:
-                    IRF  +=1
-                    IRF = min(IRF ,1)
-                if IRF == 0:
-                    text(0,7,3,1,1,"Off",fv,10)
-                    led_sw_ir.off()
-                else:
-                    text(0,7,3,1,1,"ON ",fv,10)
-                    led_sw_ir.on()
-                time.sleep(0.25)
-                restart = 1
-                   
-              elif button_row == 7 and Pi_Cam == 4 and scientif == 1:
-                # v4 (HQ) CAMERA Scientific.json
-                if alt_dis == 0 and mousex < preview_width + (bw/2):
-                    scientific -=1
-                    scientific = max(scientific ,0)
-                else:
-                    scientific  +=1
-                    scientific = min(scientific ,1)
-                text(0,7,5,0,1,"Scientific",fv,10)
-                if scientific == 0:
-                    text(0,7,3,1,1,"Off",fv,10)
-                else:
-                    text(0,7,3,1,1,"ON ",fv,10)
-                time.sleep(0.25)
-                restart = 1
-
-                            
-              elif button_row == 7 and Pi_Cam == 3:
-                # PI V3 CAMERA HDR
-                if alt_dis == 0 and mousex < preview_width + (bw/2):
-                    v3_hdr -=1
-                    v3_hdr  = max(v3_hdr ,0)
-                else:
-                    v3_hdr  +=1
-                    v3_hdr = min(v3_hdr, 4)  # Correction: permettre tous les modes HDR (0-4) incluant "Night" et "Clear HDR"
-
-                text(0,7,5,0,1,"HDR",fv,10)
-                text(0,7,3,1,1,v3_hdrs[v3_hdr],fv,10)
-                draw_bar(0,7,lgrnColor,'v3_hdr',v3_hdr)
-                time.sleep(0.25)
-                restart = 1
-
-              elif button_row == 7 and Pi_Cam != 3 and Pi == 5:
-                # PI5 and NON V3 CAMERA HDR
-                if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                    v3_hdr -=1
-                    v3_hdr  = max(v3_hdr ,0)
-                else:
-                    v3_hdr  +=1
-                    v3_hdr = min(v3_hdr, 4)  # Correction: permettre tous les modes HDR (0-4) incluant "Night" et "Clear HDR"
-
-                text(0,7,5,0,1,"HDR",fv,10)
-                text(0,7,3,1,1,v3_hdrs[v3_hdr],fv,10)
-                draw_bar(0,7,lgrnColor,'v3_hdr',v3_hdr)
-                time.sleep(0.25)
-                restart = 1
-
-              elif button_row == 8:
-                # FILE FORMAT
-                for f in range(0,len(still_limits)-1,3):
-                    if still_limits[f] == 'extn':
-                        pmin = still_limits[f+1]
-                        pmax = still_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    extn = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height + bh  and mousey < preview_height + bh + int(bh/3)) and alt_dis == 1:
-                    extn = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75 + bh  and mousey < preview_height * .75 + bh + int(bh/3)) and alt_dis == 2:
-                    extn = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        extn -=1
-                        extn  = max(extn ,pmin)
-                    else:
-                        extn  +=1
-                        extn = min(extn ,pmax)
-                text(0,8,3,1,1,extns[extn],fv,10)
-                draw_bar(0,8,lgrnColor,'extn',extn)
-                time.sleep(.25)
-                restart = 1
-
-              elif button_row == 9:
-                   # SAVE CONFIG
-                   text(0,9,3,0,1,"SAVE Config",fv,10)
-                   save_config_to_file()
-                   text(0,9,2,0,1,"SAVE CONFIG",fv,10)
-                                        
-            # MENU 5
-            elif menu == 5:   
-              if button_row == 1:
-                # VIDEO LENGTH
-                for f in range(0,len(video_limits)-1,3):
-                    if video_limits[f] == 'vlen':
-                        pmin = video_limits[f+1]
-                        pmax = video_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    vlen = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height  + (bh*2) and mousey < preview_height + (bh*2) + int(bh/3)) and alt_dis == 1:
-                    vlen = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75  + (bh*2) and mousey < preview_height * .75 + (bh*2) + int(bh/3)) and alt_dis == 2:
-                    vlen = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if mousex < preview_width + (bw/2):
-                        vlen -=1
-                        vlen  = max(vlen ,pmin)
-                    else:
-                        vlen  +=1
-                        vlen = min(vlen ,pmax)
-                td = timedelta(seconds=vlen)
-                text(0,1,3,1,1,str(td),fv,11)
-                draw_Vbar(0,1,lpurColor,'vlen',vlen)
-                time.sleep(.25)
- 
-              elif button_row == 2:
-                # FPS
-                for f in range(0,len(video_limits)-1,3):
-                    if video_limits[f] == 'fps':
-                        pmin = video_limits[f+1]
-                        pmax = video_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    fps = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                    fps = min(fps,vfps)
-                    fps = max(fps,pmin)
-                elif (mousey > preview_height  + (bh*2) and mousey < preview_height + (bh*2) + int(bh/3)) and alt_dis == 1:
-                    fps = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
-                    fps = min(fps,vfps)
-                    fps = max(fps,pmin)
-                elif (mousey > preview_height * .75  + (bh*2) and mousey < preview_height  * .75 + (bh*2) + int(bh/3)) and alt_dis == 2:
-                    fps = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
-                    fps = min(fps,vfps)
-                    fps = max(fps,pmin)
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        fps -=1
-                        fps  = max(fps ,pmin)
-                    else:
-                        fps  +=1
-                        fps = min(fps ,pmax)
-                
-                text(0,2,3,1,1,str(fps),fv,11)
-                draw_Vbar(0,2,lpurColor,'fps',fps)
-                time.sleep(.25)
-                restart = 1
-                   
-              elif button_row == 3:
-                # VFORMAT
-                for f in range(0,len(video_limits)-1,3):
-                    if video_limits[f] == 'vformat':
-                        pmin = video_limits[f+1]
-                        pmax = video_limits[f+2]
-                
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    # Utiliser UNIQUEMENT les résolutions natives (comme le zoom)
-                    native_vformats = get_native_vformats()
-                    if len(native_vformats) > 0:
-                        native_idx = int(((mousex-preview_width) / bw) * len(native_vformats))
-                        native_idx = min(native_idx, len(native_vformats) - 1)
-                        vformat = native_vformats[native_idx]
-                elif (mousey > preview_height  + (bh*2) and mousey < preview_height + (bh*2) + int(bh/3)) and alt_dis == 1:
-                    # Utiliser UNIQUEMENT les résolutions natives (comme le zoom)
-                    native_vformats = get_native_vformats()
-                    if len(native_vformats) > 0:
-                        native_idx = int(((mousex-((button_row - 1)*bw)) / bw) * len(native_vformats))
-                        native_idx = min(native_idx, len(native_vformats) - 1)
-                        vformat = native_vformats[native_idx]
-                elif (mousey > preview_height * .75  + (bh*2) and mousey < preview_height * .75 + (bh*2) + int(bh/3)) and alt_dis == 2:
-                    # Utiliser UNIQUEMENT les résolutions natives (comme le zoom)
-                    native_vformats = get_native_vformats()
-                    if len(native_vformats) > 0:
-                        native_idx = int(((mousex-((button_row - 1)*bw)) / bw) * len(native_vformats))
-                        native_idx = min(native_idx, len(native_vformats) - 1)
-                        vformat = native_vformats[native_idx]
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        # Passer à la résolution native précédente (comme le zoom)
-                        vformat = get_next_native_vformat(vformat, direction=-1)
-                    else:
-                        # Passer à la résolution native suivante (comme le zoom)
-                        vformat = get_next_native_vformat(vformat, direction=1)
-                    # set max video format
-                    setmaxvformat()
-                    vformat = min(vformat,max_vformat)
-                draw_Vbar(0,3,lpurColor,'vformat',vformat)
-                vwidth  = vwidths[vformat]
-                vheight = vheights[vformat]
-                # Activer l'affichage temporaire du ROI (5 secondes pour compenser le restart)
-                show_roi_until = time.time() + 5.0
-                if Pi_Cam == 3:
-                    vfps = v3_max_fps[vformat]
-                    if vwidth == 1920 and codec == 0:
-                        prof = h264profiles[profile].split(" ")
-                        if str(prof[1]) == "4.2":
-                            if vpreview == 1:
-                                vfps = 45
-                            else:
-                                vfps = 60
-                    elif vwidth == 1536 and codec == 0:
-                        prof = h264profiles[profile].split(" ")
-                        if str(prof[1]) == "4.2":
-                            if vpreview == 1:
-                                vfps = 60
-                            else:
-                                vfps = 90
-                elif Pi_Cam == 9:
-                    vfps = v9_max_fps[vformat]
-                elif Pi_Cam == 10:
-                    vfps = v10_max_fps[vformat]
-                elif Pi_Cam == 15:
-                    vfps = v15_max_fps[vformat]
-                else:
-                    vfps = v_max_fps[vformat]
-                fps = min(fps,vfps)
-                video_limits[5] = vfps
-                text(0,2,3,1,1,str(fps),fv,11)
-                draw_Vbar(0,2,lpurColor,'fps',fps)
-                # determine if camera native format
-                vw = 0
-                x = 0
-                while x < len(vwidths2) and vw == 0:
-                    if vwidth == vwidths2[x]:
-                        if vheight == vheights2[x]:
-                            vw = 1
-                    x += 1
-                if vw == 0:
-                    text(0,3,3,1,1,str(vwidth) + "x" + str(vheight),fv,11)
-                if vw == 1:
-                    text(0,3,1,1,1,str(vwidth) + "x" + str(vheight),fv,11)
-                time.sleep(.25)
-                restart = 1
-
-              elif button_row == 4:
-                # CODEC
-                for f in range(0,len(video_limits)-1,3):
-                    if video_limits[f] == 'codec':
-                        pmin = video_limits[f+1]
-                        pmax = video_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    codec = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height + (bh*2) and mousey < preview_height + (bh*2) + int(bh/3)) and alt_dis == 1:
-                    codec = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75 + (bh*2) and mousey < preview_height * .75 + (bh*2) + int(bh/3)) and alt_dis == 2:
-                    codec = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        codec -=1
-                        codec  = max(codec ,pmin)
-                    else:
-                        codec  +=1
-                        codec = min(codec ,pmax)
-                # set max video format
-                setmaxvformat()
-                vformat = min(vformat,max_vformat)
-                # S'assurer que vformat est sur une résolution native (comme le zoom)
-                vformat = get_next_native_vformat(vformat, direction=0 if vformat in get_native_vformats() else -1)
-                text(0,4,3,1,1,codecs[codec],fv,11)
-                draw_Vbar(0,4,lpurColor,'codec',codec)
-                draw_Vbar(0,3,lpurColor,'vformat',vformat)
-                vwidth  = vwidths[vformat]
-                vheight = vheights[vformat]
-                # Activer l'affichage temporaire du ROI (5 secondes pour compenser le restart)
-                show_roi_until = time.time() + 5.0
-                if Pi_Cam == 3:
-                    vfps = v3_max_fps[vformat]
-                    if vwidth == 1920 and codec == 0:
-                        prof = h264profiles[profile].split(" ")
-                        if str(prof[1]) == "4.2":
-                            if vpreview == 1:
-                                vfps = 45
-                            else:
-                                vfps = 60
-                    elif vwidth == 1536 and codec == 0:
-                        prof = h264profiles[profile].split(" ")
-                        if str(prof[1]) == "4.2":
-                            if vpreview == 1:
-                                vfps = 60
-                            else:
-                                vfps = 90
-                elif Pi_Cam == 9:
-                    vfps = v9_max_fps[vformat]
-                elif Pi_Cam == 10:
-                    vfps = v10_max_fps[vformat]
-                elif Pi_Cam == 15:
-                    vfps = v15_max_fps[vformat]
-                else:
-                    vfps = v_max_fps[vformat]
-                fps = min(fps,vfps)
-                video_limits[5] = vfps
-                text(0,2,3,1,1,str(fps),fv,11)
-                draw_Vbar(0,2,lpurColor,'fps',fps)
-                # determine if camera native format
-                vw = 0
-                x = 0
-                while x < len(vwidths2) and vw == 0:
-                    if vwidth == vwidths2[x]:
-                        if vheight == vheights2[x]:
-                            vw = 1
-                    x += 1
-                if vw == 0:
-                    text(0,3,3,1,1,str(vwidth) + "x" + str(vheight),fv,11)
-                if vw == 1:
-                    text(0,3,1,1,1,str(vwidth) + "x" + str(vheight),fv,11)
-                time.sleep(.25)
-
-              elif button_row == 5:
-                # H264 PROFILE
-                for f in range(0,len(video_limits)-1,3):
-                    if video_limits[f] == 'profile':
-                        pmin = video_limits[f+1]
-                        pmax = video_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    profile = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height + (bh*2) and mousey < preview_height + (bh*2) + int(bh/3)) and alt_dis == 1:
-                    profile = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
-                elif (mousey > preview_height * .75 + (bh*2) and mousey < preview_height * .75 + (bh*2) + int(bh/3)) and alt_dis == 2:
-                    profile = int(((mousex-((button_row - 1)*bw)) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        profile -=1
-                        profile  = max(profile ,pmin)
-                    else:
-                        profile  +=1
-                        profile = min(profile ,pmax)
-                text(0,5,3,1,1,h264profiles[profile],fv,11)
-                draw_Vbar(0,5,lpurColor,'profile',profile)
-                vwidth  = vwidths[vformat]
-                vheight = vheights[vformat]
-                if Pi_Cam == 3:
-                    vfps = v3_max_fps[vformat]
-                    if vwidth == 1920 and codec == 0:
-                        prof = h264profiles[profile].split(" ")
-                        if str(prof[1]) == "4.2":
-                            if vpreview == 1:
-                                vfps = 45
-                            else:
-                                vfps = 60
-                    elif vwidth == 1536 and codec == 0:
-                        prof = h264profiles[profile].split(" ")
-                        if str(prof[1]) == "4.2":
-                            if vpreview == 1:
-                                vfps = 60
-                            else:
-                                vfps = 90
-                elif Pi_Cam == 9:
-                    vfps = v9_max_fps[vformat]
-                elif Pi_Cam == 10:
-                    vfps = v10_max_fps[vformat]
-                elif Pi_Cam == 15:
-                    vfps = v15_max_fps[vformat]
-                else:
-                    vfps = v_max_fps[vformat]
-                fps = min(fps,vfps)
-                video_limits[5] = vfps
-                text(0,2,3,1,1,str(fps),fv,11)
-                draw_Vbar(0,2,lpurColor,'fps',fps)
-                time.sleep(.25)
-
-              elif button_row == 6:
-                # V_PREVIEW
-                if (alt_dis == 0 and mousex > preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                    vpreview +=1
-                    vpreview  = min(vpreview ,1)
-                else:
-                    vpreview  -=1
-                    vpreview = max(vpreview ,0)
-
-                if vpreview == 0:
-                    text(0,7,3,1,1,"Off",fv,11)
-                else:
-                    text(0,7,3,1,1,"ON ",fv,11)
-                vwidth  = vwidths[vformat]
-                vheight = vheights[vformat]
-                if Pi_Cam == 3:
-                    vfps = v3_max_fps[vformat]
-                    if vwidth == 1920 and codec == 0:
-                        prof = h264profiles[profile].split(" ")
-                        if str(prof[1]) == "4.2":
-                            if vpreview == 1:
-                                vfps = 45
-                            else:
-                                vfps = 60
-                    elif vwidth == 1536 and codec == 0:
-                        prof = h264profiles[profile].split(" ")
-                        if str(prof[1]) == "4.2":
-                            if vpreview == 1:
-                                vfps = 60
-                            else:
-                                vfps = 90
-                elif Pi_Cam == 9:
-                    vfps = v9_max_fps[vformat]
-                elif Pi_Cam == 10:
-                    vfps = v10_max_fps[vformat]
-                elif Pi_Cam == 15:
-                    vfps = v15_max_fps[vformat]
-                else:
-                    vfps = v_max_fps[vformat]
-                fps = min(fps,vfps)
-                video_limits[5] = vfps
-                text(0,2,3,1,1,str(fps),fv,11)
-                draw_Vbar(0,2,lpurColor,'fps',fps)
-                time.sleep(0.25)
-                
-              elif button_row == 8:
-                   # SAVE CONFIG
-                   text(0,8,3,0,1,"SAVE Config",fv,11)
-                   save_config_to_file()
-                   text(0,8,2,0,1,"SAVE CONFIG",fv,11)
-
-            # MENU 6 - TIMELAPSE (Multi-pages)
-            elif menu == 6:
-              # Get current page
-              current_page = menu_page.get(6, 1)
-
-              # ========== PAGE NAVIGATION ==========
-              if button_row == 9:
-                  if current_page == 1:
-                      # Page 1 -> Page 2 (Allsky)
-                      menu_page[6] = 2
-                      Menu()
-                  elif current_page == 2:
-                      # Page 2 -> Save Config (button_row 9 on page 2 is SAVE CONFIG)
-                      text(0,9,3,0,1,"SAVE Config",fv,10)
-                      save_config_to_file()
-                      text(0,9,2,0,1,"SAVE CONFIG",fv,10)
-
-              # ========== PAGE 1 HANDLERS ==========
-              if current_page == 1:
-                  if button_row == 1:
-                    # TIMELAPSE DURATION
-                    for f in range(0,len(video_limits)-1,3):
-                        if video_limits[f] == 'tduration':
-                            pmin = video_limits[f+1]
-                            pmax = video_limits[f+2]
-                    # Détection du clic sur slider ou zone centrale
-                    clicked_on_slider = (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3))
-                    click_zone_x = mousex - preview_width
-
-                    if clicked_on_slider:
-                        tduration = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                    elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
-                        tduration = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                    elif (mousey > preview_height * .75 + (bh*3)  and mousey < preview_height * .75 + (bh*3) + int(bh/3)) and alt_dis == 2:
-                        tduration = int(((mousex-((button_row - 9)*bw)) / bw) * (pmax+1-pmin))
-                    else:
-                        # Zone divisée en 3: gauche="-", centre="saisie", droite="+"
-                        if alt_dis == 0:
-                            if click_zone_x < bw/3:
-                                # Zone gauche: diminuer
-                                tduration -= 1
-                                tduration = max(tduration, pmin)
-                            elif click_zone_x < 2*bw/3:
-                                # Zone centrale: ouvrir le dialogue de saisie durée
-                                new_duration = duration_input_dialog("Durée Timelapse", tduration, pmin, pmax)
-                                if new_duration is not None:
-                                    tduration = int(new_duration)
-                            else:
-                                # Zone droite: augmenter
-                                tduration += 1
-                                tduration = min(tduration, pmax)
-                        elif button_pos == 0:
-                            tduration -= 1
-                            tduration = max(tduration, pmin)
-                        else:
-                            tduration += 1
-                            tduration = min(tduration, pmax)
-                    td = timedelta(seconds=tduration)
-                    text(0,1,3,1,1,str(td),fv,12)
-                    draw_Vbar(0,1,lyelColor,'tduration',tduration)
-                    if tinterval > 0:
-                        tshots = int(tduration / tinterval)
-                        text(0,3,3,1,1,str(tshots),fv,12)
-                    else:
-                        text(0,3,3,1,1," ",fv,12)
-                    draw_Vbar(0,3,lyelColor,'tshots',tshots)
-                    time.sleep(.25)
-
-                  elif button_row == 2:
-                    # TIMELAPSE INTERVAL
-                    for f in range(0,len(video_limits)-1,3):
-                        if video_limits[f] == 'tinterval':
-                            pmin = video_limits[f+1]
-                            pmax = video_limits[f+2]
-                    # Détection du clic sur slider ou zone centrale
-                    clicked_on_slider = (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3))
-                    click_zone_x = mousex - preview_width
-
-                    if clicked_on_slider:
-                        tinterval = round(((mousex-preview_width) / bw) * (pmax-pmin) + pmin, 2)
-                    elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
-                        tinterval = round(((mousex-((button_row - 9)*bw)) / bw) * (pmax-pmin) + pmin, 2)
-                    elif (mousey > preview_height * .75 + (bh*3)  and mousey < preview_height * .75 + (bh*3) + int(bh/3)) and alt_dis == 2:
-                        tinterval = round(((mousex-((button_row - 9)*bw)) / bw) * (pmax-pmin) + pmin, 2)
-                    else:
-                        # Zone divisée en 3: gauche="-", centre="saisie", droite="+"
-                        if alt_dis == 0:
-                            if click_zone_x < bw/3:
-                                # Zone gauche: diminuer
-                                step = 0.01 if tinterval < 1 else 0.1
-                                tinterval = round(tinterval - step, 2)
-                                tinterval = max(tinterval, pmin)
-                            elif click_zone_x < 2*bw/3:
-                                # Zone centrale: ouvrir le dialogue de saisie intervalle
-                                new_interval = numeric_input_dialog(f"Intervalle (s) [{pmin}-{pmax}]", tinterval, pmin, pmax)
-                                if new_interval is not None:
-                                    tinterval = round(float(new_interval), 2)
-                            else:
-                                # Zone droite: augmenter
-                                step = 0.01 if tinterval < 1 else 0.1
-                                tinterval = round(tinterval + step, 2)
-                                tinterval = min(tinterval, pmax)
-                        elif button_pos == 0:
-                            step = 0.01 if tinterval < 1 else 0.1
-                            tinterval = round(tinterval - step, 2)
-                            tinterval = max(tinterval, pmin)
-                        else:
-                            step = 0.01 if tinterval < 1 else 0.1
-                            tinterval = round(tinterval + step, 2)
-                            tinterval = min(tinterval, pmax)
-                    td = timedelta(seconds=tinterval)
-                    text(0,2,3,1,1,str(td),fv,12)
-                    draw_Vbar(0,2,lyelColor,'tinterval',tinterval)
-                    if tinterval != 0:
-                        tduration = tinterval * tshots
-                        td = timedelta(seconds=tduration)
-                        text(0,1,3,1,1,str(td),fv,12)
-                        draw_Vbar(0,1,lyelColor,'tduration',tduration)
-                    if tinterval == 0:
-                        text(0,3,3,1,1," ",fv,12)
-                        if mode == 0:
-                            speed = 15
-                            custom_sspeed = 0  # Réinitialiser car speed a changé
-                            shutter = shutters[speed]
-                            if shutter < 0:
-                                shutter = abs(1/shutter)
-                            sspeed = int(shutter * 1000000)
-                            if (shutter * 1000000) - int(shutter * 1000000) > 0.5:
-                                sspeed +=1
-                            restart = 1
-                    else:
-                        text(0,3,3,1,1,str(tshots),fv,12)
-                    time.sleep(.25)
-                
-                  elif button_row == 3 and tinterval > 0:
-                    # TIMELAPSE SHOTS
-                    for f in range(0,len(video_limits)-1,3):
-                        if video_limits[f] == 'tshots':
-                            pmin = video_limits[f+1]
-                            pmax = video_limits[f+2]
-                    # Détection du clic sur slider ou zone centrale
-                    clicked_on_slider = (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3))
-                    click_zone_x = mousex - preview_width
-
-                    if clicked_on_slider:
-                        tshots = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                    elif (mousey > preview_height + (bh*3)  and mousey < preview_height + (bh*3) + int(bh/3)) and alt_dis == 1:
-                        tshots = int(((mousex-((button_row -9)*bw)) / bw) * (pmax+1-pmin))
-                    elif (mousey > preview_height * .75 + (bh*3)  and mousey < preview_height * .75 + (bh*3) + int(bh/3)) and alt_dis == 2:
-                        tshots = int(((mousex-((button_row -9)*bw)) / bw) * (pmax+1-pmin))
-                    else:
-                        # Zone divisée en 3: gauche="-", centre="saisie", droite="+"
-                        if alt_dis == 0:
-                            if click_zone_x < bw/3:
-                                # Zone gauche: diminuer
-                                tshots -= 1
-                                tshots = max(tshots, pmin)
-                            elif click_zone_x < 2*bw/3:
-                                # Zone centrale: ouvrir le dialogue de saisie nombre de prises
-                                new_shots = numeric_input_dialog(f"Nombre de prises [{pmin}-{pmax}]", tshots, pmin, pmax)
-                                if new_shots is not None:
-                                    tshots = int(new_shots)
-                            else:
-                                # Zone droite: augmenter
-                                tshots += 1
-                                tshots = min(tshots, pmax)
-                        elif button_pos == 0:
-                            tshots -= 1
-                            tshots = max(tshots, pmin)
-                        else:
-                            tshots += 1
-                            tshots = min(tshots, pmax)
-                    text(0,3,3,1,1,str(tshots),fv,12)
-                    draw_Vbar(0,3,lyelColor,'tshots',tshots)
-                    if tduration > 0:
-                        tduration = tinterval * tshots
-                    if tduration == 0:
-                        tduration = 1
-                    td = timedelta(seconds=tduration)
-                    text(0,1,3,1,1,str(td),fv,12)
-                    draw_Vbar(0,1,lyelColor,'tduration',tduration)
-                    time.sleep(.25)
-
-                  elif button_row == 6 and allsky_mode > 0:
-                      # ALLSKY STACK ENABLE (0=OFF, 1=ON)
-                      allsky_stack_enable = 1 - allsky_stack_enable
-                      stack_text = "ON" if allsky_stack_enable == 1 else "OFF"
-                      text(0,6,3,1,1,stack_text,fv,12)
-                      draw_Vbar(0,6,greyColor,'allsky_stack_enable',allsky_stack_enable)
-                      # Rafraîchir ligne 7 (Stack Count) car sa visibilité dépend de stack_enable
-                      if allsky_stack_enable == 1:
-                          text(0,7,3,1,1,str(allsky_stack_count),fv,12)
-                          draw_Vbar(0,7,greyColor,'allsky_stack_count',allsky_stack_count)
-                      else:
-                          text(0,7,3,1,1,"N/A",fv,12)
-                      time.sleep(.25)
-
-                  elif button_row == 7 and allsky_mode > 0 and allsky_stack_enable == 1:
-                      # ALLSKY STACK COUNT (2-10)
-                      for f in range(0,len(video_limits)-1,3):
-                          if video_limits[f] == 'allsky_stack_count':
-                              pmin = video_limits[f+1]
-                              pmax = video_limits[f+2]
-                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                          allsky_stack_count = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                      else:
-                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                              allsky_stack_count = max(pmin, allsky_stack_count - 1)
-                          else:
-                              allsky_stack_count = min(pmax, allsky_stack_count + 1)
-                      text(0,7,3,1,1,str(allsky_stack_count),fv,12)
-                      draw_Vbar(0,7,greyColor,'allsky_stack_count',allsky_stack_count)
-                      time.sleep(.25)
-
-                  elif button_row == 8:
-                      # SAVE CONFIG (Page 1)
-                      text(0,8,3,0,1,"SAVE Config",fv,12)
-                      save_config_to_file()
-                      text(0,8,2,0,1,"SAVE CONFIG",fv,12)
-
-              # ========== PAGE 2 HANDLERS (ALLSKY) ==========
-              elif current_page == 2:
-                  if button_row == 1:
-                      # Navigation back to Page 1
-                      menu_page[6] = 1
-                      Menu()
-
-                  elif button_row == 2:
-                      # ALLSKY MODE (0=OFF, 1=ON, 2=Auto-Gain)
-                      for f in range(0,len(video_limits)-1,3):
-                          if video_limits[f] == 'allsky_mode':
-                              pmin = video_limits[f+1]
-                              pmax = video_limits[f+2]
-                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                          allsky_mode = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                      else:
-                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                              allsky_mode = max(pmin, allsky_mode - 1)
-                          else:
-                              allsky_mode = min(pmax, allsky_mode + 1)
-                      text(0,2,3,1,1,allsky_modes[allsky_mode],fv,10)
-                      draw_Vbar(0,2,greyColor,'allsky_mode',allsky_mode)
-                      Menu()  # Refresh to update N/A fields
-                      time.sleep(.25)
-
-                  elif button_row == 3 and allsky_mode == 2:
-                      # MEAN TARGET (10-60 → 0.10-0.60)
-                      for f in range(0,len(video_limits)-1,3):
-                          if video_limits[f] == 'allsky_mean_target':
-                              pmin = video_limits[f+1]
-                              pmax = video_limits[f+2]
-                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                          allsky_mean_target = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                      else:
-                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                              allsky_mean_target = max(pmin, allsky_mean_target - 1)
-                          else:
-                              allsky_mean_target = min(pmax, allsky_mean_target + 1)
-                      text(0,3,3,1,1,str(allsky_mean_target/100.0)[0:4],fv,10)
-                      draw_Vbar(0,3,greyColor,'allsky_mean_target',allsky_mean_target)
-                      time.sleep(.05)
-
-                  elif button_row == 4 and allsky_mode == 2:
-                      # MEAN THRESHOLD (2-15 → 0.02-0.15)
-                      for f in range(0,len(video_limits)-1,3):
-                          if video_limits[f] == 'allsky_mean_threshold':
-                              pmin = video_limits[f+1]
-                              pmax = video_limits[f+2]
-                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                          allsky_mean_threshold = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                      else:
-                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                              allsky_mean_threshold = max(pmin, allsky_mean_threshold - 1)
-                          else:
-                              allsky_mean_threshold = min(pmax, allsky_mean_threshold + 1)
-                      text(0,4,3,1,1,str(allsky_mean_threshold/100.0)[0:4],fv,10)
-                      draw_Vbar(0,4,greyColor,'allsky_mean_threshold',allsky_mean_threshold)
-                      time.sleep(.05)
-
-                  elif button_row == 5 and allsky_mode > 0:
-                      # VIDEO FPS (15-60)
-                      for f in range(0,len(video_limits)-1,3):
-                          if video_limits[f] == 'allsky_video_fps':
-                              pmin = video_limits[f+1]
-                              pmax = video_limits[f+2]
-                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                          allsky_video_fps = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                      else:
-                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                              allsky_video_fps = max(pmin, allsky_video_fps - 1)
-                          else:
-                              allsky_video_fps = min(pmax, allsky_video_fps + 1)
-                      text(0,5,3,1,1,str(allsky_video_fps),fv,10)
-                      draw_Vbar(0,5,greyColor,'allsky_video_fps',allsky_video_fps)
-                      time.sleep(.25)
-
-                  elif button_row == 6 and allsky_mode == 2:
-                      # MAX GAIN (50-500, step=10)
-                      for f in range(0,len(video_limits)-1,3):
-                          if video_limits[f] == 'allsky_max_gain':
-                              pmin = video_limits[f+1]
-                              pmax = video_limits[f+2]
-                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                          allsky_max_gain = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                      else:
-                          step = 10
-                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                              allsky_max_gain = max(pmin, allsky_max_gain - step)
-                          else:
-                              allsky_max_gain = min(pmax, allsky_max_gain + step)
-                      text(0,6,3,1,1,str(allsky_max_gain),fv,10)
-                      draw_Vbar(0,6,greyColor,'allsky_max_gain',allsky_max_gain)
-                      time.sleep(.25)
-
-                  elif button_row == 7 and allsky_mode > 0:
-                      # APPLY STRETCH (toggle)
-                      allsky_apply_stretch = 1 - allsky_apply_stretch
-                      stretch_text = "ON" if allsky_apply_stretch == 1 else "OFF"
-                      text(0,7,3,1,1,stretch_text,fv,10)
-                      draw_Vbar(0,7,greyColor,'allsky_apply_stretch',allsky_apply_stretch)
-                      time.sleep(.25)
-
-                  elif button_row == 8 and allsky_mode > 0:
-                      # CLEANUP JPEGs (toggle)
-                      allsky_cleanup_jpegs = 1 - allsky_cleanup_jpegs
-                      cleanup_text = "YES" if allsky_cleanup_jpegs == 1 else "NO"
-                      text(0,8,3,1,1,cleanup_text,fv,10)
-                      draw_Vbar(0,8,greyColor,'allsky_cleanup_jpegs',allsky_cleanup_jpegs)
-                      time.sleep(.25)
-
-            # MENU 7 - STRETCH Settings
-            elif menu == 7:
-              # Gestion multi-pages - Phase 2
-              current_page = menu_page.get(7, 1)
-
-              if button_row == 9:
-                  if current_page == 1 and stretch_preset == 1:
-                      # Page 1 + GHS sélectionné : aller vers Page 2
-                      menu_page[7] = 2
-                      Menu()
-                  elif current_page == 2:
-                      # Page 2 : retour vers Page 1
-                      menu_page[7] = 1
-                      Menu()
-                  else:
-                      # Page 1 + pas GHS : retour CAMERA Settings
-                      menu = 1
-                      Menu()
-
-              elif button_row == 1:
-                if current_page == 1:
-                    # PAGE 1 - STRETCH LOW PERCENTILE (0% à 0.2%, stocké x10)
-                    pmin = 0    # 0%
-                    pmax = 2    # 0.2%
-                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                        stretch_p_low = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                    else:
-                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                            stretch_p_low = max(0, stretch_p_low - 1)
-                        else:
-                            stretch_p_low = min(pmax, stretch_p_low + 1)
-                    text(0,1,3,1,1,str(stretch_p_low/10)[0:4],fv,7)
-                    draw_Vbar(0,1,greyColor,'stretch_p_low',stretch_p_low)
-                    time.sleep(.05)
-                elif current_page == 2:
-                    # PAGE 2 - Navigation retour (déjà géré par button_row == 9)
-                    # Clic sur ligne 1 = retour Page 1
-                    menu_page[7] = 1
-                    Menu()
-
-              elif button_row == 2:
-                if current_page == 1:
-                    # PAGE 1 - STRETCH HIGH PERCENTILE (99.95% à 100%, stocké x100)
-                    pmin = 9995  # 99.95%
-                    pmax = 10000 # 100%
-                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                        stretch_p_high = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                    else:
-                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                            stretch_p_high = max(pmin, stretch_p_high - 1)
-                        else:
-                            stretch_p_high = min(pmax, stretch_p_high + 1)
-                    text(0,2,3,1,1,str(stretch_p_high/100)[0:6],fv,7)
-                    draw_Vbar(0,2,greyColor,'stretch_p_high',stretch_p_high)
-                    time.sleep(.05)
-                elif current_page == 2:
-                    # PAGE 2 - GHS D (Force) : -10 à 100 -> -1.0 à 10.0
-                    for f in range(0,len(video_limits)-1,3):
-                        if video_limits[f] == 'ghs_D':
-                            pmin = video_limits[f+1]
-                            pmax = video_limits[f+2]
-                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                        ghs_D = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                    else:
-                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                            ghs_D -= 1
-                            ghs_D = max(ghs_D, pmin)
-                        else:
-                            ghs_D += 1
-                            ghs_D = min(ghs_D, pmax)
-
-                    # Passage automatique en mode Manual
-                    ghs_preset = 0
-
-                    text(0,2,3,1,1,str(ghs_D/10.0)[0:5],fv,7)
-                    draw_Vbar(0,2,greyColor,'ghs_D',ghs_D)
-                    text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
-                    draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
-                    # Mettre à jour livestack/luckystack si actif
-                    if livestack is not None:
-                        livestack.configure(ghs_D=ghs_D / 10.0)
-                    if luckystack is not None:
-                        luckystack.configure(ghs_D=ghs_D / 10.0)
-                    time.sleep(.05)
-
-              elif button_row == 3:
-                # Ligne 3: Page 1 = STRETCH FACTOR, Page 2 = GHS b (Local intensity)
-                current_page = menu_page.get(7, 1)
-
-                if current_page == 1:
-                    # PAGE 1: STRETCH FACTOR (0 à 5, stocké x10)
-                    pmin = 0    # 0.0
-                    pmax = 80   # 8.0 (augmenté pour plus de flexibilité)
-                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                        stretch_factor = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                    else:
-                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                            stretch_factor = max(pmin, stretch_factor - 1)
-                        else:
-                            stretch_factor = min(pmax, stretch_factor + 1)
-                    # Note: modification manuelle des paramètres - le preset affiché reste inchangé
-                    text(0,3,3,1,1,str(stretch_factor/10)[0:4],fv,7)
-                    draw_Vbar(0,3,greyColor,'stretch_factor',stretch_factor)
-                    text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
-                    draw_Vbar(0,4,greyColor,'stretch_preset',stretch_preset)
-
-                elif current_page == 2:
-                    # PAGE 2: GHS b - Local intensity (-5.0 à 15.0, stocké x10)
-                    pmin = -50   # -5.0
-                    pmax = 150   # 15.0
-                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                        ghs_b = int(((mousex-preview_width) / bw) * (pmax-pmin+1) + pmin)
-                    else:
-                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                            ghs_b = max(pmin, ghs_b - 1)
-                        else:
-                            ghs_b = min(pmax, ghs_b + 1)
-
-                    # Passage automatique en mode Manual
-                    ghs_preset = 0
-
-                    text(0,3,3,1,1,str(ghs_b/10.0)[0:5],fv,7)
-                    draw_Vbar(0,3,greyColor,'ghs_b',ghs_b)
-                    text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
-                    draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
-                    # Mettre à jour livestack/luckystack si actif
-                    if livestack is not None:
-                        livestack.configure(ghs_b=ghs_b / 10.0)
-                    if luckystack is not None:
-                        luckystack.configure(ghs_b=ghs_b / 10.0)
-
-                time.sleep(.05)
-
-              elif button_row == 4:
-                # Ligne 4: Page 1 = STRETCH PRESET, Page 2 = GHS SP (Symmetry point)
-                current_page = menu_page.get(7, 1)
-
-                if current_page == 1:
-                    # PAGE 1: STRETCH PRESET
-                    pmin = 0
-                    pmax = 2  # OFF/GHS/Arcsinh
-                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                        stretch_preset = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                    else:
-                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                            stretch_preset -=1
-                            stretch_preset = max(stretch_preset,pmin)
-                        else:
-                            stretch_preset +=1
-                            stretch_preset = min(stretch_preset,pmax)
-
-                    # Charger les valeurs du preset
-                    if stretch_preset == 0:
-                        # OFF - Pas de stretch
-                        pass
-                    elif stretch_preset == 1:
-                        # GHS - Paramètres optimisés
-                        ghs_D = 31   # 3.1
-                        ghs_b = 1    # 0.1
-                        ghs_SP = 19  # 0.19
-                    elif stretch_preset == 2:
-                        # Arcsinh - Paramètres par défaut
-                        stretch_p_low = 0      # 0%
-                        stretch_p_high = 9998  # 99.98%
-                        stretch_factor = 25    # 2.5
-
-                    # Mettre à jour l'affichage
-                    text(0,4,3,1,1,stretch_presets[stretch_preset],fv,7)
-                    draw_Vbar(0,4,greyColor,'stretch_preset',stretch_preset)
-
-                    # Mettre à jour l'affichage des paramètres selon le preset
-                    if stretch_preset == 1:  # GHS
-                        text(0,5,3,1,1,str(ghs_D/10.0)[0:5],fv,7)
-                        draw_Vbar(0,5,greyColor,'ghs_D',ghs_D)
-                        text(0,6,3,1,1,str(ghs_b/10.0)[0:6],fv,7)
-                        draw_Vbar(0,6,greyColor,'ghs_b',ghs_b)
-                        text(0,7,3,1,1,str(ghs_SP/100.0)[0:5],fv,7)
-                        draw_Vbar(0,7,greyColor,'ghs_SP',ghs_SP)
-                    elif stretch_preset == 2:  # Arcsinh
-                        text(0,1,3,1,1,str(stretch_p_low/10)[0:4],fv,7)
-                        draw_Vbar(0,1,greyColor,'stretch_p_low',stretch_p_low)
-                        text(0,2,3,1,1,str(stretch_p_high/100)[0:6],fv,7)
-                        draw_Vbar(0,2,greyColor,'stretch_p_high',stretch_p_high)
-                        text(0,3,3,1,1,str(stretch_factor/10)[0:4],fv,7)
-                        draw_Vbar(0,3,greyColor,'stretch_factor',stretch_factor)
-
-                    Menu()  # Redessiner le menu pour afficher/cacher les sliders GHS
-
-                    # Mettre à jour livestack/luckystack avec le nouveau mode de stretch
-                    if livestack is not None:
-                        livestack.configure(
-                            png_stretch=['off', 'ghs', 'asinh'][stretch_preset],
-                            png_clip_low=0.0 if stretch_preset == 1 else stretch_p_low / 10.0,
-                            png_clip_high=100.0 if stretch_preset == 1 else stretch_p_high / 100.0
-                        )
-                    if luckystack is not None:
-                        luckystack.configure(
-                            png_stretch=['off', 'ghs', 'asinh'][stretch_preset],
-                            png_clip_low=0.0 if stretch_preset == 1 else stretch_p_low / 10.0,
-                            png_clip_high=100.0 if stretch_preset == 1 else stretch_p_high / 100.0
-                        )
-
-                elif current_page == 2:
-                    # PAGE 2: GHS SP - Symmetry point (0.0 à 1.0, stocké x100)
-                    pmin = 0    # 0.0
-                    pmax = 100  # 1.0
-                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                        ghs_SP = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                    else:
-                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                            ghs_SP = max(pmin, ghs_SP - 1)
-                        else:
-                            ghs_SP = min(pmax, ghs_SP + 1)
-
-                    # Contraintes: LP <= SP et HP >= SP
-                    if ghs_LP > ghs_SP:
-                        ghs_LP = ghs_SP
-                    if ghs_HP < ghs_SP:
-                        ghs_HP = ghs_SP
-
-                    # Passage automatique en mode Manual
-                    ghs_preset = 0
-
-                    text(0,4,3,1,1,str(ghs_SP/100.0)[0:5],fv,7)
-                    draw_Vbar(0,4,greyColor,'ghs_SP',ghs_SP)
-                    text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
-                    draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
-                    # Mettre à jour livestack/luckystack si actif (SP peut modifier LP/HP via contraintes)
-                    if livestack is not None:
-                        livestack.configure(ghs_SP=ghs_SP / 100.0, ghs_LP=ghs_LP / 100.0, ghs_HP=ghs_HP / 100.0)
-                    if luckystack is not None:
-                        luckystack.configure(ghs_SP=ghs_SP / 100.0, ghs_LP=ghs_LP / 100.0, ghs_HP=ghs_HP / 100.0)
-
-                time.sleep(.05)
-
-              elif button_row == 5:
-                # Ligne 5: Page 1 = (vide), Page 2 = GHS LP (Protect shadows)
-                current_page = menu_page.get(7, 1)
-
-                if current_page == 2:
-                    # PAGE 2: GHS LP - Protect shadows (0.0 à 1.0, stocké x100)
-                    # Contrainte: LP <= SP
-                    pmin = 0          # 0.0
-                    pmax = ghs_SP     # Limité par SP
-                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                        ghs_LP = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                    else:
-                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                            ghs_LP = max(pmin, ghs_LP - 1)
-                        else:
-                            ghs_LP = min(pmax, ghs_LP + 1)
-
-                    # Forcer LP <= SP
-                    if ghs_LP > ghs_SP:
-                        ghs_LP = ghs_SP
-
-                    # Passage automatique en mode Manual
-                    ghs_preset = 0
-
-                    text(0,5,3,1,1,str(ghs_LP/100.0)[0:5],fv,7)
-                    draw_Vbar(0,5,greyColor,'ghs_LP',ghs_LP)
-                    text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
-                    draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
-                    # Mettre à jour livestack/luckystack si actif
-                    if livestack is not None:
-                        livestack.configure(ghs_LP=ghs_LP / 100.0)
-                    if luckystack is not None:
-                        luckystack.configure(ghs_LP=ghs_LP / 100.0)
-                    time.sleep(.05)
-
-              elif button_row == 6:
-                # Ligne 6: Page 1 = (vide), Page 2 = GHS HP (Protect highlights)
-                current_page = menu_page.get(7, 1)
-
-                if current_page == 2:
-                    # PAGE 2: GHS HP - Protect highlights (0.0 à 1.0, stocké x100)
-                    # Note: HP = 0 désactive la protection (sera contraint à SP dans ghs_stretch)
-                    pmin = 0          # Permet 0 pour désactiver la protection
-                    pmax = 100        # 1.0
-                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                        ghs_HP = int(((mousex-preview_width) / bw) * (pmax-pmin+1) + pmin)
-                    else:
-                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                            ghs_HP = max(pmin, ghs_HP - 1)
-                        else:
-                            ghs_HP = min(pmax, ghs_HP + 1)
-
-                    # Note: On autorise HP < SP (sera géré par ghs_stretch qui applique max(SP, HP))
-                    # HP = 0 signifie "pas de protection highlights"
-
-                    # Passage automatique en mode Manual
-                    ghs_preset = 0
-
-                    text(0,6,3,1,1,str(ghs_HP/100.0)[0:5],fv,7)
-                    draw_Vbar(0,6,greyColor,'ghs_HP',ghs_HP)
-                    text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
-                    draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
-                    # Mettre à jour livestack/luckystack si actif
-                    if livestack is not None:
-                        livestack.configure(ghs_HP=ghs_HP / 100.0)
-                    if luckystack is not None:
-                        luckystack.configure(ghs_HP=ghs_HP / 100.0)
-                    time.sleep(.05)
-
-              elif button_row == 7:
-                # Ligne 7: Page 1 = (vide), Page 2 = GHS Preset
-                current_page = menu_page.get(7, 1)
-
-                if current_page == 2:
-                    # PAGE 2: GHS Preset - Charger valeurs prédéfinies
-                    pmin = 0
-                    pmax = 3  # 0=Manual, 1=Galaxies, 2=Nébuleuses, 3=Étirement initial
-                    if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                        ghs_preset = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                    else:
-                        if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                            ghs_preset -=1
-                            ghs_preset = max(ghs_preset,pmin)
-                        else:
-                            ghs_preset +=1
-                            ghs_preset = min(ghs_preset,pmax)
-
-                    # Charger les valeurs du preset GHS
-                    if ghs_preset == 1:
-                        # Galaxies (ciel profond) - Paramètres optimisés tests M81
-                        ghs_D = 31    # 3.1
-                        ghs_b = 1     # 0.1
-                        ghs_SP = 19   # 0.19
-                        ghs_LP = 0    # 0.0
-                        ghs_HP = 0    # 0.0
-                    elif ghs_preset == 2:
-                        # Nébuleuses (émission) - Extrapolé depuis optimisation Galaxies
-                        ghs_D = 39    # 3.9 (2.5 * 1.55)
-                        ghs_b = 1     # 0.1 (même réduction drastique que Galaxies)
-                        ghs_SP = 13   # 0.13 (0.10 * 1.27)
-                        ghs_LP = 0    # 0.0 (suppression comme Galaxies)
-                        ghs_HP = 0    # 0.0 (suppression comme Galaxies)
-                    elif ghs_preset == 3:
-                        # Étirement initial (linéaire -> non-linéaire) - Extrapolé depuis optimisation Galaxies
-                        ghs_D = 54    # 5.4 (3.5 * 1.55, mais limité à 5.0 max pratique)
-                        ghs_b = 2     # 0.2 (même réduction drastique que Galaxies)
-                        ghs_SP = 10   # 0.10 (0.08 * 1.27)
-                        ghs_LP = 0    # 0.0
-                        ghs_HP = 0    # 0.0 (suppression comme Galaxies)
-                    # Si ghs_preset == 0 (Manual), ne rien changer
-
-                    # Mettre à jour l'affichage
-                    text(0,7,3,1,1,ghs_presets[ghs_preset],fv,7)
-                    draw_Vbar(0,7,greyColor,'ghs_preset',ghs_preset)
-
-                    # Mettre à jour l'affichage de tous les paramètres GHS (UNIQUEMENT si Page 2)
-                    if current_page == 2 and ghs_preset > 0:  # Si Page 2 ET preset non-Manual
-                        text(0,2,3,1,1,str(ghs_D/10.0)[0:5],fv,7)
-                        draw_Vbar(0,2,greyColor,'ghs_D',ghs_D)
-                        text(0,3,3,1,1,str(ghs_b/10.0)[0:5],fv,7)
-                        draw_Vbar(0,3,greyColor,'ghs_b',ghs_b)
-                        text(0,4,3,1,1,str(ghs_SP/100.0)[0:5],fv,7)
-                        draw_Vbar(0,4,greyColor,'ghs_SP',ghs_SP)
-                        text(0,5,3,1,1,str(ghs_LP/100.0)[0:5],fv,7)
-                        draw_Vbar(0,5,greyColor,'ghs_LP',ghs_LP)
-                        text(0,6,3,1,1,str(ghs_HP/100.0)[0:5],fv,7)
-                        draw_Vbar(0,6,greyColor,'ghs_HP',ghs_HP)
-                        # Mettre à jour livestack/luckystack avec tous les paramètres GHS
-                        if livestack is not None:
-                            livestack.configure(ghs_D=ghs_D/10.0, ghs_b=ghs_b/10.0, ghs_SP=ghs_SP/100.0, ghs_LP=ghs_LP/100.0, ghs_HP=ghs_HP/100.0)
-                        if luckystack is not None:
-                            luckystack.configure(ghs_D=ghs_D/10.0, ghs_b=ghs_b/10.0, ghs_SP=ghs_SP/100.0, ghs_LP=ghs_LP/100.0, ghs_HP=ghs_HP/100.0)
-
-                    time.sleep(.05)
-
-              elif button_row == 8:
-                   # SAVE CONFIG
-                   text(0,8,3,0,1,"SAVE Config",fv,7)
-                   save_config_to_file()
-                   text(0,8,2,0,1,"SAVE CONFIG",fv,7)
-
-            elif menu == 8:
-              # LIVE STACK Settings - Gestion des clics
-              current_page = menu_page.get(8, 1)
-
-              # Page 2 : Gestion des paramètres Stacker + Planetary
-              if current_page == 2 and button_row >= 1 and button_row <= 8:
-                  if button_row == 1:
-                      # STACK METHOD (0-4: mean/median/kappa/winsorized/weighted)
-                      for f in range(0,len(livestack_limits)-1,3):
-                          if livestack_limits[f] == 'ls_stack_method':
-                              pmin = livestack_limits[f+1]
-                              pmax = livestack_limits[f+2]
-                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                          ls_stack_method = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                      else:
-                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                              ls_stack_method -=1
-                              ls_stack_method = max(ls_stack_method,pmin)
-                          else:
-                              ls_stack_method +=1
-                              ls_stack_method = min(ls_stack_method,pmax)
-                      text(0,1,3,1,1,stack_methods[ls_stack_method],fv,7)
-                      draw_Vbar(0,1,greyColor,'ls_stack_method',ls_stack_method)
-                      # Mettre à jour la config livestack en temps réel
-                      if livestack is not None:
-                          method_names = ['mean', 'median', 'kappa_sigma', 'winsorized', 'weighted']
-                          livestack.configure(stacking_method=method_names[ls_stack_method])
-                      time.sleep(.05)
-
-                  elif button_row == 2:
-                      # STACK KAPPA (10-40 affiché 1.0-4.0)
-                      for f in range(0,len(livestack_limits)-1,3):
-                          if livestack_limits[f] == 'ls_stack_kappa':
-                              pmin = livestack_limits[f+1]
-                              pmax = livestack_limits[f+2]
-                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                          ls_stack_kappa = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                      else:
-                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                              ls_stack_kappa -=5
-                              ls_stack_kappa = max(ls_stack_kappa,pmin)
-                          else:
-                              ls_stack_kappa +=5
-                              ls_stack_kappa = min(ls_stack_kappa,pmax)
-                      text(0,2,3,1,1,str(ls_stack_kappa/10.0)[0:4],fv,7)
-                      draw_Vbar(0,2,greyColor,'ls_stack_kappa',ls_stack_kappa)
-                      # Mettre à jour la config livestack en temps réel
-                      if livestack is not None:
-                          livestack.configure(kappa=ls_stack_kappa / 10.0)
-                      time.sleep(.05)
-
-                  elif button_row == 3:
-                      # STACK ITERATIONS (1-10)
-                      for f in range(0,len(livestack_limits)-1,3):
-                          if livestack_limits[f] == 'ls_stack_iterations':
-                              pmin = livestack_limits[f+1]
-                              pmax = livestack_limits[f+2]
-                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                          ls_stack_iterations = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                      else:
-                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                              ls_stack_iterations -=1
-                              ls_stack_iterations = max(ls_stack_iterations,pmin)
-                          else:
-                              ls_stack_iterations +=1
-                              ls_stack_iterations = min(ls_stack_iterations,pmax)
-                      text(0,3,3,1,1,str(ls_stack_iterations),fv,7)
-                      draw_Vbar(0,3,greyColor,'ls_stack_iterations',ls_stack_iterations)
-                      # Mettre à jour la config livestack en temps réel
-                      if livestack is not None:
-                          livestack.configure(iterations=ls_stack_iterations)
-                      time.sleep(.05)
-
-                  elif button_row == 4:
-                      # PLANETARY ENABLE (toggle)
-                      ls_planetary_enable = 1 - ls_planetary_enable
-                      if ls_planetary_enable == 0:
-                          text(0,4,3,1,1,"OFF",fv,7)
-                      else:
-                          text(0,4,3,1,1,"ON",fv,7)
-                      draw_Vbar(0,4,greyColor,'ls_planetary_enable',ls_planetary_enable)
-                      # Mettre à jour la config livestack en temps réel
-                      if livestack is not None:
-                          livestack.configure(planetary_enable=bool(ls_planetary_enable))
-                      time.sleep(.05)
-
-                  elif button_row == 5:
-                      # PLANETARY MODE (0-2: disk/surface/hybrid)
-                      for f in range(0,len(livestack_limits)-1,3):
-                          if livestack_limits[f] == 'ls_planetary_mode':
-                              pmin = livestack_limits[f+1]
-                              pmax = livestack_limits[f+2]
-                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                          ls_planetary_mode = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                      else:
-                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                              ls_planetary_mode -=1
-                              ls_planetary_mode = max(ls_planetary_mode,pmin)
-                          else:
-                              ls_planetary_mode +=1
-                              ls_planetary_mode = min(ls_planetary_mode,pmax)
-                      text(0,5,3,1,1,planetary_modes[ls_planetary_mode],fv,7)
-                      draw_Vbar(0,5,greyColor,'ls_planetary_mode',ls_planetary_mode)
-                      # Mettre à jour la config livestack en temps réel
-                      if livestack is not None:
-                          mode_names = ['disk', 'surface', 'hybrid']
-                          livestack.configure(planetary_mode=mode_names[ls_planetary_mode])
-                      time.sleep(.05)
-
-                  elif button_row == 6:
-                      # PLANETARY DISK MIN (20-500)
-                      for f in range(0,len(livestack_limits)-1,3):
-                          if livestack_limits[f] == 'ls_planetary_disk_min':
-                              pmin = livestack_limits[f+1]
-                              pmax = livestack_limits[f+2]
-                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                          ls_planetary_disk_min = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                      else:
-                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                              ls_planetary_disk_min -=10
-                              ls_planetary_disk_min = max(ls_planetary_disk_min,pmin)
-                          else:
-                              ls_planetary_disk_min +=10
-                              ls_planetary_disk_min = min(ls_planetary_disk_min,pmax)
-                      text(0,6,3,1,1,str(ls_planetary_disk_min),fv,7)
-                      draw_Vbar(0,6,greyColor,'ls_planetary_disk_min',ls_planetary_disk_min)
-                      # Mettre à jour la config livestack en temps réel
-                      if livestack is not None:
-                          livestack.configure(planetary_disk_min=ls_planetary_disk_min)
-                      time.sleep(.05)
-
-                  elif button_row == 7:
-                      # PLANETARY DISK MAX (100-2000)
-                      for f in range(0,len(livestack_limits)-1,3):
-                          if livestack_limits[f] == 'ls_planetary_disk_max':
-                              pmin = livestack_limits[f+1]
-                              pmax = livestack_limits[f+2]
-                      if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                          ls_planetary_disk_max = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                      else:
-                          if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                              ls_planetary_disk_max -=50
-                              ls_planetary_disk_max = max(ls_planetary_disk_max,pmin)
-                          else:
-                              ls_planetary_disk_max +=50
-                              ls_planetary_disk_max = min(ls_planetary_disk_max,pmax)
-                      text(0,7,3,1,1,str(ls_planetary_disk_max),fv,7)
-                      draw_Vbar(0,7,greyColor,'ls_planetary_disk_max',ls_planetary_disk_max)
-                      # Mettre à jour la config livestack en temps réel
-                      if livestack is not None:
-                          livestack.configure(planetary_disk_max=ls_planetary_disk_max)
-                      time.sleep(.05)
-
-                  elif button_row == 8:
-                      # SAVE CONFIG (Page 2 du menu 8)
-                      save_config_to_file()
-                      text(0,8,2,0,1,"SAVE CONFIG",fv,7)
-
-              # Page 1 : Gestion des paramètres originaux
-              elif current_page == 1 and button_row == 1:
-                # PREVIEW REFRESH (3-10)
-                for f in range(0,len(livestack_limits)-1,3):
-                    if livestack_limits[f] == 'ls_preview_refresh':
-                        pmin = livestack_limits[f+1]
-                        pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    ls_preview_refresh = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        ls_preview_refresh -=1
-                        ls_preview_refresh = max(ls_preview_refresh,pmin)
-                    else:
-                        ls_preview_refresh +=1
-                        ls_preview_refresh = min(ls_preview_refresh,pmax)
-                text(0,1,3,1,1,str(ls_preview_refresh),fv,7)
-                draw_Vbar(0,1,greyColor,'ls_preview_refresh',ls_preview_refresh)
-                # Mettre à jour la config (même si arrêté)
-                if livestack is not None:
-                    livestack.configure(preview_refresh=ls_preview_refresh)
-                time.sleep(.05)
-
-              elif current_page == 1 and button_row == 2:
-                # ALIGNMENT MODE (0-2: translation/rotation/affine)
-                for f in range(0,len(livestack_limits)-1,3):
-                    if livestack_limits[f] == 'ls_alignment_mode':
-                        pmin = livestack_limits[f+1]
-                        pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    ls_alignment_mode = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        ls_alignment_mode -=1
-                        ls_alignment_mode = max(ls_alignment_mode,pmin)
-                    else:
-                        ls_alignment_mode +=1
-                        ls_alignment_mode = min(ls_alignment_mode,pmax)
-                text(0,2,3,1,1,ls_alignment_modes[ls_alignment_mode],fv,7)
-                draw_Vbar(0,2,greyColor,'ls_alignment_mode',ls_alignment_mode)
-                # Mettre à jour la config (même si arrêté)
-                if livestack is not None:
-                    livestack.configure(alignment_mode=ls_alignment_modes[ls_alignment_mode])
-                time.sleep(.05)
-
-              elif current_page == 1 and button_row == 3:
-                # MAX FWHM (0=OFF, 100-250 affiché 10.0-25.0)
-                for f in range(0,len(livestack_limits)-1,3):
-                    if livestack_limits[f] == 'ls_max_fwhm':
-                        pmin = livestack_limits[f+1]
-                        pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    ls_max_fwhm = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        ls_max_fwhm -=10
-                        ls_max_fwhm = max(ls_max_fwhm,pmin)
-                    else:
-                        ls_max_fwhm +=10
-                        ls_max_fwhm = min(ls_max_fwhm,pmax)
-                if ls_max_fwhm == 0:
-                    text(0,3,3,1,1,"OFF",fv,7)
-                else:
-                    text(0,3,3,1,1,str(ls_max_fwhm/10)[0:4],fv,7)
-                draw_Vbar(0,3,greyColor,'ls_max_fwhm',ls_max_fwhm)
-                # Mettre à jour la config livestack en temps réel
-                if livestack is not None:
-                    livestack.configure(max_fwhm=ls_max_fwhm / 10.0 if ls_max_fwhm > 0 else 999.0)
-                time.sleep(.05)
-
-              elif current_page == 1 and button_row == 4:
-                # MIN SHARPNESS (0=OFF, 30-150 affiché 0.030-0.150)
-                for f in range(0,len(livestack_limits)-1,3):
-                    if livestack_limits[f] == 'ls_min_sharpness':
-                        pmin = livestack_limits[f+1]
-                        pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    ls_min_sharpness = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        ls_min_sharpness -=5
-                        ls_min_sharpness = max(ls_min_sharpness,pmin)
-                    else:
-                        ls_min_sharpness +=5
-                        ls_min_sharpness = min(ls_min_sharpness,pmax)
-                if ls_min_sharpness == 0:
-                    text(0,4,3,1,1,"OFF",fv,7)
-                else:
-                    text(0,4,3,1,1,str(ls_min_sharpness/1000)[0:5],fv,7)
-                draw_Vbar(0,4,greyColor,'ls_min_sharpness',ls_min_sharpness)
-                # Mettre à jour la config livestack en temps réel
-                if livestack is not None:
-                    livestack.configure(min_sharpness=ls_min_sharpness / 1000.0 if ls_min_sharpness > 0 else 0.0)
-                time.sleep(.05)
-
-              elif current_page == 1 and button_row == 5:
-                # MAX DRIFT (0=OFF, 500-5000 pixels)
-                for f in range(0,len(livestack_limits)-1,3):
-                    if livestack_limits[f] == 'ls_max_drift':
-                        pmin = livestack_limits[f+1]
-                        pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    ls_max_drift = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        ls_max_drift -=100
-                        ls_max_drift = max(ls_max_drift,pmin)
-                    else:
-                        ls_max_drift +=100
-                        ls_max_drift = min(ls_max_drift,pmax)
-                if ls_max_drift == 0:
-                    text(0,5,3,1,1,"OFF",fv,7)
-                else:
-                    text(0,5,3,1,1,str(ls_max_drift),fv,7)
-                draw_Vbar(0,5,greyColor,'ls_max_drift',ls_max_drift)
-                # Mettre à jour la config livestack en temps réel
-                if livestack is not None:
-                    livestack.configure(max_drift=float(ls_max_drift) if ls_max_drift > 0 else 999999.0)
-                time.sleep(.05)
-
-              elif current_page == 1 and button_row == 6:
-                # MIN STARS (0=OFF, 1-20 étoiles)
-                for f in range(0,len(livestack_limits)-1,3):
-                    if livestack_limits[f] == 'ls_min_stars':
-                        pmin = livestack_limits[f+1]
-                        pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    ls_min_stars = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        ls_min_stars -=1
-                        ls_min_stars = max(ls_min_stars,pmin)
-                    else:
-                        ls_min_stars +=1
-                        ls_min_stars = min(ls_min_stars,pmax)
-                if ls_min_stars == 0:
-                    text(0,6,3,1,1,"OFF",fv,7)
-                else:
-                    text(0,6,3,1,1,str(ls_min_stars),fv,7)
-                draw_Vbar(0,6,greyColor,'ls_min_stars',ls_min_stars)
-                # Mettre à jour la config livestack en temps réel
-                if livestack is not None:
-                    livestack.configure(min_stars=int(ls_min_stars))
-                time.sleep(.05)
-
-              elif current_page == 1 and button_row == 7:
-                # QUALITY CONTROL (0=OFF, 1=ON)
-                for f in range(0,len(livestack_limits)-1,3):
-                    if livestack_limits[f] == 'ls_enable_qc':
-                        pmin = livestack_limits[f+1]
-                        pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    ls_enable_qc = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                else:
-                    # Toggle entre 0 et 1
-                    ls_enable_qc = 1 - ls_enable_qc
-                if ls_enable_qc == 0:
-                    text(0,7,3,1,1,"OFF",fv,7)
-                else:
-                    text(0,7,3,1,1,"ON",fv,7)
-                draw_Vbar(0,7,greyColor,'ls_enable_qc',ls_enable_qc)
-                # Mettre à jour la config livestack en temps réel
-                if livestack is not None:
-                    livestack.configure(enable_qc=bool(ls_enable_qc))
-                time.sleep(.05)
-
-              elif current_page == 2 and button_row == 8:
-                   # PAGE 2 : SAVE CONFIG
-                   text(0,8,3,0,1,"SAVE Config",fv,7)
-                   save_config_to_file()
-                   text(0,8,2,0,1,"SAVE CONFIG",fv,7)
-
-              elif current_page == 1 and button_row == 8:
-                  # Page 1 - Bouton ligne 8 : Navigation vers Page 2
-                  menu_page[8] = 2
-                  Menu()
-
-              elif button_row == 9:
-                  # Navigation: Retour Page 2 -> Page 1
-                  current_page = menu_page.get(8, 1)
-                  if current_page == 2:
-                      # Page 2 -> Page 1
-                      menu_page[8] = 1
-                      Menu()
-
-            elif menu == 10:
-              # METRICS Settings - Gestion des clics
-              if button_row == 1:
-                # FOCUS METHOD (0-4: OFF/Laplacian/Gradient/Sobel/Tenengrad)
-                pmin = 0
-                pmax = 4
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    focus_method = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                    focus_method = min(focus_method, pmax)  # Limiter à pmax
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        focus_method -=1
-                        focus_method = max(focus_method,pmin)
-                    else:
-                        focus_method +=1
-                        focus_method = min(focus_method,pmax)
-                text(0,1,3,1,1,focus_methods[focus_method],fv,10)
-                draw_bar(0,1,lgrnColor,'focus_method',focus_method)
-                time.sleep(.05)
-
-              elif button_row == 2:
-                # STAR METRIC (0-2: OFF/HFR/FWHM)
-                pmin = 0
-                pmax = 2
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    star_metric = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                    star_metric = min(star_metric, pmax)  # Limiter à pmax
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        star_metric -=1
-                        star_metric = max(star_metric,pmin)
-                    else:
-                        star_metric +=1
-                        star_metric = min(star_metric,pmax)
-                text(0,2,3,1,1,star_metrics[star_metric],fv,10)
-                draw_bar(0,2,lgrnColor,'star_metric',star_metric)
-                time.sleep(.05)
-
-              elif button_row == 3:
-                # SNR DISPLAY (0-1: OFF/ON)
-                pmin = 0
-                pmax = 1
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    snr_display = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                else:
-                    # Toggle entre 0 et 1
-                    snr_display = 1 - snr_display
-                if snr_display == 0:
-                    text(0,3,3,1,1,"OFF",fv,10)
-                else:
-                    text(0,3,3,1,1,"ON",fv,10)
-                draw_bar(0,3,lgrnColor,'snr_display',snr_display)
-                time.sleep(.05)
-
-              elif button_row == 4:
-                # CALC INTERVAL (1-10 frames)
-                pmin = 1
-                pmax = 10
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    metrics_interval = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        metrics_interval -=1
-                        metrics_interval = max(metrics_interval,pmin)
-                    else:
-                        metrics_interval +=1
-                        metrics_interval = min(metrics_interval,pmax)
-                text(0,4,3,1,1,str(metrics_interval),fv,10)
-                draw_bar(0,4,lgrnColor,'metrics_interval',metrics_interval)
-                time.sleep(.05)
-
-              elif button_row == 8:
-                # SAVE CONFIG
-                text(0,8,3,0,1,"SAVE Config",fv,10)
-                save_config_to_file()
-                text(0,8,2,0,1,"SAVE CONFIG",fv,10)
-
-              elif button_row == 9:
-                # Retour menu OTHER Settings (menu 2)
-                menu = 2
-                Menu()
-
-            elif menu == 9:
-              # LUCKY STACK Settings - Gestion complète
-              if button_row == 1:
-                # LUCKY BUFFER (50-500)
-                for f in range(0,len(livestack_limits)-1,3):
-                    if livestack_limits[f] == 'ls_lucky_buffer':
-                        pmin = livestack_limits[f+1]
-                        pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    ls_lucky_buffer = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        ls_lucky_buffer -=10
-                        ls_lucky_buffer = max(ls_lucky_buffer,pmin)
-                    else:
-                        ls_lucky_buffer +=10
-                        ls_lucky_buffer = min(ls_lucky_buffer,pmax)
-                text(0,1,3,1,1,str(ls_lucky_buffer),fv,7)
-                draw_Vbar(0,1,greyColor,'ls_lucky_buffer',ls_lucky_buffer)
-                # Mettre à jour la config en temps réel (même si stacker arrêté)
-                print(f"[DEBUG] ls_lucky_buffer changé à {ls_lucky_buffer}")
-                print(f"[DEBUG] luckystack_active={luckystack_active}, luckystack={luckystack}")
-                print(f"[DEBUG] livestack_active={livestack_active}, livestack={livestack}")
-                # Toujours appeler configure() si l'objet existe (actif ou non)
-                if luckystack is not None:
-                    print(f"[DEBUG] Appel luckystack.configure(lucky_buffer_size={ls_lucky_buffer}) [actif={luckystack_active}]")
-                    luckystack.configure(lucky_buffer_size=ls_lucky_buffer)
-                elif livestack is not None:
-                    print(f"[DEBUG] Appel livestack.configure(lucky_buffer_size={ls_lucky_buffer}) [actif={livestack_active}]")
-                    livestack.configure(lucky_buffer_size=ls_lucky_buffer)
-                else:
-                    print(f"[DEBUG] AUCUN objet luckystack/livestack disponible")
-                time.sleep(.05)
-
-              elif button_row == 2:
-                # LUCKY KEEP % (1-50)
-                for f in range(0,len(livestack_limits)-1,3):
-                    if livestack_limits[f] == 'ls_lucky_keep':
-                        pmin = livestack_limits[f+1]
-                        pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    ls_lucky_keep = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        ls_lucky_keep -=1
-                        ls_lucky_keep = max(ls_lucky_keep,pmin)
-                    else:
-                        ls_lucky_keep +=1
-                        ls_lucky_keep = min(ls_lucky_keep,pmax)
-                text(0,2,3,1,1,str(ls_lucky_keep)+"%",fv,7)
-                draw_Vbar(0,2,greyColor,'ls_lucky_keep',ls_lucky_keep)
-                # Mettre à jour la config (même si arrêté)
-                if luckystack is not None:
-                    luckystack.configure(lucky_keep_percent=float(ls_lucky_keep))
-                elif livestack is not None:
-                    livestack.configure(lucky_keep_percent=float(ls_lucky_keep))
-                time.sleep(.05)
-
-              elif button_row == 3:
-                # LUCKY SCORE METHOD (0-3)
-                for f in range(0,len(livestack_limits)-1,3):
-                    if livestack_limits[f] == 'ls_lucky_score':
-                        pmin = livestack_limits[f+1]
-                        pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    ls_lucky_score = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        ls_lucky_score -=1
-                        ls_lucky_score = max(ls_lucky_score,pmin)
-                    else:
-                        ls_lucky_score +=1
-                        ls_lucky_score = min(ls_lucky_score,pmax)
-                text(0,3,3,1,1,lucky_score_methods[ls_lucky_score],fv,7)
-                draw_Vbar(0,3,greyColor,'ls_lucky_score',ls_lucky_score)
-                # Mettre à jour la config (même si arrêté)
-                score_names = ['laplacian', 'gradient', 'sobel', 'tenengrad']
-                if luckystack is not None:
-                    luckystack.configure(lucky_score_method=score_names[ls_lucky_score])
-                elif livestack is not None:
-                    livestack.configure(lucky_score_method=score_names[ls_lucky_score])
-                time.sleep(.05)
-
-              elif button_row == 4:
-                # LUCKY STACK METHOD (0-2)
-                for f in range(0,len(livestack_limits)-1,3):
-                    if livestack_limits[f] == 'ls_lucky_stack':
-                        pmin = livestack_limits[f+1]
-                        pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    ls_lucky_stack = int(((mousex-preview_width) / bw) * (pmax+1-pmin))
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        ls_lucky_stack -=1
-                        ls_lucky_stack = max(ls_lucky_stack,pmin)
-                    else:
-                        ls_lucky_stack +=1
-                        ls_lucky_stack = min(ls_lucky_stack,pmax)
-                text(0,4,3,1,1,lucky_stack_methods[ls_lucky_stack],fv,7)
-                draw_Vbar(0,4,greyColor,'ls_lucky_stack',ls_lucky_stack)
-                # Mettre à jour la config (même si arrêté)
-                stack_names = ['mean', 'median', 'sigma_clip']
-                if luckystack is not None:
-                    luckystack.configure(lucky_stack_method=stack_names[ls_lucky_stack])
-                elif livestack is not None:
-                    livestack.configure(lucky_stack_method=stack_names[ls_lucky_stack])
-                time.sleep(.05)
-
-              elif button_row == 5:
-                # LUCKY ALIGN (toggle)
-                ls_lucky_align = 1 - ls_lucky_align
-                if ls_lucky_align == 0:
-                    text(0,5,3,1,1,"OFF",fv,7)
-                else:
-                    text(0,5,3,1,1,"ON",fv,7)
-                draw_Vbar(0,5,greyColor,'ls_lucky_align',ls_lucky_align)
-                # Mettre à jour la config (même si arrêté)
-                if luckystack is not None:
-                    luckystack.configure(lucky_align_enabled=bool(ls_lucky_align))
-                elif livestack is not None:
-                    livestack.configure(lucky_align_enabled=bool(ls_lucky_align))
-                time.sleep(.05)
-
-              elif button_row == 6:
-                # LUCKY ROI % (20-100)
-                for f in range(0,len(livestack_limits)-1,3):
-                    if livestack_limits[f] == 'ls_lucky_roi':
-                        pmin = livestack_limits[f+1]
-                        pmax = livestack_limits[f+2]
-                if (mousex > preview_width and mousey >= (button_row * bh) and mousey < ((button_row)*bh) + int(bh/3)):
-                    ls_lucky_roi = int(((mousex-preview_width) / bw) * (pmax+1-pmin) + pmin)
-                else:
-                    if (alt_dis == 0 and mousex < preview_width + (bw/2)) or (alt_dis > 0 and button_pos == 0):
-                        ls_lucky_roi -=5
-                        ls_lucky_roi = max(ls_lucky_roi,pmin)
-                    else:
-                        ls_lucky_roi +=5
-                        ls_lucky_roi = min(ls_lucky_roi,pmax)
-                text(0,6,3,1,1,str(ls_lucky_roi)+"%",fv,7)
-                draw_Vbar(0,6,greyColor,'ls_lucky_roi',ls_lucky_roi)
-                # Mettre à jour la config (même si arrêté)
-                if luckystack is not None:
-                    luckystack.configure(lucky_score_roi_percent=float(ls_lucky_roi))
-                elif livestack is not None:
-                    livestack.configure(lucky_score_roi_percent=float(ls_lucky_roi))
-                time.sleep(.05)
-
-              elif button_row == 8:
-                   # SAVE CONFIG (même code que menu 8)
-                   text(0,8,3,0,1,"SAVE Config",fv,7)
-                   save_config_to_file()
-                   text(0,8,2,0,1,"SAVE CONFIG",fv,7)
-
-              elif button_row == 9:
-                  # Retour CAMERA Settings
-                  menu = 1
-                  Menu()
-
-            elif menu == 11:
-              # PAGE 2 - Extensions futures
-              if button_row == 0:
-                  # Retour au menu principal
-                  menu = 0
-                  Menu()
-
-              elif button_row == 1:
-                  # JSK LIVE - Activation du mode
-                  # Vérifier que le format RAW est sélectionné
-                  if raw_format < 2:
-                      # Afficher un message d'erreur si pas en mode RAW
-                      button(0,1,1,4)
-                      text(0,1,2,0,1,"  JSK LIVE",ft,0)
-                      text(0,1,6,1,1," RAW requis!",fv,0)
-                      pygame.display.update()
-                      time.sleep(1.5)
-                      button(0,1,4,4)
-                      text(0,1,8,0,1,"      JSK LIVE",ft,1)
-                      pygame.display.update()
-                  else:
-                      # Activer le mode JSK LIVE
-                      jsk_live_mode = 1
-                      jsk_settings_visible = 0
-                      jsk_binning = 1       # Toujours binning ON à l'entrée
-                      jsk_crop_square = 0   # Crop OFF à l'entrée
-
-                      # Sauvegarder les paramètres actuels pour restauration à la sortie
-                      jsk_saved_vwidth = vwidth
-                      jsk_saved_vheight = vheight
-                      jsk_saved_zoom = zoom
-                      jsk_saved_use_native = use_native_sensor_mode
-                      jsk_saved_gain = gain
-                      jsk_saved_exposure = custom_sspeed if custom_sspeed > 0 else sspeed
-
-                      # Initialiser gain/exposure JSK depuis les valeurs actuelles (clamp aux bornes)
-                      jsk_gain = max(1, min(300, gain if gain > 0 else 10))
-                      _init_expo = custom_sspeed if custom_sspeed > 0 else sspeed
-                      jsk_exposure_us = max(1000, min(1000000, _init_expo if _init_expo > 0 else 10000))
-
-                      # Forcer le mode binning 1920x1080
-                      vwidth = 1920
-                      vheight = 1080
-                      zoom = 0
-                      use_native_sensor_mode = 0  # Mode binning
-
-                      # Reconfigurer la caméra en mode binning 1920x1080 RAW
-                      print("[JSK LIVE] Configuration caméra: binning 1920x1080 RAW12")
-                      kill_preview_process()
-                      preview()
-
-                      # Initialiser le processeur JSK
-                      jsk_processor = JSKLiveProcessor()
-                      jsk_processor.configure(
-                          stack_count=jsk_stack_count,
-                          hdr_bits_clip=jsk_hdr_bits_clip,
-                          hdr_method=jsk_hdr_method,
-                          denoise_type=jsk_denoise_type,
-                          denoise_strength=jsk_denoise_strength,
-                          hdr_weights=jsk_hdr_weights,
-                          color_enabled=jsk_color_enabled == 1,
-                          r_gain=jsk_r_gain / 100.0,
-                          g_gain=jsk_g_gain / 100.0,
-                          b_gain=jsk_b_gain / 100.0,
-                          contrast=jsk_contrast / 100.0
-                      )
-
-                      # Initialiser le recorder (dimensions 1920x1080)
-                      jsk_recorder = JSKVideoRecorder()
-
-                      # Configurer capture_thread en mode RAW
-                      if capture_thread is not None:
-                          capture_thread.set_capture_params({'type': 'raw'})
-
-                      # Passer en plein écran
-                      display_modes = pygame.display.list_modes()
-                      if display_modes and display_modes != -1:
-                          max_width, max_height = display_modes[0]
-                      else:
-                          screen_info = pygame.display.Info()
-                          max_width, max_height = screen_info.current_w, screen_info.current_h
-                      windowSurfaceObj = pygame.display.set_mode((max_width, max_height), pygame.FULLSCREEN, 24)
-                      windowSurfaceObj.fill((0, 0, 0))
-                      pygame.display.update()
-                      print("[JSK LIVE] Mode activé (binning 1920x1080)")
-
-              elif button_row == 3:
-                  # MOON - Mode Mineral Moon
-                  moon_mode = 1
-                  moon_settings_visible = 0
-                  moon_binning = 1
-                  _moon_last_surface = None
-                  _moon_slider_rects = {}
-
-                  # Sauvegarder les paramètres actuels
-                  moon_saved_vwidth = vwidth
-                  moon_saved_vheight = vheight
-                  moon_saved_zoom = zoom
-                  moon_saved_use_native = use_native_sensor_mode
-                  moon_saved_gain = gain
-                  moon_saved_exposure = custom_sspeed if custom_sspeed > 0 else sspeed
-
-                  # Initialiser gain/expo depuis valeurs actuelles
-                  moon_gain = max(1, min(300, gain if gain > 0 else 50))
-                  _init_expo = custom_sspeed if custom_sspeed > 0 else sspeed
-                  moon_exposure_us = max(1000, min(1000000, _init_expo if _init_expo > 0 else 100000))
-
-                  # Forcer binning 1920×1080 à l'entrée
-                  vwidth = 1920
-                  vheight = 1080
-                  zoom = 0
-                  use_native_sensor_mode = 0
-
-                  # Reconfigurer la caméra
-                  print("[MOON] Configuration caméra: binning 1920×1080")
-                  kill_preview_process()
-                  preview()
-
-                  # Désactiver AWB, passer en WB manuel
-                  if picam2 is not None:
-                      try:
-                          picam2.set_controls({
-                              "AwbEnable": False,
-                              "ColourGains": (moon_wb_b / 100.0, moon_wb_r / 100.0)
-                          })
-                      except Exception as e:
-                          print(f"[MOON] Avertissement WB: {e}")
-
-                  # S'assurer que capture_thread est en mode main (ISP)
-                  if capture_thread is not None:
-                      capture_thread.set_capture_params({'type': 'main'})
-
-                  # Initialiser le processor avec le preset courant
-                  moon_processor = MineralMoonProcessor()
-                  moon_processor.apply_preset(moon_preset)
-
-                  # Initialiser le recorder
-                  moon_recorder = JSKVideoRecorder()
-
-                  # Plein écran
-                  display_modes = pygame.display.list_modes()
-                  if display_modes and display_modes != -1:
-                      max_width, max_height = display_modes[0]
-                  else:
-                      screen_info = pygame.display.Info()
-                      max_width, max_height = screen_info.current_w, screen_info.current_h
-                  windowSurfaceObj = pygame.display.set_mode(
-                      (max_width, max_height), pygame.FULLSCREEN, 24)
-                  windowSurfaceObj.fill((0, 0, 0))
-                  pygame.display.update()
-                  print(f"[MOON] Mode activé — preset: {MOON_PRESETS[moon_preset]['name']}")
-
-              elif button_row == 4:
-                  # SUN - Mode Solar White Light
-                  sun_mode = 1
-                  sun_settings_visible = 0
-                  _sun_last_surface = None
-                  _sun_slider_rects = {}
-
-                  # Sauvegarder les paramètres actuels pour restauration à la sortie
-                  sun_saved_vwidth = vwidth
-                  sun_saved_vheight = vheight
-                  sun_saved_zoom = zoom
-                  sun_saved_use_native = use_native_sensor_mode
-                  sun_saved_gain = gain
-                  sun_saved_exposure = custom_sspeed if custom_sspeed > 0 else sspeed
-
-                  # Initialiser gain/expo depuis valeurs actuelles
-                  sun_gain = max(0, min(400, gain if gain > 0 else 80))
-                  _init_expo = custom_sspeed if custom_sspeed > 0 else sspeed
-                  sun_exposure_us = max(1000, min(20000, _init_expo if _init_expo > 0 else 5000))
-
-                  # Forcer binning 1920×1080 à l'entrée
-                  sun_binning = 1
-                  vwidth = 1920
-                  vheight = 1080
-                  zoom = 0
-                  use_native_sensor_mode = 0
-
-                  # Reconfigurer la caméra
-                  print("[SOLAR] Configuration caméra: binning 1920×1080")
-                  kill_preview_process()
-                  preview()
-
-                  # S'assurer que capture_thread est en mode main (ISP)
-                  if capture_thread is not None:
-                      capture_thread.set_capture_params({'type': 'main'})
-
-                  # Initialiser le processor avec le preset courant
-                  sun_processor = SolarProcessor()
-                  sun_processor.apply_preset(sun_preset)
-                  # Synchroniser paramètres globaux → processor
-                  sun_processor.configure(
-                      lucky_frames=sun_lucky_frames,
-                      best_pct=float(sun_best_pct),
-                      align_mode=sun_align_mode,
-                      limb_correct=sun_limb_correct == 1,
-                      limb_kernel=sun_limb_kernel,
-                      mask_disk=sun_mask_disk == 1,
-                      clahe_en=sun_clahe_en == 1,
-                      clahe_str=sun_clahe_str / 10.0,
-                      clahe_tile=sun_clahe_tile,
-                      usm_en=sun_usm_en == 1,
-                      usm_sigma=sun_usm_sigma / 10.0,
-                      usm_amount=sun_usm_amount / 10.0,
-                      usm_adaptive=sun_usm_adaptive == 1,
-                      usm_thresh=sun_usm_thresh,
-                      lr_en=sun_lr_en == 1,
-                      lr_iter=sun_lr_iter,
-                      lr_sigma=sun_lr_sigma / 10.0,
-                      lr_ringing=sun_lr_ringing == 1,
-                      false_color=sun_false_color,
-                  )
-
-                  # Initialiser le recorder
-                  sun_recorder = JSKVideoRecorder()
-
-                  # Passer en plein écran
-                  display_modes = pygame.display.list_modes()
-                  if display_modes and display_modes != -1:
-                      max_width, max_height = display_modes[0]
-                  else:
-                      screen_info = pygame.display.Info()
-                      max_width, max_height = screen_info.current_w, screen_info.current_h
-                  windowSurfaceObj = pygame.display.set_mode(
-                      (max_width, max_height), pygame.FULLSCREEN, 24)
-                  windowSurfaceObj.fill((0, 0, 0))
-                  pygame.display.update()
-                  print(f"[SOLAR] Mode activé — preset: {SOLAR_PRESETS[sun_preset]['name']}")
-
-              elif button_row == 2:
-                  # COLIM - Mode collimation Newton
-                  collimation_mode = 1
-
-                  # Sauvegarder les parametres actuels pour restauration a la sortie (comme JSK LIVE)
-                  collimation_saved_zoom = zoom
-                  collimation_saved_vwidth = vwidth
-                  collimation_saved_vheight = vheight
-                  collimation_saved_use_native = use_native_sensor_mode
-                  collimation_saved_gain = gain
-                  collimation_saved_exposure = custom_sspeed if custom_sspeed > 0 else sspeed
-
-                  # Initialiser gain/exposure collimation depuis les valeurs actuelles
-                  collimation_gain = gain
-                  collimation_exposure_us = custom_sspeed if custom_sspeed > 0 else sspeed
-
-                  # Remettre le zoom a 0 pour un etat propre (evite les crashes)
-                  collimation_zoom = 0
-                  zoom = 0
-                  sync_video_resolution_with_zoom()
-
-                  collimation_detector = CollimationDetector()
-                  collimation_detector.set_sensitivity(collimation_sensitivity)
-                  collimation_detector.set_detect_interval(collimation_detect_interval)
-                  # Appliquer la config des cercles au detecteur
-                  for cname in ['focuser', 'secondary', 'primary', 'camera']:
-                      collimation_detector.set_circle_enabled(cname, collimation_circle_enabled.get(cname, False))
-                      collimation_detector.set_circle_radius_range(
-                          cname, collimation_circle_min_pct.get(cname, 10),
-                          collimation_circle_max_pct.get(cname, 49))
-                  collimation_last_surface = None
-                  collimation_settings_visible = 0
-
-                  # Passer en plein ecran et declencher restart pour reconfigurer la camera
-                  display_modes = pygame.display.list_modes()
-                  if display_modes and display_modes != -1:
-                      max_width, max_height = display_modes[0]
-                  else:
-                      screen_info = pygame.display.Info()
-                      max_width, max_height = screen_info.current_w, screen_info.current_h
-                  windowSurfaceObj = pygame.display.set_mode((max_width, max_height), pygame.FULLSCREEN, 24)
-                  windowSurfaceObj.fill((0, 0, 0))
-                  pygame.display.update()
-                  restart = 1  # Reconfigurer la camera en zoom 0
-                  print(f"[COLIM] Mode collimation active (zoom=0, gain={collimation_gain}, expo={collimation_exposure_us}us)")
-
-              elif button_row == 8:
-                  # EXIT
-                  kill_preview_process()
-                  if picam2 is not None:
-                      try:
-                          picam2.stop()
-                          picam2.close()
-                      except:
-                          pass
-                  pygame.display.quit()
-                  sys.exit()
 
         # RESTART
         if restart > 0:
@@ -21902,6 +20172,17 @@ while True:
                 _msg = _font_cache[_ck].render("Reconfiguration camera...", True, (200, 200, 200))
                 _msg_rect = _msg.get_rect(center=(max_width // 2, max_height // 2))
                 windowSurfaceObj.blit(_msg, _msg_rect)
+                pygame.display.update()
+            elif moon_mode == 0 and sun_mode == 0 and jsk_live_mode == 0 and collimation_mode == 0:
+                # Mode home screen : message centré + nettoyer le flag de suppression
+                _home_suppress_oldui = False
+                _hw2, _hh2 = windowSurfaceObj.get_size()
+                windowSurfaceObj.fill((0, 0, 0))
+                _ck2 = 30
+                if _ck2 not in _font_cache:
+                    _font_cache[_ck2] = pygame.font.Font(None, _ck2)
+                _m2 = _font_cache[_ck2].render("Reconfiguration camera...", True, (180, 180, 180))
+                windowSurfaceObj.blit(_m2, _m2.get_rect(center=(_hw2 // 2, _hh2 // 2)))
                 pygame.display.update()
             else:
                 text(0,0,6,2,1,"Waiting for preview ...",int(fv*1.7),1)
