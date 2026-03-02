@@ -1,0 +1,20 @@
+{
+  "isp": {
+    "wb_red_gain": 1.0,
+    "wb_green_gain": 1.0,
+    "wb_blue_gain": 1.0,
+    "gamma": 1.0,
+    "black_level": 106,
+    "brightness_offset": 0.0,
+    "contrast": 1.0,
+    "saturation": 1.0,
+    "sharpening": 0.0
+  },
+  "ghs": {
+    "D": 3.1,
+    "b": 0.1,
+    "SP": 0.19,
+    "LP": 0.03,
+    "HP": 0.01
+  }
+}
