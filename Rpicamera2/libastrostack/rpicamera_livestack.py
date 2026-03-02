@@ -153,6 +153,14 @@ class RPiCameraLiveStack:
         # Sauvegarde
         if 'save_dng' in kwargs:
             self.config.save_dng_mode = kwargs['save_dng']
+
+        # Calibration RAW
+        if 'raw_black_level' in kwargs:
+            self.config.raw_black_level = int(kwargs['raw_black_level'])
+        if 'gradient_removal' in kwargs:
+            self.config.gradient_removal = bool(kwargs['gradient_removal'])
+        if 'gradient_removal_tiles' in kwargs:
+            self.config.gradient_removal_tiles = int(kwargs['gradient_removal_tiles'])
     
     def start(self):
         """Démarre session live stacking"""

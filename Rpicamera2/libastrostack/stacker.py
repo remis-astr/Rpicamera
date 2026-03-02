@@ -30,11 +30,16 @@ class ImageStacker:
         Returns:
             Image empilée courante (copie), ou None si frame invalide
         """
-        # Protection NaN/inf : une seule frame corrompue peut contaminer tout le stack
-        if not np.all(np.isfinite(image)):
-            n_bad = int(np.sum(~np.isfinite(image)))
-            print(f"[STACKER] Frame ignorée : {n_bad} pixel(s) NaN/inf détectés")
-            return self.stacked_image.copy() if self.stacked_image is not None else None
+        # Protection NaN/inf : rejeter uniquement les frames ENTIÈREMENT corrompues.
+        # Les NaN partiels (bordures introduites par warpAffine lors de l'alignement)
+        # sont gérés pixel par pixel dans _stack_mean / _stack_kappa via np.isfinite(),
+        # donc on les laisse passer ici pour ne pas gâcher chaque frame alignée.
+        n_bad = int(np.sum(~np.isfinite(image)))
+        if n_bad > 0:
+            if n_bad >= image.size:
+                print(f"[STACKER] Frame ignorée : image entièrement invalide (NaN/inf)")
+                return self.stacked_image.copy() if self.stacked_image is not None else None
+            # NaN partiels (bordures) → laisser passer, traitement per-pixel
 
         method   = getattr(self.config, 'stacking_method', 'mean')
         kappa    = getattr(self.config, 'stacking_kappa', 2.5)

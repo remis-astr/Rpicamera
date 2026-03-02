@@ -244,6 +244,55 @@ class LiveStackSession:
         """
         return self.stacker.get_result()
     
+    def _remove_gradient(self, image, n_tiles=8):
+        """
+        Supprime le gradient de fond (lumière parasite, vignetage) par estimation
+        de fond sur une grille de tuiles (mesh-based background estimation).
+
+        Utilise le 25e percentile de chaque tuile pour estimer le fond du ciel
+        tout en rejetant les étoiles et objets brillants. Le fond estimé est
+        interpolé bicubiquement vers la résolution complète puis soustrait.
+
+        Args:
+            image: float32 (H, W, C) normalisé [0-1]
+            n_tiles: nombre de tuiles par axe (ex: 8 → grille 8×8)
+
+        Returns:
+            float32 (H, W, C) gradient soustrait, clipé à [0, 1], non renormalisé
+        """
+        import cv2
+        H, W = image.shape[:2]
+        is_color = len(image.shape) == 3
+        C = image.shape[2] if is_color else 1
+
+        tile_h = max(1, H // n_tiles)
+        tile_w = max(1, W // n_tiles)
+        n_y = H // tile_h
+        n_x = W // tile_w
+
+        if n_y < 2 or n_x < 2:
+            return image  # Image trop petite pour la grille demandée
+
+        if is_color:
+            bg_small = np.zeros((n_y, n_x, C), dtype=np.float32)
+            for i in range(n_y):
+                for j in range(n_x):
+                    y0, y1 = i * tile_h, min(H, (i + 1) * tile_h)
+                    x0, x1 = j * tile_w, min(W, (j + 1) * tile_w)
+                    bg_small[i, j] = np.percentile(image[y0:y1, x0:x1], 25, axis=(0, 1))
+        else:
+            bg_small = np.zeros((n_y, n_x), dtype=np.float32)
+            for i in range(n_y):
+                for j in range(n_x):
+                    y0, y1 = i * tile_h, min(H, (i + 1) * tile_h)
+                    x0, x1 = j * tile_w, min(W, (j + 1) * tile_w)
+                    bg_small[i, j] = np.percentile(image[y0:y1, x0:x1], 25)
+
+        bg_full = cv2.resize(bg_small, (W, H), interpolation=cv2.INTER_CUBIC)
+        bg_full = np.clip(bg_full, 0, None)
+
+        return np.clip(image - bg_full, 0, 1).astype(np.float32)
+
     def get_preview_png(self):
         """
         Génère preview PNG étiré pour affichage
@@ -262,31 +311,16 @@ class LiveStackSession:
         if result is None:
             return None
 
-        # print(f"  • Stack result shape: {result.shape}, dtype: {result.dtype}")
-        # print(f"  • Stack result range: [{result.min():.3f}, {result.max():.3f}]")
-
-        # TRACEUR RGB: Avant ISP
-        # if len(result.shape) == 3 and result.shape[2] == 3:
-        #     print(f"  • [AVANT ISP] RGB moyennes: R={result[:,:,0].mean():.1f}, G={result[:,:,1].mean():.1f}, B={result[:,:,2].mean():.1f}")
+        is_color = len(result.shape) == 3
 
         # NOUVEAU: Appliquer ISP AVANT stretch (si activé ET format RAW uniquement)
         # Pipeline optimal: Stack (linéaire) → ISP → Stretch → PNG
         # L'ISP ne doit s'appliquer QUE sur RAW12/RAW16, JAMAIS sur YUV420 (déjà traité par ISP hardware)
         is_raw_format = self.config.video_format in ['raw12', 'raw16']
         if self.config.isp_enable and self.isp is not None and is_raw_format:
-            print(f"  [ISP] Application ISP (format={self.config.video_format}, gamma={self.isp.config.gamma:.1f})")
-            print(f"  [ISP] Avant: range=[{result.min():.3f}, {result.max():.3f}], mean={result.mean():.3f}")
-            # swap_rb=True pour RAW car le débayeurisation inverse R/B (RPiCamera2.py:4931-4932)
-            # Passer format_hint pour adapter les paramètres ISP (RAW12 vs RAW16 Clear HDR)
-            result = self.isp.process(result, return_uint8=False, swap_rb=True,
+            # debayer_raw_array retourne ch0=R_physique, ch2=B_physique (COLOR_BayerRG2BGR)
+            result = self.isp.process(result, return_uint8=False, swap_rb=False,
                                      format_hint=self.config.video_format)  # Reste en float32
-            print(f"  [ISP] Après: range=[{result.min():.3f}, {result.max():.3f}], mean={result.mean():.3f}")
-            if len(result.shape) == 3 and result.shape[2] == 3:
-                print(f"  [ISP] RGB moyennes: R={result[:,:,0].mean():.3f}, G={result[:,:,1].mean():.3f}, B={result[:,:,2].mean():.3f}")
-        elif self.config.isp_enable and not is_raw_format:
-            print(f"  [ISP] Ignoré (format {self.config.video_format} déjà traité par camera ISP)")
-        else:
-            pass
 
         # Appliquer étirement
         is_color = len(result.shape) == 3
@@ -346,6 +380,25 @@ class LiveStackSession:
         result = result / normalization_factor
         result = np.clip(result, 0, 1)
 
+        # ── Soustraction black level RAW (indépendante de l'ISP software) ──
+        # Appliquée uniquement si ISP software désactivé (sinon déjà fait dans ISP)
+        # IMPORTANT: bl_adu est exprimé en ADU 12-bit natif (0-4095).
+        # Les données peuvent être en espace uint16 shifté ×16 par picamera2 (CSI-2 format),
+        # donc on calcule la fraction de dynamique directement sur 4095 (indépendant du shift).
+        if is_raw_format and not self.config.isp_enable:
+            bl_adu = getattr(self.config, 'raw_black_level', 0)
+            if bl_adu > 0:
+                # Fraction de la dynamique 12-bit native : correct qu'il y ait shift ou non
+                bl_norm = bl_adu / 4095.0
+                result = np.clip(result - bl_norm, 0, None)
+
+        # ── Suppression de gradient de fond ──
+        # Estimation du fond du ciel par grille de percentile + interpolation bicubique.
+        # Appliquée uniquement sur RAW, après normalisation et soustraction BL.
+        if is_raw_format and getattr(self.config, 'gradient_removal', False):
+            n_tiles = getattr(self.config, 'gradient_removal_tiles', 8)
+            result = self._remove_gradient(result, n_tiles=n_tiles)
+
         # Configurer le clipping par percentiles selon le format
         clip_low = self.config.png_clip_low
         clip_high = self.config.png_clip_high
@@ -363,6 +416,41 @@ class LiveStackSession:
             # IMPORTANT: Pour correspondre à la preview (ghs_stretch dans RPiCamera2.py),
             # NE PAS appliquer de normalisation par percentiles
             # La preview divise juste par 255 sans percentiles → même comportement ici
+            clip_low = 0.0
+            clip_high = 100.0
+
+        # ── Pré-normalisation stable pour RAW (EMA sur vmax + estimation fond de ciel) ──
+        # Objectif : éviter que le vmax percentile re-calculé à chaque frame cause des
+        # variations de luminosité. Le fond de ciel est estimé pour éviter l'effet laiteux.
+        if is_raw_format and clip_high < 100.0:
+            _vmax_now = float(np.percentile(result, clip_high))
+
+            # Estimation fond de ciel = percentile bas des pixels positifs
+            # → donne le niveau du fond (sky glow) au-dessus du BL
+            _pos = result[result > 1e-6]
+            if len(_pos) > result.size * 0.05:  # Au moins 5% de pixels positifs
+                _vmin_now = float(np.percentile(_pos, 5))  # 5e percentile des positifs
+            else:
+                _vmin_now = 0.0
+
+            # EMA (Exponential Moving Average) pour stabiliser vmax et vmin
+            ema_alpha = 0.25  # 25% nouveau / 75% historique
+            if not hasattr(self, '_stretch_vmax_ema') or self._stretch_vmax_ema <= 0:
+                self._stretch_vmax_ema = _vmax_now
+                self._stretch_vmin_ema = _vmin_now
+            else:
+                self._stretch_vmax_ema = ema_alpha * _vmax_now + (1 - ema_alpha) * self._stretch_vmax_ema
+                self._stretch_vmin_ema = ema_alpha * _vmin_now + (1 - ema_alpha) * self._stretch_vmin_ema
+
+            _vmin = self._stretch_vmin_ema
+            _vmax = self._stretch_vmax_ema
+
+            if _vmax > _vmin + 1e-6:
+                # Pré-normaliser : fond de ciel → 0 (noir), étoiles → 1 (blanc)
+                result = np.clip((result - _vmin) / (_vmax - _vmin), 0, 1)
+            # Les fonctions de stretch recevront des données déjà dans [0,1] :
+            # - stretch_ghs : skip interne car clip_low=0, clip_high=100
+            # - stretch_asinh : percentile(data,0)=0, percentile(data,100)=1 → pas de changement
             clip_low = 0.0
             clip_high = 100.0
 
@@ -404,9 +492,11 @@ class LiveStackSession:
                     ghs_SP = min(ghs_SP, 0.5)   # Maximum 50%
                     print(f"  [GHS AUTO-SP] Pic histogramme={peak_value:.3f}, SP ajusté: {original_SP:.3f} → {ghs_SP:.3f}")
 
-        # Normalisation finale GHS: désactivée pour RAW (données déjà dans [0,1])
-        # Activée pour YUV/RGB (données ne couvrent pas [0,1])
-        normalize_ghs_output = not is_raw_format
+        # Normalisation finale GHS: TOUJOURS activée.
+        # Sans normalisation, T1(0) est négatif → les ombres s'écrasent vers 0
+        # → assombrissement progressif avec GHS (arcsinh n'a pas ce problème
+        # car il normalise toujours sa sortie à [0..1]).
+        normalize_ghs_output = True
 
         if is_color:
             stretched = np.zeros_like(result, dtype=np.float32)
@@ -439,10 +529,6 @@ class LiveStackSession:
                 normalize_output=normalize_ghs_output
             )
 
-        # TRACEUR RGB: Après stretch (avant conversion PNG)
-        # if len(stretched.shape) == 3 and stretched.shape[2] == 3:
-        #     print(f"  • [APRÈS STRETCH] RGB moyennes: R={stretched[:,:,0].mean():.3f}, G={stretched[:,:,1].mean():.3f}, B={stretched[:,:,2].mean():.3f}")
-
         # Convertir en uint8 ou uint16 selon configuration
         # NOUVEAU: Support PNG 16-bit
         # print(f"  • Stretched range: [{stretched.min():.3f}, {stretched.max():.3f}]")
@@ -469,13 +555,6 @@ class LiveStackSession:
             else:
                 preview = (stretched * 255).astype(np.uint8)
                 # print(f"     → 8-bit (auto: pas de stretch, pas de RAW)")
-
-        # print(f"  ✓ Preview final: dtype={preview.dtype}, shape={preview.shape}")
-        # print(f"     range=[{preview.min()}, {preview.max()}]")
-
-        # TRACEUR RGB: Valeurs finales PNG
-        # if len(preview.shape) == 3 and preview.shape[2] == 3:
-        #     print(f"  • [PNG FINAL] RGB moyennes: R={preview[:,:,0].mean():.1f}, G={preview[:,:,1].mean():.1f}, B={preview[:,:,2].mean():.1f}")
 
         return preview
     
@@ -551,6 +630,11 @@ class LiveStackSession:
         self._frame_count_since_refresh = 0
         self.config.quality.rejected_images = []
         self.config.quality.rejection_reasons = {}
+        # Réinitialiser EMA vmax/vmin (nouveau stack = nouvelles conditions)
+        if hasattr(self, '_stretch_vmax_ema'):
+            del self._stretch_vmax_ema
+        if hasattr(self, '_stretch_vmin_ema'):
+            del self._stretch_vmin_ema
     
     def _save_png(self, data, png_path):
         """Sauvegarde PNG avec détection automatique du bit depth"""

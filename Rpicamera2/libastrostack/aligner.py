@@ -333,29 +333,54 @@ class AdvancedAligner:
             return None, {}
 
     def _apply_transform(self, image, transform):
-        """Applique transformation à l'image"""
+        """Applique transformation à l'image.
+
+        Les pixels de bordure introduits par le décalage sont mis à NaN (pas 0)
+        afin que le stacker (weight_map + np.isfinite) les ignore dans la moyenne.
+        Un borderValue=0 causerait un assombrissement progressif des bords quand
+        le télescope dérive, car les 0 seraient comptés comme des vraies mesures.
+        """
         M = transform[:2, :]
-        
+
         if self.is_color and len(image.shape) == 3:
             h, w = image.shape[:2]
-            aligned = np.zeros_like(image)
-            
+            # Masque de validité : 1 là où l'image source contribue, 0 aux bordures
+            _ones = np.ones((h, w), dtype=np.float32)
+            valid_mask = cv2.warpAffine(
+                _ones, M, (w, h),
+                flags=cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0
+            ) > 0.5
+
+            aligned = np.empty((h, w, image.shape[2]), dtype=np.float32)
             for i in range(3):
-                aligned[:, :, i] = cv2.warpAffine(
-                    image[:, :, i], M, (w, h),
+                chan = cv2.warpAffine(
+                    image[:, :, i].astype(np.float32), M, (w, h),
                     flags=cv2.INTER_LINEAR,
                     borderMode=cv2.BORDER_CONSTANT,
                     borderValue=0
                 )
+                chan[~valid_mask] = np.nan
+                aligned[:, :, i] = chan
         else:
             h, w = image.shape
+            _ones = np.ones((h, w), dtype=np.float32)
+            valid_mask = cv2.warpAffine(
+                _ones, M, (w, h),
+                flags=cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0
+            ) > 0.5
+
             aligned = cv2.warpAffine(
-                image, M, (w, h),
+                image.astype(np.float32), M, (w, h),
                 flags=cv2.INTER_LINEAR,
                 borderMode=cv2.BORDER_CONSTANT,
                 borderValue=0
             )
-        
+            aligned[~valid_mask] = np.nan
+
         return aligned
     
     def _print_transform(self, params):

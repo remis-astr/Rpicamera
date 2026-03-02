@@ -66,19 +66,9 @@ class PlanetaryMode(Enum):
     HYBRID = "hybrid"       # Disque + surface combinés
 
 
-class LuckyScoreMethod(Enum):
-    """Méthodes de scoring pour Lucky Imaging"""
-    LAPLACIAN = "laplacian"       # Variance du Laplacien (rapide, recommandé)
-    GRADIENT = "gradient"          # Magnitude du gradient
-    SOBEL = "sobel"               # Filtre de Sobel
-    TENENGRAD = "tenengrad"       # Tenengrad (Sobel au carré)
-
-
-class LuckyStackMethod(Enum):
-    """Méthodes de combinaison pour Lucky Imaging"""
-    MEAN = "mean"                 # Moyenne simple
-    MEDIAN = "median"             # Médiane (plus robuste)
-    SIGMA_CLIP = "sigma_clip"     # Moyenne avec rejection sigma
+# Importer les enums de lucky_imaging comme source unique de vérité.
+# Évite la duplication et les risques de désynchronisation entre les deux modules.
+from .lucky_imaging import ScoreMethod as LuckyScoreMethod, StackMethod as LuckyStackMethod
 
 
 class StretchMethod(Enum):
@@ -404,6 +394,11 @@ class AdvancedStackingConfig:
     isp_calibration_frames: Optional[tuple] = None
     video_format: Optional[str] = None  # 'yuv420', 'raw12', 'raw16', None=auto
 
+    # Calibration RAW (black level capteur + suppression gradient)
+    raw_black_level: int = 256        # ADU 12-bit natif capteur, 0 = désactivé
+    gradient_removal: bool = False    # Suppression gradient de fond
+    gradient_removal_tiles: int = 8   # Taille de la grille n×n
+
     # ISP Auto-calibration
     isp_auto_calibrate_method: str = 'histogram_peaks'  # 'none', 'histogram_peaks', 'gray_world'
     isp_auto_calibrate_after: int = 10       # Calibrer après N frames stackées (0 = désactivé)
@@ -507,12 +502,17 @@ class AdvancedStackingConfig:
         legacy.output_directory = self.output.output_directory
         legacy.save_rejected_list = self.output.save_rejected_list
         
+        # Calibration RAW (black level capteur + suppression gradient)
+        legacy.raw_black_level = self.raw_black_level
+        legacy.gradient_removal = self.gradient_removal
+        legacy.gradient_removal_tiles = self.gradient_removal_tiles
+
         # Stats
         legacy.num_stacked = self.num_stacked
         legacy.total_exposure = self.total_exposure
         legacy.noise_level = self.noise_level
         legacy.is_color = self.is_color
-        
+
         return legacy
     
     @classmethod

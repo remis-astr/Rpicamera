@@ -364,52 +364,37 @@ class RPiCameraLiveStackAdvanced:
 
         if 'lucky_score_method' in kwargs:
             method = kwargs['lucky_score_method'].lower()
-            from .config_advanced import LuckyScoreMethod as ConfigLuckyScoreMethod
-            method_map_config = {
-                'laplacian': ConfigLuckyScoreMethod.LAPLACIAN,
-                'gradient': ConfigLuckyScoreMethod.GRADIENT,
-                'sobel': ConfigLuckyScoreMethod.SOBEL,
-                'tenengrad': ConfigLuckyScoreMethod.TENENGRAD,
+            # LuckyScoreMethod == lucky_imaging.ScoreMethod (import direct, source unique)
+            method_map = {
+                'laplacian': LuckyScoreMethod.LAPLACIAN,
+                'gradient': LuckyScoreMethod.GRADIENT,
+                'sobel': LuckyScoreMethod.SOBEL,
+                'tenengrad': LuckyScoreMethod.TENENGRAD,
             }
-            new_method = method_map_config.get(method, ConfigLuckyScoreMethod.LAPLACIAN)
+            new_method = method_map.get(method, LuckyScoreMethod.LAPLACIAN)
             self.config.lucky.score_method = new_method
-            # Mise à jour dynamique : recréer le scorer
+            # Mise à jour dynamique : même type, assignment direct
             if self.lucky_stacker and self.is_running:
-                # Convertir vers le type de lucky_imaging.py
-                method_map_lucky = {
-                    'laplacian': LuckyScoreMethod.LAPLACIAN,
-                    'gradient': LuckyScoreMethod.GRADIENT,
-                    'sobel': LuckyScoreMethod.SOBEL,
-                    'tenengrad': LuckyScoreMethod.TENENGRAD,
-                }
-                converted_method = method_map_lucky.get(method, LuckyScoreMethod.LAPLACIAN)
-                self.lucky_stacker.config.score_method = converted_method
+                self.lucky_stacker.config.score_method = new_method
                 # Recréer le scorer avec la nouvelle méthode
                 self.lucky_stacker.scorer = QualityScorer(self.lucky_stacker.config)
                 print(f"[LUCKY] score_method mis à jour: {method}")
 
         if 'lucky_stack_method' in kwargs:
             method = kwargs['lucky_stack_method'].lower()
-            from .config_advanced import LuckyStackMethod as ConfigLuckyStackMethod
-            method_map_config = {
-                'mean': ConfigLuckyStackMethod.MEAN,
-                'median': ConfigLuckyStackMethod.MEDIAN,
-                'sigma_clip': ConfigLuckyStackMethod.SIGMA_CLIP,
+            # LuckyStackMethod == lucky_imaging.StackMethod (import direct, source unique)
+            method_map = {
+                'mean': LuckyStackMethod.MEAN,
+                'median': LuckyStackMethod.MEDIAN,
+                'sigma_clip': LuckyStackMethod.SIGMA_CLIP,
             }
-            new_method = method_map_config.get(method, ConfigLuckyStackMethod.MEAN)
+            new_method = method_map.get(method, LuckyStackMethod.MEAN)
             self.config.lucky.stack_method = new_method
             print(f"[DEBUG] lucky_stack_method configure: method='{method}', self.lucky_stacker={self.lucky_stacker}, self.is_running={self.is_running}")
-            # Mise à jour dynamique : convertir vers le type de lucky_imaging.py
-            # (même si arrêté, pour que ce soit appliqué au prochain start())
+            # Mise à jour dynamique : même type, assignment direct
             if self.lucky_stacker:
-                method_map_lucky = {
-                    'mean': LuckyStackMethod.MEAN,
-                    'median': LuckyStackMethod.MEDIAN,
-                    'sigma_clip': LuckyStackMethod.SIGMA_CLIP,
-                }
-                converted_method = method_map_lucky.get(method, LuckyStackMethod.MEAN)
-                self.lucky_stacker.config.stack_method = converted_method
-                print(f"[LUCKY] stack_method mis à jour: {method} → {converted_method}")
+                self.lucky_stacker.config.stack_method = new_method
+                print(f"[LUCKY] stack_method mis à jour: {method} → {new_method}")
             else:
                 print(f"[LUCKY] stack_method sera appliqué au prochain start(): {method}")
 
@@ -441,7 +426,14 @@ class RPiCameraLiveStackAdvanced:
                 # Recréer le scorer pour mettre à jour le ROI
                 self.lucky_stacker.scorer = QualityScorer(self.lucky_stacker.config)
                 print(f"[LUCKY] score_roi_percent mis à jour: {new_roi}%")
-        
+
+        if 'lucky_max_shift' in kwargs:
+            new_shift = float(kwargs['lucky_max_shift'])
+            self.config.lucky.max_shift = new_shift
+            if self.lucky_stacker and self.is_running:
+                self.lucky_stacker.configure(max_shift=new_shift)
+                print(f"[LUCKY] max_shift mis à jour: {new_shift:.0f}px {'(désactivé)' if new_shift == 0 else ''}")
+
         # Contrôle qualité
         if 'enable_qc' in kwargs:
             self.config.quality.enable = bool(kwargs['enable_qc'])
@@ -572,6 +564,22 @@ class RPiCameraLiveStackAdvanced:
                 self.session.config.video_format = kwargs['video_format']
                 print(f"[CONFIG] ✓ Format vidéo mis à jour: {kwargs['video_format']}")
 
+        # Calibration RAW : black level capteur + suppression gradient
+        if 'raw_black_level' in kwargs:
+            self.config.raw_black_level = int(kwargs['raw_black_level'])
+            if hasattr(self, 'session') and self.session:
+                self.session.config.raw_black_level = int(kwargs['raw_black_level'])
+                print(f"[CONFIG] ✓ Black level RAW mis à jour: {kwargs['raw_black_level']}")
+        if 'gradient_removal' in kwargs:
+            self.config.gradient_removal = bool(kwargs['gradient_removal'])
+            if hasattr(self, 'session') and self.session:
+                self.session.config.gradient_removal = bool(kwargs['gradient_removal'])
+                print(f"[CONFIG] ✓ Gradient removal mis à jour: {kwargs['gradient_removal']}")
+        if 'gradient_removal_tiles' in kwargs:
+            self.config.gradient_removal_tiles = int(kwargs['gradient_removal_tiles'])
+            if hasattr(self, 'session') and self.session:
+                self.session.config.gradient_removal_tiles = int(kwargs['gradient_removal_tiles'])
+
         print(f"[DEBUG CONFIGURE] self.config.isp_enable final: {self.config.isp_enable}")
         print(f"[DEBUG CONFIGURE] self.config.isp_config_path final: {self.config.isp_config_path}")
         print(f"[DEBUG CONFIGURE] self.config.video_format final: {self.config.video_format}")
@@ -666,28 +674,12 @@ class RPiCameraLiveStackAdvanced:
             lucky_config.max_shift = getattr(self.config.lucky, 'max_shift', 50.0)
             lucky_config.auto_stack = self.config.lucky.auto_stack
             
-            # Mapper les enums
-            score_method_map = {
-                'LAPLACIAN': LuckyScoreMethod.LAPLACIAN,
-                'GRADIENT': LuckyScoreMethod.GRADIENT,
-                'SOBEL': LuckyScoreMethod.SOBEL,
-                'TENENGRAD': LuckyScoreMethod.TENENGRAD,
-            }
-            lucky_config.score_method = score_method_map.get(
-                self.config.lucky.score_method.name, LuckyScoreMethod.LAPLACIAN
-            )
-            
-            stack_method_map = {
-                'MEAN': LuckyStackMethod.MEAN,
-                'MEDIAN': LuckyStackMethod.MEDIAN,
-                'SIGMA_CLIP': LuckyStackMethod.SIGMA_CLIP,
-            }
-            print(f"[DEBUG START] self.config.lucky.stack_method = {self.config.lucky.stack_method} (type: {type(self.config.lucky.stack_method)})")
-            print(f"[DEBUG START] self.config.lucky.stack_method.name = '{self.config.lucky.stack_method.name}'")
-            lucky_config.stack_method = stack_method_map.get(
-                self.config.lucky.stack_method.name, LuckyStackMethod.MEAN
-            )
-            print(f"[DEBUG START] lucky_config.stack_method = {lucky_config.stack_method} (type: {type(lucky_config.stack_method)})")
+            # LuckyScoreMethod == lucky_imaging.ScoreMethod (même type après unification I2)
+            # → assignment direct, aucune conversion nécessaire
+            lucky_config.score_method = self.config.lucky.score_method
+            lucky_config.stack_method = self.config.lucky.stack_method
+            print(f"[DEBUG START] lucky_config.score_method = {lucky_config.score_method}, "
+                  f"stack_method = {lucky_config.stack_method}")
             lucky_config.sigma_clip_kappa = self.config.lucky.sigma_clip_kappa
 
             # CORRECTION BUG IMAGE BLANCHE: Passer le format RAW explicite
@@ -994,14 +986,10 @@ class RPiCameraLiveStackAdvanced:
 
             # Convertir en uint8 si nécessaire (pygame requiert uint8)
             if preview_png.dtype == np.uint16:
-                # Convertir 16-bit → 8-bit en divisant par 257 (65535/255)
-                # Préserve mieux la distribution que /256
                 preview_uint8 = (preview_png / 257).astype(np.uint8)
             elif preview_png.dtype == np.uint8:
-                # Déjà en uint8, pas de conversion
                 preview_uint8 = preview_png
             else:
-                # Type inattendu (float32?), normaliser
                 preview_uint8 = np.clip(preview_png * 255, 0, 255).astype(np.uint8)
 
             return preview_uint8

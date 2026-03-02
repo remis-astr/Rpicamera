@@ -64,6 +64,16 @@ class StackingConfig:
         # Configuration qualité
         self.quality = QualityConfig()
 
+        # Soustraction black level RAW (indépendante de l'ISP software)
+        # Valeur en ADU 12-bit natif du capteur. 0 = désactivé.
+        # IMX585 standard : 256 ADU (= 6.25% de 4096)
+        self.raw_black_level = 256
+
+        # Suppression de gradient de fond (lumière parasite, vignetage)
+        # Algorithme par grille de médiane/percentile (mesh-based background estimation)
+        self.gradient_removal = False
+        self.gradient_removal_tiles = 8   # Taille de la grille n×n (8 = grille 8×8)
+
         # Paramètres ISP (Image Signal Processor)
         self.isp_enable = False            # Activer l'ISP (pour RAW12/16)
         self.isp_config_path = None        # Chemin vers config ISP (ou None = auto-calibration)
