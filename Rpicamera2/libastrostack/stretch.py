@@ -166,6 +166,43 @@ def stretch_auto(data, clip_low=0.1, clip_high=99.9):
     return stretched
 
 
+def stretch_mtf(data, midtone=0.2, shadows=0.0, highlights=1.0, clip_low=1.0, clip_high=99.5):
+    """
+    Midtone Transfer Function (style PixInsight)
+
+    Args:
+        data: Image (float array)
+        midtone: Point médian (0-1, défaut 0.2)
+        shadows: Clipping bas (0-0.5, défaut 0.0)
+        highlights: Clipping haut (0.5-1.0, défaut 1.0)
+        clip_low: Percentile bas pour normalisation (%)
+        clip_high: Percentile haut pour normalisation (%)
+
+    Returns:
+        Image étirée (0-1)
+    """
+    vmin = np.percentile(data, clip_low)
+    vmax = np.percentile(data, clip_high)
+
+    if vmax == vmin:
+        return np.zeros_like(data)
+
+    normalized = np.clip((data - vmin) / (vmax - vmin), 0, 1)
+
+    # Appliquer shadow / highlight clip
+    h_s = max(highlights - shadows, 1e-6)
+    clipped = np.clip((normalized - shadows) / h_s, 0, 1)
+
+    # Formule MTF PixInsight : M(x, m) = (m-1)*x / ((2m-1)*x - m)
+    m = midtone
+    denom = (2 * m - 1) * clipped - m
+    mask = np.abs(denom) > 1e-10
+    stretched = np.where(mask, (m - 1) * clipped / denom, 0.0)
+    stretched = np.where(clipped == 0, 0.0, stretched)
+    stretched = np.where(clipped == 1, 1.0, stretched)
+    return np.clip(stretched, 0, 1)
+
+
 def stretch_ghs(data, D=3.0, b=0.13, SP=0.2, LP=0.0, HP=0.0, clip_low=0.0, clip_high=99.97, B=None, normalize_output=True):
     """
     Generalized Hyperbolic Stretch (GHS) - Implémentation IDENTIQUE à RPiCamera2.py
@@ -349,6 +386,7 @@ def apply_stretch(data, method=StretchMethod.ASINH, **params):
             'histogram': StretchMethod.HISTOGRAM,
             'auto': StretchMethod.AUTO,
             'ghs': StretchMethod.GHS,
+            'mtf': StretchMethod.MTF,
         }
         method = method_map.get(method.lower(), StretchMethod.ASINH)
 
@@ -405,6 +443,16 @@ def apply_stretch(data, method=StretchMethod.ASINH, **params):
             clip_low=params.get('clip_low', 0.0),
             clip_high=params.get('clip_high', 99.97),
             normalize_output=params.get('normalize_output', True)  # False pour RAW après ISP
+        )
+
+    elif method == StretchMethod.MTF:
+        return stretch_mtf(
+            data,
+            midtone=params.get('mtf_midtone', 0.2),
+            shadows=params.get('mtf_shadows', 0.0),
+            highlights=params.get('mtf_highlights', 1.0),
+            clip_low=params.get('clip_low', 1.0),
+            clip_high=params.get('clip_high', 99.5)
         )
 
     else:  # AUTO

@@ -498,12 +498,15 @@ class RPiCameraLiveStackAdvanced:
                 'histogram': StretchMethod.HISTOGRAM,
                 'auto': StretchMethod.AUTO,
                 'ghs': StretchMethod.GHS,
+                'mtf': StretchMethod.MTF,
             }
             stretch_method = stretch_map.get(kwargs['png_stretch'], StretchMethod.ASINH)
             # Stocker dans les deux emplacements pour compatibilité
             self.config.output.png_stretch_method = stretch_method
-            # session.py utilise config.png_stretch_method directement (string ou enum)
             self.config.png_stretch_method = stretch_method
+            # Propagation live si session déjà démarrée
+            if self.session is not None:
+                self.session.config.png_stretch_method = kwargs['png_stretch']
             print(f"[DEBUG] png_stretch configuré: {kwargs['png_stretch']} → {stretch_method}")
         if 'png_factor' in kwargs:
             self.config.output.png_stretch_factor = float(kwargs['png_factor'])
@@ -534,6 +537,26 @@ class RPiCameraLiveStackAdvanced:
             ghs_updated = True
         if 'ghs_auto_adjust_sp' in kwargs:
             self.config.ghs_auto_adjust_sp = bool(kwargs['ghs_auto_adjust_sp'])
+
+        # Paramètres Log
+        if 'log_factor' in kwargs:
+            self.config.log_factor = float(kwargs['log_factor'])
+            if self.session is not None:
+                self.session.config.log_factor = float(kwargs['log_factor'])
+
+        # Paramètres MTF
+        if 'mtf_midtone' in kwargs:
+            self.config.mtf_midtone = float(kwargs['mtf_midtone'])
+            if self.session is not None:
+                self.session.config.mtf_midtone = float(kwargs['mtf_midtone'])
+        if 'mtf_shadows' in kwargs:
+            self.config.mtf_shadows = float(kwargs['mtf_shadows'])
+            if self.session is not None:
+                self.session.config.mtf_shadows = float(kwargs['mtf_shadows'])
+        if 'mtf_highlights' in kwargs:
+            self.config.mtf_highlights = float(kwargs['mtf_highlights'])
+            if self.session is not None:
+                self.session.config.mtf_highlights = float(kwargs['mtf_highlights'])
 
         # Debug GHS si modifié
         if ghs_updated:

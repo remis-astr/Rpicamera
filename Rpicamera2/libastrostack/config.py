@@ -23,6 +23,7 @@ class StretchMethod:
     HISTOGRAM = "histogram"
     AUTO = "auto"
     GHS = "ghs"                     # Generalized Hyperbolic Stretch
+    MTF = "mtf"                     # Midtone Transfer Function (PixInsight)
 
 
 class QualityConfig:

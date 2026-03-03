@@ -462,6 +462,18 @@ class LiveStackSession:
         ghs_HP = getattr(self.config, 'ghs_HP', 0.0)
         ghs_auto_adjust = getattr(self.config, 'ghs_auto_adjust_sp', True)
 
+        # Récupérer paramètres Log et MTF
+        _log_factor = getattr(self.config, 'log_factor', 100.0)
+        _mtf_midtone = getattr(self.config, 'mtf_midtone', 0.2)
+        _mtf_shadows = getattr(self.config, 'mtf_shadows', 0.0)
+        _mtf_highlights = getattr(self.config, 'mtf_highlights', 1.0)
+
+        # Pour Log, utiliser log_factor ; pour les autres méthodes, utiliser png_stretch_factor
+        _stretch_method = self.config.png_stretch_method
+        _is_log = (_stretch_method == 'log' or
+                   (hasattr(_stretch_method, 'value') and _stretch_method.value == 'log'))
+        _factor = _log_factor if _is_log else self.config.png_stretch_factor
+
         # Auto-ajustement SP pour RAW UNIQUEMENT
         # Après ISP software, les données RAW ont un histogramme centré ~0.5
         # mais SP configuré est souvent bas (0.04). On ajuste SP au pic réel.
@@ -504,7 +516,7 @@ class LiveStackSession:
                 stretched[:, :, i] = apply_stretch(
                     result[:, :, i],
                     method=self.config.png_stretch_method,
-                    factor=self.config.png_stretch_factor,
+                    factor=_factor,
                     clip_low=clip_low,
                     clip_high=clip_high,
                     ghs_D=ghs_D,
@@ -512,13 +524,16 @@ class LiveStackSession:
                     ghs_SP=ghs_SP,
                     ghs_LP=ghs_LP,
                     ghs_HP=ghs_HP,
-                    normalize_output=normalize_ghs_output
+                    normalize_output=normalize_ghs_output,
+                    mtf_midtone=_mtf_midtone,
+                    mtf_shadows=_mtf_shadows,
+                    mtf_highlights=_mtf_highlights,
                 )
         else:
             stretched = apply_stretch(
                 result,
                 method=self.config.png_stretch_method,
-                factor=self.config.png_stretch_factor,
+                factor=_factor,
                 clip_low=clip_low,
                 clip_high=clip_high,
                 ghs_D=ghs_D,
@@ -526,7 +541,10 @@ class LiveStackSession:
                 ghs_SP=ghs_SP,
                 ghs_LP=ghs_LP,
                 ghs_HP=ghs_HP,
-                normalize_output=normalize_ghs_output
+                normalize_output=normalize_ghs_output,
+                mtf_midtone=_mtf_midtone,
+                mtf_shadows=_mtf_shadows,
+                mtf_highlights=_mtf_highlights,
             )
 
         # Convertir en uint8 ou uint16 selon configuration

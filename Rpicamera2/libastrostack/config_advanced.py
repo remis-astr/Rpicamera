@@ -81,6 +81,7 @@ class StretchMethod(Enum):
     HISTOGRAM = "histogram"
     AUTO = "auto"
     GHS = "ghs"                     # Generalized Hyperbolic Stretch
+    MTF = "mtf"                     # Midtone Transfer Function (PixInsight)
 
 
 # =============================================================================
@@ -492,6 +493,12 @@ class AdvancedStackingConfig:
         legacy.ghs_LP = getattr(self, 'ghs_LP', getattr(self.output, 'ghs_LP', 0.0))
         legacy.ghs_HP = getattr(self, 'ghs_HP', getattr(self.output, 'ghs_HP', 0.0))
         legacy.ghs_auto_adjust_sp = getattr(self, 'ghs_auto_adjust_sp', True)
+
+        # Log/MTF stretch params
+        legacy.log_factor = getattr(self, 'log_factor', 100.0)
+        legacy.mtf_midtone = getattr(self, 'mtf_midtone', 0.2)
+        legacy.mtf_shadows = getattr(self, 'mtf_shadows', 0.0)
+        legacy.mtf_highlights = getattr(self, 'mtf_highlights', 1.0)
 
         # FITS
         legacy.fits_linear = getattr(self.output, 'fits_linear', True)
