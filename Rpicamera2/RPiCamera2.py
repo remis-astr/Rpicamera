@@ -1520,6 +1520,10 @@ ghs_LP = 0     # Protect shadows: 0-100 -> 0.0-1.0 (défaut 0.0)
 ghs_HP = 0     # Protect highlights: 0-100 -> 0.0-1.0 (défaut 0.0 optimisé tests)
 ghs_preset = 1 # 0=Manual, 1=Galaxies, 2=Nébuleuses, 3=Étirement initial
 ghs_presets = ['Manual', 'Galaxies', 'Nebulae', 'Initial']
+log_factor = 100      # Log factor (0-1000)
+mtf_shadows = 0       # MTF shadows (x100, 0-50 → 0.0-0.5)
+mtf_midtone = 20      # MTF midtone (x100, 1-99 → 0.01-0.99)
+mtf_highlights = 100  # MTF highlights (x100, 50-100 → 0.5-1.0)
 
 # JSK LIVE Settings
 jsk_live_mode = 0           # 0=OFF, 1=Active
@@ -2097,7 +2101,7 @@ v3_f_ranges  = ['normal','macro','full']
 v3_f_speeds  = ['normal','fast']
 histograms   = ["OFF","Red","Green","Blue","Lum","ALL"]
 strs         = ["Still","Video","Stream","Timelapse"]
-stretch_presets = ['OFF','GHS','Arcsinh']
+stretch_presets = ['OFF','GHS','Arcsinh','Log','MTF']
 v3_hdrs      = ["OFF","Single-Exp","Multi-Exp","Night","Clear HDR 16bit"]
 # Mapping pour rpicam-still/rpicam-vid (valeurs CLI attendues)
 # Note: Night n'existe pas en CLI → fallback vers "off"
@@ -2164,7 +2168,8 @@ still_limits = ['mode',0,len(modes)-1,'speed',0,len(shutters)-1,'gain',0,30,'bri
                 'histogram',0,len(histograms)-1,'v3_f_speed',0,len(v3_f_speeds)-1,'v3_hdr',0,len(v3_hdrs)-1,'focus_method',0,4,'star_metric',0,2,'snr_display',0,1,'metrics_interval',1,10]
 video_limits = ['vlen',0,3600,'fps',1,180,'v5_focus',10,2500,'vformat',0,7,'0',0,0,'zoom',0,5,'Focus',0,1,'tduration',1,86400,'tinterval',0.01,10,'tshots',1,999,
                 'flicker',0,3,'codec',0,len(codecs)-1,'ser_format',0,len(ser_formats)-1,'profile',0,len(h264profiles)-1,'v3_focus',10,2000,'histarea',10,300,'v3_f_range',0,len(v3_f_ranges)-1,
-                'str_cap',0,len(strs)-1,'v6_focus',10,1020,'stretch_p_low',0,2,'stretch_p_high',9995,10000,'stretch_factor',0,1500,'stretch_preset',0,2,
+                'str_cap',0,len(strs)-1,'v6_focus',10,1020,'stretch_p_low',0,2,'stretch_p_high',9995,10000,'stretch_factor',0,1500,'stretch_preset',0,4,
+                'log_factor',0,1000,'mtf_shadows',0,50,'mtf_midtone',1,99,'mtf_highlights',50,100,
                 'ghs_D',-10,100,'ghs_b',-300,100,'ghs_SP',0,100,'ghs_LP',0,100,'ghs_HP',0,100,'ghs_preset',0,3,'use_native_sensor_mode',0,1,
                 'raw_format',0,3,'focus_method',0,4,'star_metric',0,2,'snr_display',0,1,'metrics_interval',1,10,
                 'allsky_mode',0,2,'allsky_mean_target',10,60,'allsky_mean_threshold',2,15,'allsky_video_fps',15,60,
@@ -2220,7 +2225,8 @@ titles = ['mode','speed','gain','brightness','contrast','frame','red','blue','ev
           'allsky_mode','allsky_mean_target','allsky_mean_threshold','allsky_video_fps','allsky_max_gain','allsky_apply_stretch','allsky_cleanup_jpegs',
           'ls_save_progress','ls_save_final','ls_lucky_save_final',
           'fix_bad_pixels','fix_bad_pixels_sigma','fix_bad_pixels_min_adu',
-          'allsky_stack_enable','allsky_stack_count']
+          'allsky_stack_enable','allsky_stack_count',
+          'log_factor','mtf_shadows','mtf_midtone','mtf_highlights']
 points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat,codec,tinterval,tshots,extn,zx,zy,zoom,saturation,
           meter,awb,sharpness,denoise,quality,profile,level,histogram,histarea,v3_f_speed,v3_f_range,rotate,IRF,str_cap,v3_hdr,raw_format,vflip,hflip,
           stretch_p_low,stretch_p_high,stretch_factor,stretch_preset,ghs_D,ghs_b,ghs_SP,ghs_LP,ghs_HP,ghs_preset,
@@ -2232,7 +2238,8 @@ points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat
           allsky_mode,allsky_mean_target,allsky_mean_threshold,allsky_video_fps,allsky_max_gain,allsky_apply_stretch,allsky_cleanup_jpegs,
           ls_save_progress,ls_save_final,ls_lucky_save_final,
           fix_bad_pixels,fix_bad_pixels_sigma,fix_bad_pixels_min_adu,
-          allsky_stack_enable,allsky_stack_count]
+          allsky_stack_enable,allsky_stack_count,
+          log_factor,mtf_shadows,mtf_midtone,mtf_highlights]
 if not os.path.exists(config_file):
     with open(config_file, 'w') as f:
         for item in range(0,len(titles)):
@@ -2477,6 +2484,14 @@ if len(config) <= 98:
     config.append(3)     # allsky_stack_count par défaut (3 images)
 if len(config) <= 99:
     config.append(30)    # ls_lucky_max_shift par défaut (30 pixels)
+if len(config) <= 100:
+    config.append(100)   # log_factor défaut
+if len(config) <= 101:
+    config.append(0)     # mtf_shadows défaut
+if len(config) <= 102:
+    config.append(20)    # mtf_midtone défaut
+if len(config) <= 103:
+    config.append(100)   # mtf_highlights défaut
 
 # Charger les paramètres ALLSKY
 allsky_mode           = config[84] if len(config) > 84 else 0
@@ -2498,6 +2513,12 @@ ls_lucky_save_final   = config[93] if len(config) > 93 else 1
 fix_bad_pixels        = config[94] if len(config) > 94 else 1
 fix_bad_pixels_sigma  = config[95] if len(config) > 95 else 40
 fix_bad_pixels_min_adu = config[96] if len(config) > 96 else 100
+
+# Charger les paramètres Log/MTF stretch
+log_factor     = config[100] if len(config) > 100 else 100
+mtf_shadows    = config[101] if len(config) > 101 else 0
+mtf_midtone    = config[102] if len(config) > 102 else 20
+mtf_highlights = config[103] if len(config) > 103 else 100
 
 # ISP configuration (chemin en dur pour le fichier de config ISP)
 # Config neutre (transparente) pour astrophotographie - n'affecte que les PNG de prévisualisation
@@ -4499,6 +4520,7 @@ def draw_stretch_controls(screen_width, screen_height, image_array=None):
     """
     global stretch_preset, ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
     global stretch_factor, stretch_p_low, stretch_p_high
+    global log_factor, mtf_shadows, mtf_midtone, mtf_highlights
     global windowSurfaceObj, _font_cache
     global gain, ev, still_limits, custom_sspeed, sspeed
 
@@ -4521,13 +4543,15 @@ def draw_stretch_controls(screen_width, screen_height, image_array=None):
     exp_start_x = screen_width - slider_width - 40
     exp_start_y = 60
 
-    # === Sélecteur de mode preset : OFF | GHS | Arcsinh ===
+    # === Sélecteur de mode preset : OFF | GHS | Arcsinh | Log | MTF ===
     seg_y, seg_h = 18, 28
-    seg_labels = ["OFF", "GHS", "Arcsinh"]
+    seg_labels = ["OFF", "GHS", "Arcsinh", "Log", "MTF"]
     seg_colors = [
-        ((50, 50, 60),  (110, 110, 120)),   # OFF  : fond inactif / actif
-        ((25, 65, 35),  ( 55, 170,  80)),   # GHS  : fond inactif / actif
+        ((50, 50, 60),  (110, 110, 120)),   # OFF     : fond inactif / actif
+        ((25, 65, 35),  ( 55, 170,  80)),   # GHS     : fond inactif / actif
         ((65, 42, 15),  (190, 120,  50)),   # Arcsinh : fond inactif / actif
+        ((45, 55, 20),  (120, 170,  50)),   # Log     : fond inactif / actif
+        ((20, 50, 65),  ( 50, 160, 200)),   # MTF     : fond inactif / actif
     ]
     seg_w = slider_width // len(seg_labels)
     fk18 = 18
@@ -4592,6 +4616,41 @@ def draw_stretch_controls(screen_width, screen_height, image_array=None):
             start_x, start_y + 2*(slider_height + margin), slider_width, slider_height,
             "Clip High %", stretch_p_high / 100.0, 99.5, 100.0, (100, 180, 140)
         )
+
+    elif stretch_preset == 3:
+        # Mode Log
+        slider_rects['log_factor'] = draw_stretch_slider(
+            start_x, start_y, slider_width, slider_height,
+            "Log Factor", log_factor, 0, 1000, (120, 170, 50)
+        )
+
+        slider_rects['stretch_p_low'] = draw_stretch_slider(
+            start_x, start_y + slider_height + margin, slider_width, slider_height,
+            "Clip Low %", stretch_p_low / 10.0, 0.0, 2.0, (180, 140, 100)
+        )
+
+        slider_rects['stretch_p_high'] = draw_stretch_slider(
+            start_x, start_y + 2*(slider_height + margin), slider_width, slider_height,
+            "Clip High %", stretch_p_high / 100.0, 99.5, 100.0, (100, 180, 140)
+        )
+
+    elif stretch_preset == 4:
+        # Mode MTF
+        slider_rects['mtf_shadows'] = draw_stretch_slider(
+            start_x, start_y, slider_width, slider_height,
+            "Shadows", mtf_shadows / 100.0, 0.0, 0.5, (80, 120, 160)
+        )
+
+        slider_rects['mtf_midtone'] = draw_stretch_slider(
+            start_x, start_y + slider_height + margin, slider_width, slider_height,
+            "Midtone", mtf_midtone / 100.0, 0.0, 1.0, (50, 160, 200)
+        )
+
+        slider_rects['mtf_highlights'] = draw_stretch_slider(
+            start_x, start_y + 2*(slider_height + margin), slider_width, slider_height,
+            "Highlights", mtf_highlights / 100.0, 0.5, 1.0, (100, 200, 220)
+        )
+
     else:
         # Mode OFF — message indicatif bref
         fk16 = 16
@@ -4599,7 +4658,7 @@ def draw_stretch_controls(screen_width, screen_height, image_array=None):
             _font_cache[fk16] = pygame.font.Font(None, fk16)
         infoFont = _font_cache[fk16]
         for j, line in enumerate(["Aucun stretch actif.",
-                                   "Selectionnez GHS ou Arcsinh",
+                                   "Selectionnez GHS, Arcsinh, Log ou MTF",
                                    "avec le selecteur ci-dessus."]):
             windowSurfaceObj.blit(infoFont.render(line, True, (120, 120, 130)),
                                   (start_x, start_y + j * 20))
@@ -4672,6 +4731,7 @@ def draw_stretch_histogram(screen_width, screen_height, image_array):
     global windowSurfaceObj
     global stretch_preset, stretch_factor, stretch_p_low, stretch_p_high
     global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
+    global log_factor, mtf_shadows, mtf_midtone, mtf_highlights
 
     # Dimensions de l'histogramme — plein écran (0..screen_width)
     hist_height = 120
@@ -4878,6 +4938,30 @@ def draw_stretch_histogram(screen_width, screen_height, image_array):
                     else:
                         y_transform = x_norm.copy()
 
+                elif stretch_preset == 3:
+                    # Log stretch
+                    factor = float(log_factor)
+                    if factor > 0.01:
+                        log_denom = np.log1p(factor)
+                        if log_denom > 1e-10:
+                            y_transform = np.log1p(x_norm * factor) / log_denom
+                        else:
+                            y_transform = x_norm.copy()
+                    else:
+                        y_transform = x_norm.copy()
+
+                elif stretch_preset == 4:
+                    # MTF stretch
+                    s = mtf_shadows / 100.0
+                    h = mtf_highlights / 100.0
+                    m = mtf_midtone / 100.0
+                    x_clip = np.clip((x_norm - s) / max(h - s, 1e-6), 0, 1)
+                    denom = (2 * m - 1) * x_clip - m
+                    mask = np.abs(denom) > 1e-10
+                    y_transform = np.where(mask, (m - 1) * x_clip / denom, 0.0)
+                    y_transform = np.where(x_clip == 0, 0.0, y_transform)
+                    y_transform = np.where(x_clip == 1, 1.0, y_transform)
+
                 # Clip et création des points pour la courbe
                 y_transform = np.clip(y_transform, 0, 1)
 
@@ -4912,11 +4996,12 @@ def handle_stretch_slider_click(mousex, mousey, slider_rects):
     """
     global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
     global stretch_factor, stretch_p_low, stretch_p_high
+    global log_factor, mtf_shadows, mtf_midtone, mtf_highlights
     global gain, ev, still_limits, custom_sspeed
     global stretch_preset
 
     # Boutons de sélection du mode preset (clic simple, pas de calcul de ratio)
-    for i in range(3):
+    for i in range(5):
         r = slider_rects.get(f'stretch_preset_{i}')
         if r and r.collidepoint(mousex, mousey):
             stretch_preset = i
@@ -4960,6 +5045,14 @@ def handle_stretch_slider_click(mousex, mousey, slider_rects):
                 # Clip high: 99.5 à 100.0, stocké x100
                 stretch_p_high = int(9950 + ratio * 50)
                 print(f"[ARCSINH] stretch_p_high = {stretch_p_high}")
+            elif name == 'log_factor':
+                log_factor = int(ratio * 1000)
+            elif name == 'mtf_shadows':
+                mtf_shadows = int(ratio * 50)
+            elif name == 'mtf_midtone':
+                mtf_midtone = max(1, int(ratio * 99))
+            elif name == 'mtf_highlights':
+                mtf_highlights = int(50 + ratio * 50)
             # Sliders Gain et Exposition pour YUV/RGB
             elif name == 'preview_gain':
                 # Gain: 0 à 300 (0 = AUTO)
@@ -5408,6 +5501,7 @@ def draw_ls_controls(screen_width, screen_height):
     global stretch_preset, isp_gamma, isp_brightness, isp_contrast, isp_saturation
     global ls_cam_brightness, ls_cam_contrast, ls_cam_saturation, raw_format
     global isp_black_level, ls_gradient_removal
+    global log_factor, mtf_shadows, mtf_midtone, mtf_highlights
 
     panel_w  = 260
     panel_m  = 10
@@ -5627,20 +5721,35 @@ def draw_ls_controls(screen_width, screen_height):
             _font_cache[ck_sect].render("Stretch", True, (110, 195, 135)),
             (panel_x + 2, start_y))
         start_y += 16
-        _preset_names = ['OFF', 'GHS', 'Arcsinh']
+        _preset_names = ['OFF', 'GHS', 'Arcsinh', 'Log', 'MTF']
         control_rects['ls_img_stretch'] = draw_jsk_slider(
             panel_x, start_y, slider_w, slider_h,
-            f"Stretch: {_preset_names[stretch_preset]}", stretch_preset, 0, 2, (95, 155, 115))
+            f"Stretch: {_preset_names[min(stretch_preset, 4)]}", stretch_preset, 0, 4, (95, 155, 115))
         start_y += slider_h + margin
+        if stretch_preset == 3:
+            control_rects['ls_img_log_factor'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Facteur Log: {log_factor}", log_factor, 0, 1000, (90, 150, 110))
+            start_y += slider_h + margin
+        elif stretch_preset == 4:
+            control_rects['ls_img_mtf_shadows'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Shadows: {mtf_shadows/100:.2f}", mtf_shadows, 0, 50, (90, 150, 110))
+            start_y += slider_h + margin
+            control_rects['ls_img_mtf_midtone'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Midtone: {mtf_midtone/100:.2f}", mtf_midtone, 1, 99, (90, 150, 110))
+            start_y += slider_h + margin
+            control_rects['ls_img_mtf_highlights'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Highlights: {mtf_highlights/100:.2f}", mtf_highlights, 50, 100, (90, 150, 110))
+            start_y += slider_h + margin
 
         windowSurfaceObj.blit(
             _font_cache[ck_sect].render("Couleur", True, (110, 195, 135)),
             (panel_x + 2, start_y))
         start_y += 16
-        control_rects['ls_img_gamma'] = draw_jsk_slider(
-            panel_x, start_y, slider_w, slider_h,
-            f"Gamma: {isp_gamma/100:.2f}", isp_gamma, 50, 300, (200, 180, 100))
-        start_y += slider_h + margin
+        # gamma supprimé — non applicable sur données linéaires RAW (le stretch remplace le gamma)
         control_rects['ls_img_brightness'] = draw_jsk_slider(
             panel_x, start_y, slider_w, slider_h,
             f"Luminosité: {isp_brightness/100:+.2f}", isp_brightness, -50, 50, (160, 160, 200))
@@ -5702,6 +5811,7 @@ def handle_ls_slider_click(mx, my, control_rects):
     global stretch_preset, isp_gamma, isp_brightness, isp_contrast, isp_saturation
     global ls_cam_brightness, ls_cam_contrast, ls_cam_saturation, picam2, use_picamera2
     global livestack, isp_black_level, ls_gradient_removal
+    global log_factor, mtf_shadows, mtf_midtone, mtf_highlights
     import math as _math
 
     for name, rect in control_rects.items():
@@ -5755,9 +5865,25 @@ def handle_ls_slider_click(mx, my, control_rects):
             elif name == 'ls_save_dng_mode':
                 ls_save_dng_mode = max(0, min(2, int(ratio * 2 + 0.5)))
             elif name == 'ls_img_stretch':
-                stretch_preset = max(0, min(2, int(ratio * 2 + 0.5)))
-            elif name == 'ls_img_gamma':
-                isp_gamma = int(50 + ratio * 250)       # 50-300
+                stretch_preset = max(0, min(4, int(ratio * 4 + 0.5)))
+                if livestack is not None:
+                    livestack.configure(png_stretch=['off', 'ghs', 'asinh', 'log', 'mtf'][stretch_preset])
+            elif name == 'ls_img_log_factor':
+                log_factor = int(ratio * 1000)
+                if livestack is not None:
+                    livestack.configure(log_factor=float(log_factor))
+            elif name == 'ls_img_mtf_shadows':
+                mtf_shadows = int(ratio * 50)
+                if livestack is not None:
+                    livestack.configure(mtf_shadows=mtf_shadows / 100.0)
+            elif name == 'ls_img_mtf_midtone':
+                mtf_midtone = max(1, int(ratio * 99))
+                if livestack is not None:
+                    livestack.configure(mtf_midtone=mtf_midtone / 100.0)
+            elif name == 'ls_img_mtf_highlights':
+                mtf_highlights = int(50 + ratio * 50)
+                if livestack is not None:
+                    livestack.configure(mtf_highlights=mtf_highlights / 100.0)
             elif name == 'ls_img_brightness':
                 isp_brightness = int(-50 + ratio * 100) # -50-50
             elif name == 'ls_img_contrast':
@@ -6285,6 +6411,7 @@ def draw_lucky_controls(screen_width, screen_height):
     global lucky_settings_tab, luckystack_active
     global stretch_preset, isp_gamma, isp_brightness, isp_contrast, isp_saturation
     global raw_format
+    global log_factor, mtf_shadows, mtf_midtone, mtf_highlights
 
     panel_w  = 260
     panel_m  = 10
@@ -6403,20 +6530,35 @@ def draw_lucky_controls(screen_width, screen_height):
             _font_cache[ck_sect].render("Stretch", True, (100, 160, 255)),
             (panel_x + 2, start_y))
         start_y += 16
-        _preset_names = ['OFF', 'GHS', 'Arcsinh']
+        _preset_names = ['OFF', 'GHS', 'Arcsinh', 'Log', 'MTF']
         control_rects['ls_img_stretch'] = draw_jsk_slider(
             panel_x, start_y, slider_w, slider_h,
-            f"Stretch: {_preset_names[stretch_preset]}", stretch_preset, 0, 2, (80, 120, 200))
+            f"Stretch: {_preset_names[min(stretch_preset, 4)]}", stretch_preset, 0, 4, (80, 120, 200))
         start_y += slider_h + margin
+        if stretch_preset == 3:
+            control_rects['ls_img_log_factor'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Facteur Log: {log_factor}", log_factor, 0, 1000, (70, 110, 180))
+            start_y += slider_h + margin
+        elif stretch_preset == 4:
+            control_rects['ls_img_mtf_shadows'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Shadows: {mtf_shadows/100:.2f}", mtf_shadows, 0, 50, (70, 110, 180))
+            start_y += slider_h + margin
+            control_rects['ls_img_mtf_midtone'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Midtone: {mtf_midtone/100:.2f}", mtf_midtone, 1, 99, (70, 110, 180))
+            start_y += slider_h + margin
+            control_rects['ls_img_mtf_highlights'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Highlights: {mtf_highlights/100:.2f}", mtf_highlights, 50, 100, (70, 110, 180))
+            start_y += slider_h + margin
 
         windowSurfaceObj.blit(
             _font_cache[ck_sect].render("Couleur", True, (100, 160, 255)),
             (panel_x + 2, start_y))
         start_y += 16
-        control_rects['ls_img_gamma'] = draw_jsk_slider(
-            panel_x, start_y, slider_w, slider_h,
-            f"Gamma: {isp_gamma/100:.2f}", isp_gamma, 50, 300, (180, 160, 80))
-        start_y += slider_h + margin
+        # gamma supprimé — non applicable sur données linéaires RAW (le stretch remplace le gamma)
         control_rects['ls_img_brightness'] = draw_jsk_slider(
             panel_x, start_y, slider_w, slider_h,
             f"Luminosité: {isp_brightness/100:+.2f}", isp_brightness, -50, 50, (140, 140, 180))
@@ -6520,6 +6662,7 @@ def handle_lucky_slider_click(mx, my, control_rects):
     global lucky_settings_tab
     global stretch_preset, isp_gamma, isp_brightness, isp_contrast, isp_saturation
     global red, blue, use_picamera2, picam2
+    global log_factor, mtf_shadows, mtf_midtone, mtf_highlights
     global ls_lucky_clahe_en, ls_lucky_clahe_str, ls_lucky_clahe_tile
     global ls_lucky_usm_en, ls_lucky_usm_sigma, ls_lucky_usm_amount
     global ls_lucky_lr_en, ls_lucky_lr_iter, ls_lucky_lr_sigma
@@ -6556,10 +6699,25 @@ def handle_lucky_slider_click(mx, my, control_rects):
             elif name == 'ls_lucky_save_final':
                 ls_lucky_save_final = 1 if ratio > 0.5 else 0
             elif name == 'ls_img_stretch':
-                stretch_preset = max(0, min(2, int(ratio * 2 + 0.5)))
-            elif name == 'ls_img_gamma':
-                isp_gamma = int(50 + ratio * 250)
-                _needs_isp = True
+                stretch_preset = max(0, min(4, int(ratio * 4 + 0.5)))
+                if luckystack is not None:
+                    luckystack.configure(png_stretch=['off', 'ghs', 'asinh', 'log', 'mtf'][stretch_preset])
+            elif name == 'ls_img_log_factor':
+                log_factor = int(ratio * 1000)
+                if luckystack is not None:
+                    luckystack.configure(log_factor=float(log_factor))
+            elif name == 'ls_img_mtf_shadows':
+                mtf_shadows = int(ratio * 50)
+                if luckystack is not None:
+                    luckystack.configure(mtf_shadows=mtf_shadows / 100.0)
+            elif name == 'ls_img_mtf_midtone':
+                mtf_midtone = max(1, int(ratio * 99))
+                if luckystack is not None:
+                    luckystack.configure(mtf_midtone=mtf_midtone / 100.0)
+            elif name == 'ls_img_mtf_highlights':
+                mtf_highlights = int(50 + ratio * 50)
+                if luckystack is not None:
+                    luckystack.configure(mtf_highlights=mtf_highlights / 100.0)
             elif name == 'ls_img_brightness':
                 isp_brightness = int(-50 + ratio * 100)
                 if use_picamera2 and picam2 is not None:
@@ -6858,6 +7016,7 @@ def draw_raw_controls(screen_width, screen_height, image_array=None):
     global isp_brightness, isp_contrast, isp_saturation, isp_sharpening
     global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
     global stretch_preset, stretch_factor, stretch_p_low, stretch_p_high
+    global log_factor, mtf_shadows, mtf_midtone, mtf_highlights
     global gain, ev, still_limits, custom_sspeed, sspeed
 
     control_rects = {}
@@ -6965,26 +7124,22 @@ def draw_raw_controls(screen_width, screen_height, image_array=None):
             "B Gain", isp_wb_blue / 100.0, 0.5, 2.0, (100, 100, 180)
         )
 
-        # Section Tone
+        # Section Tone (Gamma supprimé — redondant avec le stretch astro sur données linéaires)
         start_y += 3*(slider_height + margin) + 10
         section_text = sectionFont.render("Tone:", True, (150, 180, 200))
         windowSurfaceObj.blit(section_text, (start_x, start_y))
         start_y += 18
 
-        control_rects['isp_gamma'] = draw_raw_isp_slider(
-            start_x, start_y, slider_width, slider_height,
-            "Gamma", isp_gamma / 100.0, 0.5, 3.0, (180, 160, 100)
-        )
         control_rects['isp_black_level'] = draw_raw_isp_slider(
-            start_x, start_y + slider_height + margin, slider_width, slider_height,
+            start_x, start_y, slider_width, slider_height,
             "Black Level", isp_black_level, 0, 500, (120, 120, 140)
         )
         control_rects['isp_brightness'] = draw_raw_isp_slider(
-            start_x, start_y + 2*(slider_height + margin), slider_width, slider_height,
-            "Brightness", isp_brightness / 100.0, -0.5, 0.5, (160, 160, 180)
+            start_x, start_y + slider_height + margin, slider_width, slider_height,
+            "Brightness (0=neutre)", isp_brightness / 100.0, -0.5, 0.5, (160, 160, 180)
         )
         control_rects['isp_contrast'] = draw_raw_isp_slider(
-            start_x, start_y + 3*(slider_height + margin), slider_width, slider_height,
+            start_x, start_y + 2*(slider_height + margin), slider_width, slider_height,
             "Contrast", isp_contrast / 100.0, 0.5, 2.0, (140, 180, 160)
         )
 
@@ -7011,67 +7166,48 @@ def draw_raw_controls(screen_width, screen_height, image_array=None):
         control_rects['save'] = save_rect
 
     else:
-        # Onglet STRETCH - Affiche GHS ou Arcsinh selon stretch_preset
-        cache_key_title = 22
-        if cache_key_title not in _font_cache:
-            _font_cache[cache_key_title] = pygame.font.Font(None, cache_key_title)
-        titleFont = _font_cache[cache_key_title]
+        # Onglet STRETCH - Sélecteur de preset + sliders spécifiques
+
+        # === Sélecteur de preset : OFF | GHS | Arcsinh | Log | MTF ===
+        seg_labels_s = ["OFF", "GHS", "Arcsinh", "Log", "MTF"]
+        seg_cols_off = [(50,50,60), (25,65,35), (65,42,15), (45,55,20), (20,50,65)]
+        seg_cols_on  = [(110,110,120), (55,170,80), (190,120,50), (120,170,50), (50,160,200)]
+        seg_w_s = slider_width // len(seg_labels_s)
+        seg_h_s = 28
+        fk18s = 18
+        if fk18s not in _font_cache:
+            _font_cache[fk18s] = pygame.font.Font(None, fk18s)
+        fontSeg = _font_cache[fk18s]
+
+        for i, (label, col_off, col_on) in enumerate(zip(seg_labels_s, seg_cols_off, seg_cols_on)):
+            sx = start_x + i * seg_w_s
+            is_active = (stretch_preset == i)
+            r = pygame.Rect(sx, start_y, seg_w_s, seg_h_s)
+            pygame.draw.rect(windowSurfaceObj, col_on if is_active else col_off, r, border_radius=4)
+            pygame.draw.rect(windowSurfaceObj,
+                             (220,220,220) if is_active else (80,80,92),
+                             r, 2 if is_active else 1, border_radius=4)
+            tc = (240,240,240) if is_active else (150,150,155)
+            txt = fontSeg.render(label, True, tc)
+            windowSurfaceObj.blit(txt, txt.get_rect(center=r.center))
+            control_rects[f'stretch_preset_{i}'] = r
+
+        start_y += seg_h_s + 10
 
         if stretch_preset == 0:
-            # Mode OFF - Pas de sliders, juste un message
-            title = titleFont.render("Stretch OFF", True, (150, 150, 150))
-            windowSurfaceObj.blit(title, (start_x, start_y))
-            start_y += 30
-
-            # Message explicatif
+            # Mode OFF
             cache_key_info = 18
             if cache_key_info not in _font_cache:
                 _font_cache[cache_key_info] = pygame.font.Font(None, cache_key_info)
             infoFont = _font_cache[cache_key_info]
+            for j, line in enumerate(["Aucun stretch actif.",
+                                       "Selectionnez GHS, Arcsinh, Log ou MTF",
+                                       "avec le selecteur ci-dessus."]):
+                windowSurfaceObj.blit(infoFont.render(line, True, (120,120,130)),
+                                      (start_x, start_y + j * 20))
 
-            info_lines = [
-                "Le stretch est desactive.",
-                "Pour activer le stretch:",
-                "  - Utilisez le menu principal",
-                "  - Selectionnez GHS ou Arcsinh",
-                "",
-                "Les images stackees seront",
-                "sauvegardees sans stretch."
-            ]
-            for i, line in enumerate(info_lines):
-                info_text = infoFont.render(line, True, (120, 120, 130))
-                windowSurfaceObj.blit(info_text, (start_x, start_y + i * 20))
-
-        elif stretch_preset == 2:
-            # Mode Arcsinh
-            title = titleFont.render("Arcsinh Stretch Parameters", True, (200, 150, 100))
-            windowSurfaceObj.blit(title, (start_x, start_y))
-            start_y += 25
-
-            control_rects['stretch_factor'] = draw_raw_isp_slider(
-                start_x, start_y, slider_width, slider_height,
-                "Factor", stretch_factor / 10.0, 0.0, 150.0, (200, 160, 100)
-            )
-            control_rects['stretch_p_low'] = draw_raw_isp_slider(
-                start_x, start_y + slider_height + margin, slider_width, slider_height,
-                "Clip Low %", stretch_p_low / 10.0, 0.0, 2.0, (180, 140, 100)
-            )
-            control_rects['stretch_p_high'] = draw_raw_isp_slider(
-                start_x, start_y + 2*(slider_height + margin), slider_width, slider_height,
-                "Clip High %", stretch_p_high / 100.0, 99.5, 100.0, (100, 180, 140)
-            )
-
-            # Boutons RESET et SAVE pour stretch aussi
-            start_y += 3*(slider_height + margin) + 15
-            reset_rect, save_rect = draw_raw_action_buttons(start_x, start_y)
-            control_rects['reset'] = reset_rect
-            control_rects['save'] = save_rect
-        else:
-            # Mode GHS (stretch_preset == 1)
-            title = titleFont.render("GHS Stretch Parameters", True, (100, 200, 150))
-            windowSurfaceObj.blit(title, (start_x, start_y))
-            start_y += 25
-
+        elif stretch_preset == 1:
+            # Mode GHS
             control_rects['ghs_D'] = draw_raw_isp_slider(
                 start_x, start_y, slider_width, slider_height,
                 "D (Stretch)", ghs_D / 10.0, -1.0, 10.0, (100, 180, 140)
@@ -7092,9 +7228,64 @@ def draw_raw_controls(screen_width, screen_height, image_array=None):
                 start_x, start_y + 4*(slider_height + margin), slider_width, slider_height,
                 "HP (Highlights)", ghs_HP / 100.0, 0.0, 1.0, (180, 100, 140)
             )
-
-            # Boutons RESET et SAVE pour stretch aussi
             start_y += 5*(slider_height + margin) + 15
+            reset_rect, save_rect = draw_raw_action_buttons(start_x, start_y)
+            control_rects['reset'] = reset_rect
+            control_rects['save'] = save_rect
+
+        elif stretch_preset == 2:
+            # Mode Arcsinh
+            control_rects['stretch_factor'] = draw_raw_isp_slider(
+                start_x, start_y, slider_width, slider_height,
+                "Factor", stretch_factor / 10.0, 0.0, 150.0, (200, 160, 100)
+            )
+            control_rects['stretch_p_low'] = draw_raw_isp_slider(
+                start_x, start_y + slider_height + margin, slider_width, slider_height,
+                "Clip Low %", stretch_p_low / 10.0, 0.0, 2.0, (180, 140, 100)
+            )
+            control_rects['stretch_p_high'] = draw_raw_isp_slider(
+                start_x, start_y + 2*(slider_height + margin), slider_width, slider_height,
+                "Clip High %", stretch_p_high / 100.0, 99.5, 100.0, (100, 180, 140)
+            )
+            start_y += 3*(slider_height + margin) + 15
+            reset_rect, save_rect = draw_raw_action_buttons(start_x, start_y)
+            control_rects['reset'] = reset_rect
+            control_rects['save'] = save_rect
+
+        elif stretch_preset == 3:
+            # Mode Log
+            control_rects['log_factor'] = draw_raw_isp_slider(
+                start_x, start_y, slider_width, slider_height,
+                "Log Factor", log_factor, 0, 1000, (120, 170, 50)
+            )
+            control_rects['stretch_p_low'] = draw_raw_isp_slider(
+                start_x, start_y + slider_height + margin, slider_width, slider_height,
+                "Clip Low %", stretch_p_low / 10.0, 0.0, 2.0, (180, 140, 100)
+            )
+            control_rects['stretch_p_high'] = draw_raw_isp_slider(
+                start_x, start_y + 2*(slider_height + margin), slider_width, slider_height,
+                "Clip High %", stretch_p_high / 100.0, 99.5, 100.0, (100, 180, 140)
+            )
+            start_y += 3*(slider_height + margin) + 15
+            reset_rect, save_rect = draw_raw_action_buttons(start_x, start_y)
+            control_rects['reset'] = reset_rect
+            control_rects['save'] = save_rect
+
+        elif stretch_preset == 4:
+            # Mode MTF
+            control_rects['mtf_shadows'] = draw_raw_isp_slider(
+                start_x, start_y, slider_width, slider_height,
+                "Shadows", mtf_shadows / 100.0, 0.0, 0.5, (80, 120, 160)
+            )
+            control_rects['mtf_midtone'] = draw_raw_isp_slider(
+                start_x, start_y + slider_height + margin, slider_width, slider_height,
+                "Midtone", mtf_midtone / 100.0, 0.0, 1.0, (50, 160, 200)
+            )
+            control_rects['mtf_highlights'] = draw_raw_isp_slider(
+                start_x, start_y + 2*(slider_height + margin), slider_width, slider_height,
+                "Highlights", mtf_highlights / 100.0, 0.5, 1.0, (100, 200, 220)
+            )
+            start_y += 3*(slider_height + margin) + 15
             reset_rect, save_rect = draw_raw_action_buttons(start_x, start_y)
             control_rects['reset'] = reset_rect
             control_rects['save'] = save_rect
@@ -7145,6 +7336,7 @@ def handle_raw_slider_click(mousex, mousey, control_rects):
     global isp_brightness, isp_contrast, isp_saturation, isp_sharpening
     global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
     global stretch_factor, stretch_p_low, stretch_p_high
+    global log_factor, mtf_shadows, mtf_midtone, mtf_highlights
     global gain, ev, still_limits, custom_sspeed
 
     # Vérifier clic sur onglets
@@ -7153,8 +7345,15 @@ def handle_raw_slider_click(mousex, mousey, control_rects):
         return True
     if 'tab_stretch' in control_rects and control_rects['tab_stretch'].collidepoint(mousex, mousey):
         raw_adjust_tab = 1
-        # Ne plus activer automatiquement GHS - respecter le choix utilisateur OFF
         return True
+
+    # Vérifier clic sur les boutons de sélection de preset stretch
+    for i in range(5):
+        key = f'stretch_preset_{i}'
+        if key in control_rects and control_rects[key].collidepoint(mousex, mousey):
+            stretch_preset = i
+            save_config_to_file()
+            return True
 
     # Vérifier clic sur boutons RESET et SAVE
     if 'reset' in control_rects and control_rects['reset'].collidepoint(mousex, mousey):
@@ -7166,7 +7365,7 @@ def handle_raw_slider_click(mousex, mousey, control_rects):
 
     # Vérifier clic sur sliders
     for name, rect in control_rects.items():
-        if name.startswith('tab_') or name in ('reset', 'save'):
+        if name.startswith('tab_') or name.startswith('stretch_preset_') or name in ('reset', 'save'):
             continue
 
         if rect.collidepoint(mousex, mousey):
@@ -7182,9 +7381,7 @@ def handle_raw_slider_click(mousex, mousey, control_rects):
                 isp_wb_green = int(50 + ratio * 150)
             elif name == 'isp_wb_blue':
                 isp_wb_blue = int(50 + ratio * 150)
-            elif name == 'isp_gamma':
-                isp_gamma = int(50 + ratio * 250)  # 0.5-3.0 → 50-300
-            elif name == 'isp_black_level':
+            elif name == 'isp_black_level':  # isp_gamma supprimé — non pertinent pour données RAW linéaires
                 isp_black_level = int(ratio * 500)  # 0-500 direct
             elif name == 'isp_brightness':
                 isp_brightness = int(-50 + ratio * 100)  # -0.5-0.5 → -50-50
@@ -7208,13 +7405,24 @@ def handle_raw_slider_click(mousex, mousey, control_rects):
             # Sliders Arcsinh (onglet STRETCH mode Arcsinh)
             elif name == 'stretch_factor':
                 stretch_factor = int(ratio * 1500)  # 0.0-150.0 → 0-1500
-                print(f"[RAW ARCSINH] stretch_factor = {stretch_factor} (factor={stretch_factor/10.0})")
             elif name == 'stretch_p_low':
                 stretch_p_low = int(ratio * 20)  # 0.0-2.0 → 0-20
-                print(f"[RAW ARCSINH] stretch_p_low = {stretch_p_low}")
             elif name == 'stretch_p_high':
                 stretch_p_high = int(9950 + ratio * 50)  # 99.5-100.0 → 9950-10000
-                print(f"[RAW ARCSINH] stretch_p_high = {stretch_p_high}")
+            # Sliders Log
+            elif name == 'log_factor':
+                log_factor = int(ratio * 1000)
+                log_factor = max(0, min(1000, log_factor))
+            # Sliders MTF
+            elif name == 'mtf_shadows':
+                mtf_shadows = int(ratio * 50)
+                mtf_shadows = max(0, min(50, mtf_shadows))
+            elif name == 'mtf_midtone':
+                mtf_midtone = max(1, int(ratio * 99))
+                mtf_midtone = max(1, min(99, mtf_midtone))
+            elif name == 'mtf_highlights':
+                mtf_highlights = int(50 + ratio * 50)
+                mtf_highlights = max(50, min(100, mtf_highlights))
             # Sliders Gain et Exposition pour RAW
             elif name == 'raw_gain':
                 # Gain: 0 à 300 (0 = AUTO)
@@ -7257,6 +7465,7 @@ def apply_isp_to_session():
     global livestack, luckystack
     global isp_wb_red, isp_wb_green, isp_wb_blue, isp_gamma, isp_black_level
     global isp_brightness, isp_contrast, isp_saturation, isp_sharpening
+    global raw_format
 
     session = None
 
@@ -7275,7 +7484,8 @@ def apply_isp_to_session():
     config.wb_red_gain = isp_wb_red / 100.0       # 50-200 → 0.5-2.0
     config.wb_green_gain = isp_wb_green / 100.0   # 50-200 → 0.5-2.0
     config.wb_blue_gain = isp_wb_blue / 100.0     # 50-200 → 0.5-2.0
-    config.gamma = isp_gamma / 100.0              # 50-300 → 0.5-3.0 (100=1.0 linéaire)
+    # En mode RAW, gamma forcé à 1.0 (données linéaires — le stretch remplace le gamma)
+    config.gamma = 1.0 if raw_format >= 2 else isp_gamma / 100.0
     config.black_level = isp_black_level          # 0-500 direct
     config.brightness_offset = isp_brightness / 100.0  # -50-50 → -0.5-0.5
     config.contrast = isp_contrast / 100.0        # 50-200 → 0.5-2.0
@@ -7442,14 +7652,18 @@ def apply_isp_to_preview(array):
     """
     global isp_wb_red, isp_wb_green, isp_wb_blue, isp_gamma, isp_black_level
     global isp_brightness, isp_contrast, isp_saturation, isp_sharpening
+    global raw_format
 
     # Convertir les paramètres GUI en valeurs réelles (IDENTIQUE au mapping ISP)
     # IMPORTANT: Ces formules doivent être identiques à celles du mapping ISP config
     wb_r = isp_wb_red / 100.0         # 50-200 → 0.5-2.0
     wb_g = isp_wb_green / 100.0       # 50-200 → 0.5-2.0
     wb_b = isp_wb_blue / 100.0        # 50-200 → 0.5-2.0
-    gamma = isp_gamma / 100.0         # 50-300 → 0.5-3.0 (100=1.0 linéaire)
+    # En mode RAW, gamma forcé à 1.0 (données linéaires — le stretch remplace le gamma)
+    # En mode RGB/YUV, on utilise la valeur configurée
+    gamma = 1.0 if raw_format >= 2 else isp_gamma / 100.0
     black_level = isp_black_level     # 0-500 direct
+    # brightness=0 (isp_brightness=0) → offset=0.0 → aucun impact (if brightness != 0.0 est False)
     brightness = isp_brightness / 100.0  # -50-50 → -0.5-0.5
     contrast = isp_contrast / 100.0   # 50-200 → 0.5-2.0
     saturation = isp_saturation / 100.0  # 0-200 → 0.0-2.0
@@ -7928,6 +8142,7 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
     global jsk_hdr_methods, jsk_denoise_types, jsk_hdr_weights
     global stretch_preset, ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
     global stretch_factor
+    global log_factor, mtf_shadows, mtf_midtone, mtf_highlights
     global jsk_color_enabled, jsk_r_gain, jsk_g_gain, jsk_b_gain, jsk_contrast
     global jsk_settings_tab
 
@@ -8050,10 +8265,10 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
         windowSurfaceObj.blit(section, (panel_x, start_y))
         start_y += 16
 
-        stretch_names = ['OFF', 'GHS', 'Arcsinh']
+        stretch_names = ['OFF', 'GHS', 'Arcsinh', 'Log', 'MTF']
         control_rects['jsk_stretch_preset'] = draw_jsk_slider(
             panel_x, start_y, slider_width, slider_height,
-            f"Preset: {stretch_names[stretch_preset]}", stretch_preset, 0, 2, (160, 140, 180)
+            f"Preset: {stretch_names[min(stretch_preset, 4)]}", stretch_preset, 0, 4, (160, 140, 180)
         )
         start_y += slider_height + margin
 
@@ -8091,6 +8306,30 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
             control_rects['jsk_stretch_factor'] = draw_jsk_slider(
                 panel_x, start_y, slider_width, slider_height,
                 f"Factor: {stretch_factor/10:.1f}", stretch_factor, 0, 1000, (200, 160, 100)
+            )
+
+        elif stretch_preset == 3:
+            control_rects['jsk_log_factor'] = draw_jsk_slider(
+                panel_x, start_y, slider_width, slider_height,
+                f"Log Factor: {log_factor}", log_factor, 0, 1000, (120, 170, 50)
+            )
+
+        elif stretch_preset == 4:
+            control_rects['jsk_mtf_shadows'] = draw_jsk_slider(
+                panel_x, start_y, slider_width, slider_height,
+                f"Shadows: {mtf_shadows/100:.2f}", mtf_shadows, 0, 50, (80, 120, 160)
+            )
+            start_y += slider_height + margin
+
+            control_rects['jsk_mtf_midtone'] = draw_jsk_slider(
+                panel_x, start_y, slider_width, slider_height,
+                f"Midtone: {mtf_midtone/100:.2f}", mtf_midtone, 1, 99, (50, 160, 200)
+            )
+            start_y += slider_height + margin
+
+            control_rects['jsk_mtf_highlights'] = draw_jsk_slider(
+                panel_x, start_y, slider_width, slider_height,
+                f"Highlights: {mtf_highlights/100:.2f}", mtf_highlights, 50, 100, (100, 200, 220)
             )
 
     else:
@@ -8656,7 +8895,7 @@ def draw_home_top_icons(sw, sh, settings_on, hist_on, binning_on, windowed_on=0)
 
 
 def draw_home_left_modes(sw, sh):
-    """Dessine les 4 boutons de modes sur le bord gauche."""
+    """Dessine les boutons de modes sur le bord gauche."""
     global windowSurfaceObj, _font_cache
     rects = {}
     btn_w, btn_h, step = 78, 32, 42
@@ -8668,28 +8907,69 @@ def draw_home_left_modes(sw, sh):
     f = _font_cache[ck]
 
     modes = [
-        ('mode_livestack', "LIVE", "STACK",   (50, 80, 120)),
-        ('mode_lucky',     "LUCKY","STACK",   (80, 50, 100)),
-        ('mode_stretch',   "STRETCH","",      (60, 80, 60)),
-        ('mode_focus',     "FOCUS", "",       (80, 70, 40)),
+        ('mode_livestack', "LIVE",    "STACK", (50, 80, 120)),
+        ('mode_lucky',     None,      None,    None),          # traité séparément
+        ('mode_stretch',   "STRETCH", "",      (60, 80, 60)),
+        ('mode_focus',     "FOCUS",   "",      (80, 70, 40)),
     ]
     for i, (key, line1, line2, bg) in enumerate(modes):
-        bx = 5
         by = start_y + i * step
-        r = pygame.Rect(bx, by, btn_w, btn_h)
-        s = pygame.Surface((btn_w, btn_h), pygame.SRCALPHA)
-        s.fill((*bg, 200))
-        windowSurfaceObj.blit(s, (bx, by))
-        pygame.draw.rect(windowSurfaceObj, (min(bg[0]+40,255), min(bg[1]+40,255), min(bg[2]+40,255)), r, 1, border_radius=5)
-        if line2:
-            l1 = f.render(line1, True, (230, 230, 230))
-            l2 = f.render(line2, True, (200, 200, 200))
-            windowSurfaceObj.blit(l1, l1.get_rect(centerx=r.centerx, centery=by + btn_h//2 - 8))
-            windowSurfaceObj.blit(l2, l2.get_rect(centerx=r.centerx, centery=by + btn_h//2 + 8))
+
+        if key == 'mode_lucky':
+            # Deux boutons côte à côte : LUCKY RGB8  |  LUCKY RAW
+            half_w = 37
+            gap    = 4
+
+            # ── Bouton gauche : LUCKY RGB8 ──────────────────────────────────
+            bg1 = (80, 50, 100)
+            bx1 = 5
+            r1  = pygame.Rect(bx1, by, half_w, btn_h)
+            s1  = pygame.Surface((half_w, btn_h), pygame.SRCALPHA)
+            s1.fill((*bg1, 200))
+            windowSurfaceObj.blit(s1, (bx1, by))
+            pygame.draw.rect(windowSurfaceObj,
+                             (min(bg1[0]+40,255), min(bg1[1]+40,255), min(bg1[2]+40,255)),
+                             r1, 1, border_radius=4)
+            ll1 = f.render("LUCKY", True, (220, 200, 255))
+            windowSurfaceObj.blit(ll1, ll1.get_rect(centerx=r1.centerx, centery=by + btn_h//2 - 8))
+            lrgb = f.render("RGB8", True, (90, 255, 155))
+            windowSurfaceObj.blit(lrgb, lrgb.get_rect(centerx=r1.centerx, centery=by + btn_h//2 + 8))
+            rects['mode_lucky'] = r1
+
+            # ── Bouton droit : LUCKY RAW ─────────────────────────────────────
+            bg2 = (100, 58, 22)
+            bx2 = bx1 + half_w + gap
+            r2  = pygame.Rect(bx2, by, half_w, btn_h)
+            s2  = pygame.Surface((half_w, btn_h), pygame.SRCALPHA)
+            s2.fill((*bg2, 200))
+            windowSurfaceObj.blit(s2, (bx2, by))
+            pygame.draw.rect(windowSurfaceObj,
+                             (min(bg2[0]+40,255), min(bg2[1]+40,255), min(bg2[2]+40,255)),
+                             r2, 1, border_radius=4)
+            ll2 = f.render("LUCKY", True, (255, 220, 190))
+            windowSurfaceObj.blit(ll2, ll2.get_rect(centerx=r2.centerx, centery=by + btn_h//2 - 8))
+            lraw = f.render("RAW", True, (255, 165, 50))
+            windowSurfaceObj.blit(lraw, lraw.get_rect(centerx=r2.centerx, centery=by + btn_h//2 + 8))
+            rects['mode_lucky_raw'] = r2
+
         else:
-            l1 = f.render(line1, True, (230, 230, 230))
-            windowSurfaceObj.blit(l1, l1.get_rect(center=r.center))
-        rects[key] = r
+            bx = 5
+            r  = pygame.Rect(bx, by, btn_w, btn_h)
+            s  = pygame.Surface((btn_w, btn_h), pygame.SRCALPHA)
+            s.fill((*bg, 200))
+            windowSurfaceObj.blit(s, (bx, by))
+            pygame.draw.rect(windowSurfaceObj,
+                             (min(bg[0]+40,255), min(bg[1]+40,255), min(bg[2]+40,255)),
+                             r, 1, border_radius=5)
+            if line2:
+                l1 = f.render(line1, True, (230, 230, 230))
+                l2 = f.render(line2, True, (200, 200, 200))
+                windowSurfaceObj.blit(l1, l1.get_rect(centerx=r.centerx, centery=by + btn_h//2 - 8))
+                windowSurfaceObj.blit(l2, l2.get_rect(centerx=r.centerx, centery=by + btn_h//2 + 8))
+            else:
+                l1 = f.render(line1, True, (230, 230, 230))
+                windowSurfaceObj.blit(l1, l1.get_rect(center=r.center))
+            rects[key] = r
     return rects
 
 
@@ -9969,7 +10249,7 @@ def handle_home_click(mx, my):
             return True
 
         elif key == 'mode_lucky':
-            # Entrer dans le mode interface Lucky Stack
+            # Entrer dans le mode interface Lucky Stack (RGB8)
             if not luckystack_active and lucky_interface_mode == 0:
                 stretch_mode = 1
                 display_modes = pygame.display.list_modes()
@@ -9987,7 +10267,12 @@ def handle_home_click(mx, my):
                 _lucky_slider_rects = {}
                 _lucky_slider_dragging = False
                 _lucky_ge_dragging = None
-                print("[HOME] Mode interface Lucky Stack activé")
+                print("[HOME] Mode interface Lucky Stack RGB8 activé")
+            return True
+
+        elif key == 'mode_lucky_raw':
+            # Fonction future : Lucky Stack en mode RAW
+            print("[HOME] Lucky Stack RAW — fonction à venir")
             return True
 
         elif key == 'mode_stretch':
@@ -10190,6 +10475,7 @@ def handle_jsk_slider_click(mousex, mousey, control_rects):
     global jsk_denoise_type, jsk_denoise_strength, jsk_hdr_weights
     global stretch_preset, ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
     global stretch_factor
+    global log_factor, mtf_shadows, mtf_midtone, mtf_highlights
     global jsk_processor
     global jsk_color_enabled, jsk_r_gain, jsk_g_gain, jsk_b_gain, jsk_contrast
     global jsk_settings_tab
@@ -10222,8 +10508,8 @@ def handle_jsk_slider_click(mousex, mousey, control_rects):
                 jsk_denoise_strength = int(1 + ratio * 9)
                 jsk_denoise_strength = max(1, min(10, jsk_denoise_strength))
             elif name == 'jsk_stretch_preset':
-                stretch_preset = int(ratio * 2)
-                stretch_preset = max(0, min(2, stretch_preset))
+                stretch_preset = int(ratio * 4)
+                stretch_preset = max(0, min(4, stretch_preset))
             elif name == 'jsk_ghs_D':
                 ghs_D = int(-10 + ratio * 110)
                 ghs_D = max(-10, min(100, ghs_D))
@@ -10242,6 +10528,18 @@ def handle_jsk_slider_click(mousex, mousey, control_rects):
             elif name == 'jsk_stretch_factor':
                 stretch_factor = int(ratio * 1000)
                 stretch_factor = max(0, min(1000, stretch_factor))
+            elif name == 'jsk_log_factor':
+                log_factor = int(ratio * 1000)
+                log_factor = max(0, min(1000, log_factor))
+            elif name == 'jsk_mtf_shadows':
+                mtf_shadows = int(ratio * 50)
+                mtf_shadows = max(0, min(50, mtf_shadows))
+            elif name == 'jsk_mtf_midtone':
+                mtf_midtone = max(1, int(ratio * 99))
+                mtf_midtone = max(1, min(99, mtf_midtone))
+            elif name == 'jsk_mtf_highlights':
+                mtf_highlights = int(50 + ratio * 50)
+                mtf_highlights = max(50, min(100, mtf_highlights))
             elif name.startswith('jsk_hdr_w'):
                 idx = int(name[-1])
                 jsk_hdr_weights[idx] = int(ratio * 100)
@@ -13247,6 +13545,7 @@ def astro_stretch(array):
     """
     global stretch_preset, stretch_p_low, stretch_p_high, stretch_factor
     global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
+    global log_factor, mtf_shadows, mtf_midtone, mtf_highlights
 
     if stretch_preset == 0:
         # OFF - pas de stretch
@@ -13308,6 +13607,65 @@ def astro_stretch(array):
             img_stretched = (img_stretched * 255.0).astype(np.uint8)
 
         return img_stretched
+
+    elif stretch_preset == 3:
+        # Log stretch
+        input_dtype = array.dtype
+        input_is_float = np.issubdtype(input_dtype, np.floating)
+        img_float = array.astype(np.float32)
+
+        p_low = np.percentile(img_float, stretch_p_low / 10.0)
+        p_high = np.percentile(img_float, stretch_p_high / 100.0)
+        if p_high - p_low < 1:
+            return array
+
+        img_norm = np.clip((img_float - p_low) / (p_high - p_low), 0, 1)
+
+        factor = float(log_factor)
+        if factor > 0.01:
+            log_denom = np.log1p(factor)
+            if log_denom > 1e-10:
+                img_stretched = np.log1p(img_norm * factor) / log_denom
+            else:
+                img_stretched = img_norm
+        else:
+            img_stretched = img_norm
+
+        if input_is_float:
+            return (img_stretched * 255.0).astype(np.float32)
+        else:
+            return (img_stretched * 255.0).astype(np.uint8)
+
+    elif stretch_preset == 4:
+        # MTF stretch (Midtone Transfer Function PixInsight)
+        input_dtype = array.dtype
+        input_is_float = np.issubdtype(input_dtype, np.floating)
+        img_float = array.astype(np.float32)
+
+        p_low = np.percentile(img_float, 0.5)
+        p_high = np.percentile(img_float, 99.5)
+        if p_high - p_low < 1:
+            return array
+
+        img_norm = np.clip((img_float - p_low) / (p_high - p_low), 0, 1)
+
+        s = mtf_shadows / 100.0
+        h = mtf_highlights / 100.0
+        m = mtf_midtone / 100.0
+        img_clip = np.clip((img_norm - s) / max(h - s, 1e-6), 0, 1)
+
+        # Formule MTF PixInsight : M(x, m) = (m-1)*x / ((2m-1)*x - m)
+        denom = (2 * m - 1) * img_clip - m
+        mask = np.abs(denom) > 1e-10
+        stretched = np.where(mask, (m - 1) * img_clip / denom, 0.0)
+        stretched = np.where(img_clip == 0, 0.0, stretched)
+        stretched = np.where(img_clip == 1, 1.0, stretched)
+        stretched = np.clip(stretched, 0, 1)
+
+        if input_is_float:
+            return (stretched * 255.0).astype(np.float32)
+        else:
+            return (stretched * 255.0).astype(np.uint8)
 
     else:
         return array
@@ -14292,6 +14650,12 @@ def save_config_to_file():
     config[96] = fix_bad_pixels_min_adu
     config[97] = allsky_stack_enable
     config[98] = allsky_stack_count
+    while len(config) < len(titles):
+        config.append(0)
+    config[100] = log_factor
+    config[101] = mtf_shadows
+    config[102] = mtf_midtone
+    config[103] = mtf_highlights
     with open(config_file, 'w') as f:
         for item in range(0, len(titles)):
             f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -16780,7 +17144,7 @@ while True:
                         lucky_align_mode=ls_lucky_align,
                         lucky_score_roi_percent=float(ls_lucky_roi),
                         lucky_max_shift=float(ls_lucky_max_shift),
-                        png_stretch=['off', 'ghs', 'asinh'][stretch_preset],
+                        png_stretch=['off', 'ghs', 'asinh', 'log', 'mtf'][min(stretch_preset, 4)],
                         png_factor=stretch_factor / 10.0,
                         png_clip_low=0.0 if stretch_preset == 1 else stretch_p_low / 10.0,
                         png_clip_high=100.0 if stretch_preset == 1 else stretch_p_high / 100.0,
@@ -16789,6 +17153,10 @@ while True:
                         ghs_SP=ghs_SP / 100.0,
                         ghs_LP=ghs_LP / 100.0,
                         ghs_HP=ghs_HP / 100.0,
+                        log_factor=float(log_factor),
+                        mtf_midtone=mtf_midtone / 100.0,
+                        mtf_shadows=mtf_shadows / 100.0,
+                        mtf_highlights=mtf_highlights / 100.0,
                         preview_refresh=ls_preview_refresh,
                     )
                     _vfmt_map = {0: 'yuv420', 1: 'xrgb8888', 2: 'raw12', 3: 'raw16'}
@@ -17057,7 +17425,7 @@ while True:
                         lucky_align_mode=ls_lucky_align,
                         lucky_score_roi_percent=float(ls_lucky_roi),
                         lucky_max_shift=float(ls_lucky_max_shift),
-                        png_stretch=['off', 'ghs', 'asinh'][stretch_preset],
+                        png_stretch=['off', 'ghs', 'asinh', 'log', 'mtf'][min(stretch_preset, 4)],
                         png_factor=stretch_factor / 10.0,
                         png_clip_low=0.0 if stretch_preset == 1 else stretch_p_low / 10.0,
                         png_clip_high=100.0 if stretch_preset == 1 else stretch_p_high / 100.0,
@@ -17066,6 +17434,10 @@ while True:
                         ghs_SP=ghs_SP / 100.0,
                         ghs_LP=ghs_LP / 100.0,
                         ghs_HP=ghs_HP / 100.0,
+                        log_factor=float(log_factor),
+                        mtf_midtone=mtf_midtone / 100.0,
+                        mtf_shadows=mtf_shadows / 100.0,
+                        mtf_highlights=mtf_highlights / 100.0,
                         preview_refresh=ls_preview_refresh,
                     )
                     luckystack.configure(
