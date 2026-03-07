@@ -255,8 +255,19 @@ class JSKLiveProcessor:
         self.denoise_type = 0      # 0=OFF, 1=Bilateral, 2=NLM, 3=Gaussian, 4=Median
         self.denoise_strength = 5  # 1-10
         self.hdr_weights = [100, 100, 100, 100, 100, 100]  # Poids HDR par niveau de bit (0-100)
-        self.bayer_pattern = cv2.COLOR_BayerRG2RGB
+        self.bayer_pattern = cv2.COLOR_BayerRG2BGR
         self.crop_square = False   # True = crop carré 1080×1080 centré avant traitement
+
+        # Couleur & Contraste (LUT par canal pour perf maximale)
+        self.color_enabled = False # True = actif
+        self.r_gain = 1.0          # 0.5-2.0 (1.0 = neutre)
+        self.g_gain = 1.0
+        self.b_gain = 1.0
+        self.contrast = 1.0        # 0.5-2.0 (1.0 = neutre)
+        self._lut_dirty = True     # Recalculer les LUT au prochain appel
+        self._lut_r = None
+        self._lut_g = None
+        self._lut_b = None
 
         # Buffer pour le stacking
         self.frame_buffer = []
@@ -283,6 +294,42 @@ class JSKLiveProcessor:
             self.bayer_pattern = kwargs['bayer_pattern']
         if 'crop_square' in kwargs:
             self.crop_square = bool(kwargs['crop_square'])
+        # Couleur & Contraste — marquer LUT comme à recalculer si paramètre changé
+        if 'color_enabled' in kwargs:
+            self.color_enabled = bool(kwargs['color_enabled'])
+        if 'r_gain' in kwargs:
+            self.r_gain = max(0.5, min(2.0, float(kwargs['r_gain'])))
+            self._lut_dirty = True
+        if 'g_gain' in kwargs:
+            self.g_gain = max(0.5, min(2.0, float(kwargs['g_gain'])))
+            self._lut_dirty = True
+        if 'b_gain' in kwargs:
+            self.b_gain = max(0.5, min(2.0, float(kwargs['b_gain'])))
+            self._lut_dirty = True
+        if 'contrast' in kwargs:
+            self.contrast = max(0.5, min(2.0, float(kwargs['contrast'])))
+            self._lut_dirty = True
+
+    def _build_luts(self):
+        """Précalcule les LUT R/G/B (contraste + gain canal). Très rapide."""
+        x = np.arange(256, dtype=np.float32)
+        # Contraste autour du point médian 128
+        x = (x - 128.0) * self.contrast + 128.0
+        self._lut_r = np.clip(x * self.r_gain, 0, 255).astype(np.uint8)
+        self._lut_g = np.clip(x * self.g_gain, 0, 255).astype(np.uint8)
+        self._lut_b = np.clip(x * self.b_gain, 0, 255).astype(np.uint8)
+        self._lut_dirty = False
+
+    def apply_color_contrast(self, image):
+        """Applique la correction couleur/contraste via LUT (quasi sans coût CPU)."""
+        if not self.color_enabled:
+            return image
+        if self._lut_dirty:
+            self._build_luts()
+        r = cv2.LUT(image[:, :, 0], self._lut_r)
+        g = cv2.LUT(image[:, :, 1], self._lut_g)
+        b = cv2.LUT(image[:, :, 2], self._lut_b)
+        return cv2.merge([r, g, b])
 
     def clear_buffer(self):
         """Vide le buffer de frames."""
@@ -356,6 +403,9 @@ class JSKLiveProcessor:
 
         # 4. Denoise
         result = apply_denoise(stacked, self.denoise_type, self.denoise_strength)
+
+        # 5. Couleur & Contraste (LUT, impact CPU négligeable)
+        result = self.apply_color_contrast(result)
 
         return result
 

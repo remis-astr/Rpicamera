@@ -49,6 +49,7 @@ from collections import deque
 import time
 import threading
 import gc  # Pour forcer libération mémoire après process_buffer
+import heapq  # Pour ElitePool (min-heap O(log N))
 from concurrent.futures import ThreadPoolExecutor
 
 # Aligneur planétaire optionnel (disk/hybrid modes)
@@ -81,6 +82,12 @@ class StackMethod(Enum):
     MEAN = "mean"                 # Moyenne simple
     MEDIAN = "median"             # Médiane (plus robuste)
     SIGMA_CLIP = "sigma_clip"     # Moyenne avec rejection sigma
+
+
+class BufferMode(Enum):
+    """Mode du buffer Lucky Stack"""
+    RING  = "ring"   # Buffer circulaire classique (sélection top%, stack sur remplissage)
+    ELITE = "elite"  # Pool des N meilleures frames (stack périodique, RGB8 uniquement)
 
 
 @dataclass
@@ -126,7 +133,15 @@ class LuckyConfig:
     # Statistiques
     keep_history: bool = True           # Garder historique des scores
     history_size: int = 1000            # Taille max de l'historique
-    
+
+    # ── Mode Pool Élite (buffer_mode=ELITE, RGB8 uniquement) ─────────────────
+    buffer_mode: BufferMode = BufferMode.RING  # RING=classique, ELITE=pool évolutif
+    elite_pool_size: int = 100          # Taille du pool (20-300)
+    elite_stack_interval: float = 5.0  # Intervalle de stack en secondes (2-15)
+    elite_entry_mode: str = "min"       # "min" (> pire frame) ou "mean" (> moyenne pool)
+    elite_score_clip: bool = True       # Sigma-clipping des scores avant stack
+    elite_score_kappa: float = 2.0      # Kappa pour le sigma-clipping des scores (1.5-4.0)
+
     def validate(self) -> bool:
         """Valide la configuration"""
         errors = []
@@ -270,6 +285,143 @@ class FrameBuffer:
     
     def __len__(self) -> int:
         return len(self.frames)
+
+
+class ElitePool:
+    """
+    Pool des N meilleures frames basé sur un min-heap.
+
+    Propriétés :
+    - Insertion O(log N), accès au minimum O(1)
+    - Une frame ne peut entrer que si elle améliore le seuil (min ou mean)
+    - Sigma-clipping des scores pour le stack (get_frames_clipped)
+    - Thread-safe via RLock
+    """
+
+    def __init__(self, max_size: int = 100, entry_mode: str = "min"):
+        """
+        Args:
+            max_size:   Taille maximale du pool (20-300)
+            entry_mode: "min" (> score le plus bas) ou "mean" (> score moyen)
+        """
+        self._max_size   = max_size
+        self._entry_mode = entry_mode          # "min" | "mean"
+        self._heap: List[Tuple[float, int, np.ndarray]] = []  # min-heap (score, counter, frame)
+        self._counter    = 0
+        self._lock       = threading.RLock()  # RLock pour appels imbriqués dans propriétés
+        self._frames_tested   = 0
+        self._frames_accepted = 0
+
+    # ── Propriétés ────────────────────────────────────────────────────────────
+
+    @property
+    def size(self) -> int:
+        return len(self._heap)
+
+    @property
+    def is_full(self) -> bool:
+        return len(self._heap) >= self._max_size
+
+    @property
+    def min_score(self) -> float:
+        return self._heap[0][0] if self._heap else 0.0
+
+    @property
+    def mean_score(self) -> float:
+        if not self._heap:
+            return 0.0
+        return sum(s for s, _, _ in self._heap) / len(self._heap)
+
+    @property
+    def max_score(self) -> float:
+        if not self._heap:
+            return 0.0
+        return max(s for s, _, _ in self._heap)
+
+    @property
+    def accept_rate(self) -> float:
+        if self._frames_tested == 0:
+            return 0.0
+        return self._frames_accepted / self._frames_tested * 100.0
+
+    # ── Méthodes ──────────────────────────────────────────────────────────────
+
+    def try_add(self, score: float, frame: np.ndarray) -> bool:
+        """Essaie d'insérer une frame. Retourne True si acceptée."""
+        with self._lock:
+            self._frames_tested += 1
+
+            if len(self._heap) < self._max_size:
+                heapq.heappush(self._heap, (score, self._counter, frame.copy()))
+                self._counter += 1
+                self._frames_accepted += 1
+                return True
+
+            # Pool plein : comparer au seuil
+            if self._entry_mode == "mean":
+                threshold = sum(s for s, _, _ in self._heap) / len(self._heap)
+            else:
+                threshold = self._heap[0][0]   # min score (O(1))
+
+            if score > threshold:
+                heapq.heapreplace(self._heap, (score, self._counter, frame.copy()))
+                self._counter += 1
+                self._frames_accepted += 1
+                return True
+
+            return False
+
+    def get_frames_and_scores(self) -> List[Tuple[float, np.ndarray]]:
+        """Retourne [(score, frame), ...] (copies) pour stacking. Thread-safe."""
+        with self._lock:
+            return [(s, f.copy()) for s, _, f in self._heap]
+
+    def get_frames_clipped(self, kappa: float = 2.0) -> Tuple[List[np.ndarray], int]:
+        """
+        Sigma-clipping des scores avant stack.
+        Retourne (frames_retenues, n_clippées).
+        Les frames dont le score < mean - kappa*std sont exclues.
+        """
+        with self._lock:
+            n = len(self._heap)
+            if n < 3:
+                return [f for _, _, f in self._heap], 0
+
+            scores = np.array([s for s, _, _ in self._heap], dtype=np.float64)
+            mean_s = scores.mean()
+            std_s  = scores.std()
+
+            if std_s < 1e-9:   # Pool uniforme → garder tout
+                return [f for _, _, f in self._heap], 0
+
+            threshold = mean_s - kappa * std_s
+            kept      = [f for s, _, f in self._heap if s >= threshold]
+            n_clipped = n - len(kept)
+            return kept, n_clipped
+
+    def resize(self, new_size: int):
+        """Change la taille max du pool à la volée.
+        Si réduction : élimine les pires frames jusqu'à la nouvelle limite.
+        Si agrandissement : autorise simplement plus de frames à l'avenir.
+        """
+        with self._lock:
+            if new_size == self._max_size:
+                return
+            self._max_size = new_size
+            # Réduction : heappop retire toujours la pire frame (min-heap)
+            while len(self._heap) > self._max_size:
+                heapq.heappop(self._heap)
+
+    def update_entry_mode(self, mode: str):
+        """Change le critère d'entrée à la volée ("min" ou "mean")."""
+        self._entry_mode = mode
+
+    def clear(self):
+        """Vide le pool et réinitialise les compteurs."""
+        with self._lock:
+            self._heap.clear()
+            self._frames_tested   = 0
+            self._frames_accepted = 0
 
 
 class QualityScorer:
@@ -680,7 +832,8 @@ class LuckyImagingStacker:
     def stop(self):
         """Arrête le stacker"""
         self.is_running = False
-        self.executor.shutdown(wait=False)
+        # wait=True : s'assurer que tous les futures en cours sont terminés avant de libérer
+        self.executor.shutdown(wait=True)
         print(f"[LUCKY] Arrêté - Frames: {self.total_frames_processed}, "
               f"Stacks: {self.total_stacks_done}")
 
@@ -917,13 +1070,30 @@ class LuckyImagingStacker:
 
         align_mode = getattr(self.config, 'align_mode', 1 if self.config.align_enabled else 0)
 
-        if align_mode in (2, 3) and _HAS_PLANETARY:
-            # Disk/Hybrid : PlanetaryAligner auto-set référence sur le 1er appel
-            aligned = []
-            for frame in frames:
-                aligned_frame, params = self.aligner.align(frame)
-                aligned.append(aligned_frame)
-            return aligned
+        if align_mode in (2, 3):
+            if not _HAS_PLANETARY:
+                # Fallback silencieux vers mode 1 — loggé une seule fois
+                if not hasattr(self, '_logged_planetary_fallback'):
+                    print("[LUCKY ALIGN] ⚠ Mode disk/hybrid sélectionné mais PlanetaryAligner "
+                          "non disponible — fallback mode 1 (phase correlation)")
+                    self._logged_planetary_fallback = True
+                # Laisser tomber vers le bloc mode 1 ci-dessous
+            else:
+                # Disk/Hybrid : PlanetaryAligner auto-set référence sur le 1er appel
+                aligned = []
+                failed_count = 0
+                for frame in frames:
+                    aligned_frame, params = self.aligner.align(frame)
+                    if params.get('align_failed', False):
+                        failed_count += 1
+                        # Frame non alignée : exclus du stack pour ne pas le dégrader
+                    else:
+                        aligned.append(aligned_frame)
+                if failed_count > 0:
+                    print(f"[LUCKY ALIGN] {failed_count}/{len(frames)} frames rejetées "
+                          f"(align_failed) — seuil max_shift ou corrélation trop faible")
+                # Si toutes les frames ont échoué, fallback sur frames originales non alignées
+                return aligned if aligned else list(frames)
 
         # Mode 1 (surface/phase) — logique d'origine
         if not self.aligner.reference_is_explicit:
@@ -1008,12 +1178,19 @@ class LuckyImagingStacker:
     
     def get_result(self) -> Optional[np.ndarray]:
         """
-        Retourne le dernier résultat stacké (et le vide)
-        Pattern 'pop': chaque résultat n'est retourné qu'une seule fois
+        Retourne le dernier résultat stacké.
+
+        Non-destructif : last_result est conservé pour get_preview() et les appels
+        successifs. Utiliser total_stacks_done ou le compteur externe pour détecter
+        si un nouveau résultat est disponible (pattern déjà utilisé dans
+        rpicamera_livestack_advanced.process_frame via _last_stacks_count).
+
+        Returns:
+            Copie du dernier résultat stacké, ou None si aucun stack effectué.
         """
-        result = self.last_result
-        self.last_result = None  # Vider après récupération
-        return result
+        if self.last_result is None:
+            return None
+        return self.last_result.copy()
     
     def get_preview(self, as_uint8: bool = True) -> Optional[np.ndarray]:
         """
@@ -1072,7 +1249,7 @@ class LuckyImagingStacker:
                 self.config.buffer_size = new_size
                 self.buffer = FrameBuffer(new_size)
                 print(f"[DEBUG LUCKY_IMAGING] ✓ Buffer recréé: {old_buffer_size} → {new_size} images")
-                print(f"[DEBUG LUCKY_IMAGING] Nouveau buffer capacity: {self.buffer.capacity}")
+                print(f"[DEBUG LUCKY_IMAGING] Nouveau buffer capacity: {self.buffer.max_size}")
             else:
                 print(f"[DEBUG LUCKY_IMAGING] Taille inchangée ({new_size}), buffer non recréé")
         
@@ -1183,6 +1360,331 @@ class LuckyImagingStacker:
             'selection_threshold': 0.0,
         }
         print("[LUCKY] Reset")
+
+
+# =============================================================================
+# Pool Élite — stacker alternatif (RGB8 uniquement)
+# =============================================================================
+
+class ElitePoolStacker:
+    """
+    Mode 'Pool Élite' pour Lucky Stack RGB8.
+
+    Différences avec LuckyImagingStacker :
+    - Buffer fixe : les N meilleures frames sont conservées indéfiniment.
+    - Entrée conditionnelle : une frame ne remplace une autre que si son score
+      est supérieur au seuil (min ou mean du pool).
+    - Alignement à l'entrée sur une référence fixe (choisie après warmup).
+    - Stack périodique (timer background), pas déclenché par le remplissage.
+    - Sigma-clipping des scores optionnel avant chaque stack.
+    - RGB8/YUV uniquement (pas de normalisation RAW).
+
+    API compatible avec LuckyImagingStacker pour intégration transparente
+    dans rpicamera_livestack_advanced.py.
+    """
+
+    def __init__(self, config: Optional['LuckyConfig'] = None):
+        self.config = config if config else LuckyConfig()
+
+        # Pool min-heap
+        self._pool = ElitePool(
+            max_size   = self.config.elite_pool_size,
+            entry_mode = self.config.elite_entry_mode,
+        )
+
+        # Scorer et aligner (réutilisent l'infrastructure existante)
+        self.scorer  = QualityScorer(self.config)
+        self.aligner = FrameAligner(self.config)
+
+        # Warmup : accumulation pour choisir la référence d'alignement
+        self._warmup_frames: List[Tuple[float, np.ndarray]] = []
+        self._warmup_needed  = max(5, min(20, self.config.elite_pool_size // 5))
+        self._reference_ready = False
+
+        # État
+        self._is_running = False
+        self._phase      = "waiting"   # "waiting" | "filling" | "active"
+        self.total_frames_processed = 0
+        self.total_stacks_done      = 0
+        self._frames_accepted       = 0
+
+        # Résultat
+        self.last_result: Optional[np.ndarray] = None
+        self._result_lock    = threading.Lock()
+        self._last_stack_time: float = 0.0
+        self._last_clipped_count: int = 0
+
+        # Thread de stack périodique
+        self._stop_event  = threading.Event()
+        self._stack_now   = threading.Event()
+        self._stack_thread: Optional[threading.Thread] = None
+
+        # Stats (clés compatibles LuckyImagingStacker + clés elite)
+        self.stats: Dict[str, Any] = {
+            'buffer_fill':   0,
+            'buffer_size':   self.config.elite_pool_size,
+            'avg_score':     0.0,
+            'stacks_done':   0,
+            'frames_selected': 0,
+            'buffer_mode':   'elite',
+            'phase':         'waiting',
+        }
+
+    # ── Cycle de vie ──────────────────────────────────────────────────────────
+
+    def start(self):
+        self._is_running = True
+        self._phase      = "filling"
+        self._stop_event.clear()
+        self._last_stack_time = time.time()
+        self._stack_thread = threading.Thread(
+            target=self._stack_loop, name="ElitePoolStack", daemon=True
+        )
+        self._stack_thread.start()
+        print(f"[ELITE POOL] Démarré — pool={self.config.elite_pool_size} frames, "
+              f"intervalle={self.config.elite_stack_interval}s, "
+              f"critère={'moyenne' if self.config.elite_entry_mode == 'mean' else 'minimum'}, "
+              f"warmup={self._warmup_needed} frames")
+
+    def stop(self):
+        self._is_running = False
+        self._stop_event.set()
+        self._stack_now.set()
+        if self._stack_thread is not None:
+            self._stack_thread.join(timeout=5.0)
+        print(f"[ELITE POOL] Arrêté — Frames: {self.total_frames_processed}, "
+              f"Stacks: {self.total_stacks_done}")
+
+    def reset(self):
+        """Vide le pool et choisit une nouvelle référence d'alignement."""
+        self._pool.clear()
+        self._warmup_frames   = []
+        self._reference_ready = False
+        self._phase           = "filling"
+        self._frames_accepted = 0
+        self._last_stack_time = time.time()
+        # Supprimer la référence (même si explicite)
+        self.aligner.reference             = None
+        self.aligner.reference_is_explicit = False
+        self.aligner.reset()
+        with self._result_lock:
+            self.last_result = None
+        print("[ELITE POOL] Pool réinitialisé — nouvelle référence à choisir")
+
+    # ── Ajout de frames ───────────────────────────────────────────────────────
+
+    def add_frame(self, frame: np.ndarray) -> float:
+        """
+        Tente d'ajouter une frame dans le pool.
+        API compatible avec LuckyImagingStacker.add_frame().
+        Retourne le score de qualité.
+        Note: n'accepte que du RGB8/uint8 — pas de normalisation RAW.
+        """
+        if not self._is_running:
+            return 0.0
+
+        self.total_frames_processed += 1
+        score = self.scorer.score(frame)
+
+        # Phase warmup : accumulation pour choisir la référence d'alignement
+        if not self._reference_ready:
+            self._warmup_frames.append((score, frame.copy()))
+            if len(self._warmup_frames) >= self._warmup_needed:
+                self._init_reference_from_warmup()
+            self._update_stats()
+            return score
+
+        # Pré-filtrage CPU : si pool plein et score < seuil → skip alignement
+        if self._pool.is_full:
+            threshold = (self._pool.mean_score
+                         if self.config.elite_entry_mode == "mean"
+                         else self._pool.min_score)
+            if score <= threshold:
+                self._update_stats()
+                return score
+
+        # Alignement contre référence fixe
+        aligned = self._align_frame(frame)
+        if aligned is None:
+            self._update_stats()
+            return score
+
+        # Tentative d'insertion dans le pool
+        if self._pool.try_add(score, aligned):
+            self._frames_accepted += 1
+
+        if self._pool.is_full and self._phase == "filling":
+            self._phase = "active"
+
+        self._update_stats()
+        return score
+
+    def _init_reference_from_warmup(self):
+        """Initialise la référence d'alignement avec la meilleure frame warmup."""
+        best_score, best_frame = max(self._warmup_frames, key=lambda x: x[0])
+        self.aligner.set_reference(best_frame, explicit=True)
+        self._reference_ready = True
+        print(f"[ELITE POOL] Référence définie (score={best_score:.4f}, "
+              f"{len(self._warmup_frames)} frames warmup)")
+        # Insérer les frames warmup dans le pool (alignées contre la référence)
+        for ws, wf in self._warmup_frames:
+            aligned = self._align_frame(wf)
+            if aligned is not None and self._pool.try_add(ws, aligned):
+                self._frames_accepted += 1
+        self._warmup_frames = []
+        if self._pool.is_full:
+            self._phase = "active"
+
+    def _align_frame(self, frame: np.ndarray) -> Optional[np.ndarray]:
+        """Aligne une frame contre la référence fixe. Retourne None si échec."""
+        if not self.config.align_enabled or not self._reference_ready:
+            return frame.copy()
+        try:
+            aligned, params = self.aligner.align(frame)
+            if params.get('align_failed', False):
+                return None
+            return aligned
+        except Exception as e:
+            print(f"[ELITE POOL] Alignement échoué: {e}")
+            return None
+
+    # ── Thread de stack périodique ────────────────────────────────────────────
+
+    def _stack_loop(self):
+        """Thread de stack périodique (s'exécute en arrière-plan)."""
+        while not self._stop_event.is_set():
+            self._stack_now.wait(timeout=float(self.config.elite_stack_interval))
+            self._stack_now.clear()
+            if self._stop_event.is_set():
+                break
+            if self._pool.size >= 3:
+                self._do_stack()
+
+    def _do_stack(self):
+        """Effectue le stack de tous les frames du pool."""
+        try:
+            # Sigma-clipping des scores (optionnel)
+            if self.config.elite_score_clip:
+                frames, n_clipped = self._pool.get_frames_clipped(self.config.elite_score_kappa)
+                self._last_clipped_count = n_clipped
+            else:
+                frames = [f for _, f in self._pool.get_frames_and_scores()]
+                self._last_clipped_count = 0
+
+            if not frames:
+                return
+
+            # Conserver en float32 [0, 255] — cohérent avec LuckyImagingStacker._normalize_frame()
+            # (get_preview_for_display inject last_lucky_result dans session.stacker qui attend [0-255])
+            arr = np.stack([f.astype(np.float32) for f in frames], axis=0)
+
+            method = self.config.stack_method
+            if method == StackMethod.MEDIAN:
+                result = np.median(arr, axis=0)
+            elif method == StackMethod.SIGMA_CLIP:
+                result = self._sigma_clip_stack(arr, self.config.sigma_clip_kappa)
+            else:  # MEAN
+                result = arr.mean(axis=0)
+
+            with self._result_lock:
+                self.last_result = result   # float32 [0, 1]
+                self.total_stacks_done += 1
+                self._last_stack_time = time.time()
+
+            print(f"[ELITE POOL] Stack #{self.total_stacks_done}: "
+                  f"{len(frames)}/{self._pool.size} frames utilisées "
+                  f"({self._last_clipped_count} clippées σ), "
+                  f"pool={self._pool.size}/{self.config.elite_pool_size}")
+            self._update_stats()
+
+        except Exception as e:
+            print(f"[ELITE POOL] Erreur stack: {e}")
+
+    @staticmethod
+    def _sigma_clip_stack(arr: np.ndarray, kappa: float) -> np.ndarray:
+        """Sigma-clip pixel-level sur array (N, H, W, C) float32 [0-255]."""
+        mean = arr.mean(axis=0)
+        std  = arr.std(axis=0)
+        mask = np.abs(arr - mean) <= kappa * std
+        out  = np.where(mask, arr, np.nan)
+        with np.errstate(all='ignore'):
+            result = np.nanmean(out, axis=0)
+        return np.nan_to_num(result, nan=mean)
+
+    # ── API compatible LuckyImagingStacker ────────────────────────────────────
+
+    def get_result(self) -> Optional[np.ndarray]:
+        """Retourne le dernier stack (non-destructif). Compatible LuckyImagingStacker."""
+        with self._result_lock:
+            if self.last_result is None:
+                return None
+            return self.last_result.copy()
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Retourne les statistiques courantes. Compatible LuckyImagingStacker."""
+        self._update_stats()
+        return self.stats.copy()
+
+    def update_alignment_reference(self, _new_ref: np.ndarray):
+        """No-op : la référence Elite est fixée au warmup et ne change pas."""
+        pass
+
+    def configure(self, **kwargs):
+        """Met à jour la configuration à la volée."""
+        if 'elite_pool_size' in kwargs:
+            new_size = int(kwargs['elite_pool_size'])
+            self.config.elite_pool_size = new_size
+            self._pool.resize(new_size)   # ← propager dans le heap existant
+        if 'elite_stack_interval' in kwargs:
+            self.config.elite_stack_interval = float(kwargs['elite_stack_interval'])
+        if 'elite_entry_mode' in kwargs:
+            self.config.elite_entry_mode = str(kwargs['elite_entry_mode'])
+            self._pool.update_entry_mode(self.config.elite_entry_mode)
+        if 'elite_score_clip' in kwargs:
+            self.config.elite_score_clip = bool(kwargs['elite_score_clip'])
+        if 'elite_score_kappa' in kwargs:
+            self.config.elite_score_kappa = float(kwargs['elite_score_kappa'])
+        if 'score_method' in kwargs:
+            _map = {
+                'laplacian':  ScoreMethod.LAPLACIAN,
+                'gradient':   ScoreMethod.GRADIENT,
+                'sobel':      ScoreMethod.SOBEL,
+                'tenengrad':  ScoreMethod.TENENGRAD,
+            }
+            self.config.score_method = _map.get(str(kwargs['score_method']).lower(),
+                                                  ScoreMethod.LAPLACIAN)
+            self.scorer = QualityScorer(self.config)
+        if 'stack_method' in kwargs:
+            _map = {
+                'mean':       StackMethod.MEAN,
+                'median':     StackMethod.MEDIAN,
+                'sigma_clip': StackMethod.SIGMA_CLIP,
+            }
+            self.config.stack_method = _map.get(str(kwargs['stack_method']).lower(),
+                                                  StackMethod.MEAN)
+
+    # ── Interne ───────────────────────────────────────────────────────────────
+
+    def _update_stats(self):
+        next_in = max(0.0, self.config.elite_stack_interval
+                      - (time.time() - self._last_stack_time))
+        self.stats.update({
+            # Clés compatibles LuckyImagingStacker
+            'buffer_fill':     self._pool.size,
+            'buffer_size':     self.config.elite_pool_size,
+            'avg_score':       self._pool.mean_score,
+            'stacks_done':     self.total_stacks_done,
+            'frames_selected': self._frames_accepted,
+            # Clés spécifiques Elite
+            'buffer_mode':     'elite',
+            'phase':           self._phase,
+            'min_score':       self._pool.min_score,
+            'max_score':       self._pool.max_score,
+            'accept_rate':     self._pool.accept_rate,
+            'last_clipped':    self._last_clipped_count,
+            'next_stack_in':   next_in,
+            'total_frames':    self.total_frames_processed,
+        })
 
 
 # =============================================================================

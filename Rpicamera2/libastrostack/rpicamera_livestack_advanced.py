@@ -41,7 +41,7 @@ from .stacker_advanced import AdvancedStacker, StackMethod
 from .drizzle import DrizzleStacker, DrizzleStackerFast
 from .aligner_planetary import PlanetaryAligner, PlanetaryMode, PlanetaryConfig
 from .lucky_imaging import (
-    LuckyImagingStacker, LuckyConfig,
+    LuckyImagingStacker, ElitePoolStacker, BufferMode, LuckyConfig,
     ScoreMethod as LuckyScoreMethod,
     StackMethod as LuckyStackMethod,
     RPiCameraLuckyImaging, create_lucky_session,
@@ -434,6 +434,35 @@ class RPiCameraLiveStackAdvanced:
                 self.lucky_stacker.configure(max_shift=new_shift)
                 print(f"[LUCKY] max_shift mis à jour: {new_shift:.0f}px {'(désactivé)' if new_shift == 0 else ''}")
 
+        # ── Pool Élite ────────────────────────────────────────────────────────
+        if 'lucky_buffer_mode' in kwargs:
+            self.config.lucky.buffer_mode = str(kwargs['lucky_buffer_mode'])
+        if 'lucky_elite_pool_size' in kwargs:
+            new_size = int(kwargs['lucky_elite_pool_size'])
+            self.config.lucky.elite_pool_size = new_size
+            if self.lucky_stacker and isinstance(self.lucky_stacker, ElitePoolStacker):
+                self.lucky_stacker.configure(elite_pool_size=new_size)
+        if 'lucky_elite_stack_interval' in kwargs:
+            new_interval = float(kwargs['lucky_elite_stack_interval'])
+            self.config.lucky.elite_stack_interval = new_interval
+            if self.lucky_stacker and isinstance(self.lucky_stacker, ElitePoolStacker):
+                self.lucky_stacker.configure(elite_stack_interval=new_interval)
+        if 'lucky_elite_entry_mode' in kwargs:
+            new_mode = str(kwargs['lucky_elite_entry_mode'])   # "min" | "mean"
+            self.config.lucky.elite_entry_mode = new_mode
+            if self.lucky_stacker and isinstance(self.lucky_stacker, ElitePoolStacker):
+                self.lucky_stacker.configure(elite_entry_mode=new_mode)
+        if 'lucky_elite_score_clip' in kwargs:
+            new_clip = bool(kwargs['lucky_elite_score_clip'])
+            self.config.lucky.elite_score_clip = new_clip
+            if self.lucky_stacker and isinstance(self.lucky_stacker, ElitePoolStacker):
+                self.lucky_stacker.configure(elite_score_clip=new_clip)
+        if 'lucky_elite_score_kappa' in kwargs:
+            new_kappa = float(kwargs['lucky_elite_score_kappa'])
+            self.config.lucky.elite_score_kappa = new_kappa
+            if self.lucky_stacker and isinstance(self.lucky_stacker, ElitePoolStacker):
+                self.lucky_stacker.configure(elite_score_kappa=new_kappa)
+
         # Contrôle qualité
         if 'enable_qc' in kwargs:
             self.config.quality.enable = bool(kwargs['enable_qc'])
@@ -705,6 +734,13 @@ class RPiCameraLiveStackAdvanced:
                   f"stack_method = {lucky_config.stack_method}")
             lucky_config.sigma_clip_kappa = self.config.lucky.sigma_clip_kappa
 
+            # Champs Pool Élite
+            lucky_config.elite_pool_size      = self.config.lucky.elite_pool_size
+            lucky_config.elite_stack_interval = self.config.lucky.elite_stack_interval
+            lucky_config.elite_entry_mode     = self.config.lucky.elite_entry_mode
+            lucky_config.elite_score_clip     = self.config.lucky.elite_score_clip
+            lucky_config.elite_score_kappa    = self.config.lucky.elite_score_kappa
+
             # CORRECTION BUG IMAGE BLANCHE: Passer le format RAW explicite
             # pour éviter la détection incorrecte basée sur frame.max()
             raw_format_str = None
@@ -732,11 +768,15 @@ class RPiCameraLiveStackAdvanced:
                 lucky_config.raw_normalize_method = 'percentile'
                 print(f"[LUCKY CONFIG] Format RAW non spécifié, utilisation détection percentile (robuste)")
 
-            self.lucky_stacker = LuckyImagingStacker(lucky_config)
+            if self.config.lucky.buffer_mode == "elite":
+                self.lucky_stacker = ElitePoolStacker(lucky_config)
+                print(f"[LUCKY] Mode Pool Élite activé")
+            else:
+                self.lucky_stacker = LuckyImagingStacker(lucky_config)
+                print(f"[LUCKY] Buffer: {self.config.lucky.buffer_size}, "
+                      f"Keep: {self.config.lucky.keep_percent}%, "
+                      f"Score: {self.config.lucky.score_method.value}")
             self.lucky_stacker.start()
-            print(f"[LUCKY] Buffer: {self.config.lucky.buffer_size}, "
-                  f"Keep: {self.config.lucky.keep_percent}%, "
-                  f"Score: {self.config.lucky.score_method.value}")
         
         self.is_running = True
         self.start_time = datetime.now()
@@ -824,6 +864,11 @@ class RPiCameraLiveStackAdvanced:
             current_stacks_done = lucky_stats.get('stacks_done', 0)
             self.stats['lucky_stacks_done'] = current_stacks_done
             self.stats['accepted_frames'] = lucky_stats.get('frames_selected', 0)
+            # Clés spécifiques Pool Élite (transparentes pour mode Ring)
+            for _k in ('buffer_mode', 'phase', 'accept_rate', 'last_clipped',
+                       'next_stack_in', 'min_score', 'max_score', 'total_frames'):
+                if _k in lucky_stats:
+                    self.stats[_k] = lucky_stats[_k]
 
             # Détecter si un nouveau stack est disponible via le compteur
             previous_stacks = getattr(self, '_last_stacks_count', 0)

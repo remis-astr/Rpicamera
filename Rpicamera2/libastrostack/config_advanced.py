@@ -255,7 +255,15 @@ class LuckyImagingConfig:
     
     # Performance
     downscale_scoring: float = 1.0      # Downscale pour scoring rapide
-    
+
+    # ── Mode Pool Élite (buffer_mode="elite", RGB8 uniquement) ───────────────
+    buffer_mode: str = "ring"           # "ring" (classique) ou "elite"
+    elite_pool_size: int = 100          # Taille du pool (20-300)
+    elite_stack_interval: float = 5.0  # Intervalle de stack en secondes (2-15)
+    elite_entry_mode: str = "min"       # "min" (> pire) ou "mean" (> moyenne pool)
+    elite_score_clip: bool = True       # Sigma-clipping des scores avant stack
+    elite_score_kappa: float = 2.0      # Kappa pour sigma-clipping (1.5-4.0)
+
     def validate(self) -> bool:
         """Valide la configuration"""
         errors = []
