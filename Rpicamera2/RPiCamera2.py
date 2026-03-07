@@ -1549,7 +1549,7 @@ jsk_saved_vwidth = 1920
 jsk_saved_vheight = 1080
 jsk_saved_zoom = 0
 jsk_saved_use_native = 0
-jsk_gain = 10               # Gain en mode JSK LIVE (1-300)
+jsk_gain = 10               # Gain en mode JSK LIVE (1-400)
 jsk_exposure_us = 10000     # Exposition en µs en mode JSK LIVE (1000-2000000 = 1ms-2000ms)
 jsk_saved_gain = 0          # Sauvegarde du gain global a l'entree
 jsk_saved_exposure = 0      # Sauvegarde de l'exposition globale a l'entree
@@ -1857,6 +1857,14 @@ ls_lucky_max_shift = 30  # Décalage max alignement en pixels (0=désactivé, 1-
 ls_lucky_save_progress = 0  # 0=off, 1=on (sauvegarde FITS+PNG tous les 2 stacks)
 lucky_score_methods = ['Laplacian', 'Gradient', 'Sobel', 'Tenengrad']
 lucky_stack_methods = ['Mean', 'Median', 'Sigma-Clip']
+
+# Pool Élite — paramètres (actifs quand ls_lucky_buffer_mode == 1)
+ls_lucky_buffer_mode   = 0    # 0=Ring Buffer (classique), 1=Pool Élite
+ls_elite_pool_size     = 100  # Taille du pool élite (20-300)
+ls_elite_stack_interval= 5    # Intervalle de stack en secondes (2-15)
+ls_elite_entry_mode    = 0    # 0=min (> pire frame), 1=mean (> moyenne pool)
+ls_elite_score_clip    = 1    # 0=OFF, 1=ON (sigma-clipping des scores avant stack)
+ls_elite_score_kappa   = 20   # Kappa ×10 (15→1.5 … 40→4.0)
 
 # RAW Format parameters (pour Lucky/Live Stack et vidéo RAW)
 raw_format = 1  # 0=YUV420, 1=XRGB8888, 2=SRGGB12, 3=SRGGB16
@@ -2226,7 +2234,9 @@ titles = ['mode','speed','gain','brightness','contrast','frame','red','blue','ev
           'ls_save_progress','ls_save_final','ls_lucky_save_final',
           'fix_bad_pixels','fix_bad_pixels_sigma','fix_bad_pixels_min_adu',
           'allsky_stack_enable','allsky_stack_count',
-          'log_factor','mtf_shadows','mtf_midtone','mtf_highlights']
+          'log_factor','mtf_shadows','mtf_midtone','mtf_highlights',
+          'ls_lucky_buffer_mode','ls_elite_pool_size','ls_elite_stack_interval',
+          'ls_elite_entry_mode','ls_elite_score_clip','ls_elite_score_kappa']
 points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat,codec,tinterval,tshots,extn,zx,zy,zoom,saturation,
           meter,awb,sharpness,denoise,quality,profile,level,histogram,histarea,v3_f_speed,v3_f_range,rotate,IRF,str_cap,v3_hdr,raw_format,vflip,hflip,
           stretch_p_low,stretch_p_high,stretch_factor,stretch_preset,ghs_D,ghs_b,ghs_SP,ghs_LP,ghs_HP,ghs_preset,
@@ -2239,7 +2249,9 @@ points = [mode,speed,gain,brightness,contrast,frame,red,blue,ev,vlen,fps,vformat
           ls_save_progress,ls_save_final,ls_lucky_save_final,
           fix_bad_pixels,fix_bad_pixels_sigma,fix_bad_pixels_min_adu,
           allsky_stack_enable,allsky_stack_count,
-          log_factor,mtf_shadows,mtf_midtone,mtf_highlights]
+          log_factor,mtf_shadows,mtf_midtone,mtf_highlights,
+          ls_lucky_buffer_mode,ls_elite_pool_size,ls_elite_stack_interval,
+          ls_elite_entry_mode,ls_elite_score_clip,ls_elite_score_kappa]
 if not os.path.exists(config_file):
     with open(config_file, 'w') as f:
         for item in range(0,len(titles)):
@@ -2519,6 +2531,14 @@ log_factor     = config[100] if len(config) > 100 else 100
 mtf_shadows    = config[101] if len(config) > 101 else 0
 mtf_midtone    = config[102] if len(config) > 102 else 20
 mtf_highlights = config[103] if len(config) > 103 else 100
+
+# Pool Élite (indices 104-109)
+ls_lucky_buffer_mode    = config[104] if len(config) > 104 else 0
+ls_elite_pool_size      = config[105] if len(config) > 105 else 100
+ls_elite_stack_interval = config[106] if len(config) > 106 else 5
+ls_elite_entry_mode     = config[107] if len(config) > 107 else 0
+ls_elite_score_clip     = config[108] if len(config) > 108 else 1
+ls_elite_score_kappa    = config[109] if len(config) > 109 else 20
 
 # ISP configuration (chemin en dur pour le fichier de config ISP)
 # Config neutre (transparente) pour astrophotographie - n'affecte que les PNG de prévisualisation
@@ -6362,15 +6382,30 @@ def draw_lucky_stats_bar(screen_width, screen_height, stats):
     stacks_done  = stats.get('lucky_stacks_done', 0)
     total_frames = stats.get('total_frames', 0)
     avg_score    = stats.get('lucky_avg_score', 0)
-    line = f"Lucky: Buffer {buffer_fill}/{buffer_size} | Frames: {total_frames} | Stacks: {stacks_done} | Score: {avg_score:.1f}"
-    bar_w = min(len(line) * 8 + 20, screen_width - 100)
+
+    if stats.get('buffer_mode') == 'elite':
+        # Affichage spécifique Pool Élite
+        phase        = stats.get('phase', '?')
+        accept_rate  = stats.get('accept_rate', 0.0)
+        last_clipped = stats.get('last_clipped', 0)
+        next_in      = stats.get('next_stack_in', 0.0)
+        _phase_lbl   = {'filling': 'Remplissage', 'active': 'Pool actif', 'waiting': 'Attente'}.get(phase, phase)
+        line = (f"Elite: {buffer_fill}/{buffer_size} | Moy: {avg_score:.1f} | "
+                f"Acc: {accept_rate:.0f}% | σ-clip: {last_clipped} | "
+                f"Stack: {stacks_done} | [{_phase_lbl}] | Prochain: {next_in:.0f}s")
+        color = (100, 240, 180)
+    else:
+        line  = f"Lucky: Buffer {buffer_fill}/{buffer_size} | Frames: {total_frames} | Stacks: {stacks_done} | Score: {avg_score:.1f}"
+        color = (160, 200, 255)
+
+    bar_w = min(len(line) * 8 + 20, screen_width - 40)
     bar_h = 24
     surf = pygame.Surface((bar_w, bar_h), pygame.SRCALPHA)
     surf.fill((0, 0, 0, 160))
     tx = (screen_width - bar_w) // 2
     ty = screen_height - 95
     windowSurfaceObj.blit(surf, (tx, ty))
-    lbl = f.render(line, True, (160, 200, 255))
+    lbl = f.render(line, True, color)
     windowSurfaceObj.blit(lbl, lbl.get_rect(centerx=screen_width // 2, centery=ty + 12))
 
 
@@ -6412,6 +6447,8 @@ def draw_lucky_controls(screen_width, screen_height):
     global stretch_preset, isp_gamma, isp_brightness, isp_contrast, isp_saturation
     global raw_format
     global log_factor, mtf_shadows, mtf_midtone, mtf_highlights
+    global ls_lucky_buffer_mode, ls_elite_pool_size, ls_elite_stack_interval
+    global ls_elite_entry_mode, ls_elite_score_clip, ls_elite_score_kappa
 
     panel_w  = 260
     panel_m  = 10
@@ -6448,20 +6485,69 @@ def draw_lucky_controls(screen_width, screen_height):
     # ONGLET 0 : Lucky Imaging
     # =====================================================
     if lucky_settings_tab == 0:
-        windowSurfaceObj.blit(
-            _font_cache[ck_sect].render("Sélection des frames", True, (100, 160, 255)),
-            (panel_x + 2, start_y))
-        start_y += 16
-
-        control_rects['ls_lucky_buffer'] = draw_jsk_slider(
+        # ── Sélecteur de mode buffer ──────────────────────────────────────────
+        _buf_mode_names = ['Ring Buffer', 'Pool Élite']
+        _bm = min(ls_lucky_buffer_mode, 1)
+        control_rects['ls_lucky_buffer_mode'] = draw_jsk_slider(
             panel_x, start_y, slider_w, slider_h,
-            f"Buffer: {ls_lucky_buffer} imgs", ls_lucky_buffer, 10, 200, (60, 100, 180))
-        start_y += slider_h + margin
+            f"Mode: {_buf_mode_names[_bm]}", _bm, 0, 1, (50, 80, 160))
+        start_y += slider_h + margin + 4
 
-        control_rects['ls_lucky_keep'] = draw_jsk_slider(
-            panel_x, start_y, slider_w, slider_h,
-            f"Garder: {ls_lucky_keep}%", ls_lucky_keep, 1, 50, (60, 100, 180))
-        start_y += slider_h + margin + 8
+        # ── Ring Buffer ───────────────────────────────────────────────────────
+        if ls_lucky_buffer_mode == 0:
+            windowSurfaceObj.blit(
+                _font_cache[ck_sect].render("Sélection des frames", True, (100, 160, 255)),
+                (panel_x + 2, start_y))
+            start_y += 16
+
+            control_rects['ls_lucky_buffer'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Buffer: {ls_lucky_buffer} imgs", ls_lucky_buffer, 10, 200, (60, 100, 180))
+            start_y += slider_h + margin
+
+            control_rects['ls_lucky_keep'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Garder: {ls_lucky_keep}%", ls_lucky_keep, 1, 50, (60, 100, 180))
+            start_y += slider_h + margin + 8
+
+        # ── Pool Élite ────────────────────────────────────────────────────────
+        else:
+            windowSurfaceObj.blit(
+                _font_cache[ck_sect].render("Pool Élite (RGB8)", True, (80, 200, 160)),
+                (panel_x + 2, start_y))
+            start_y += 16
+
+            control_rects['ls_elite_pool_size'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Pool: {ls_elite_pool_size} imgs", ls_elite_pool_size, 20, 300, (50, 150, 120))
+            start_y += slider_h + margin
+
+            control_rects['ls_elite_stack_interval'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Stack: {ls_elite_stack_interval}s", ls_elite_stack_interval, 2, 15, (50, 150, 120))
+            start_y += slider_h + margin
+
+            _entry_names = ['> min pool', '> mean pool']
+            _em = min(ls_elite_entry_mode, 1)
+            control_rects['ls_elite_entry_mode'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Entrée: {_entry_names[_em]}", _em, 0, 1, (60, 140, 110))
+            start_y += slider_h + margin
+
+            control_rects['ls_elite_score_clip'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"σ-Clip scores: {'ON' if ls_elite_score_clip else 'OFF'}",
+                ls_elite_score_clip, 0, 1, (60, 130, 100))
+            start_y += slider_h + margin
+
+            if ls_elite_score_clip:
+                control_rects['ls_elite_score_kappa'] = draw_jsk_slider(
+                    panel_x, start_y, slider_w, slider_h,
+                    f"Kappa: {ls_elite_score_kappa / 10:.1f}σ",
+                    ls_elite_score_kappa, 15, 40, (50, 120, 90))
+                start_y += slider_h + margin
+
+            start_y += 4
 
         windowSurfaceObj.blit(
             _font_cache[ck_sect].render("Qualité & Alignement", True, (100, 160, 255)),
@@ -6667,6 +6753,8 @@ def handle_lucky_slider_click(mx, my, control_rects):
     global ls_lucky_usm_en, ls_lucky_usm_sigma, ls_lucky_usm_amount
     global ls_lucky_lr_en, ls_lucky_lr_iter, ls_lucky_lr_sigma
     global luckystack, livestack
+    global ls_lucky_buffer_mode, ls_elite_pool_size, ls_elite_stack_interval
+    global ls_elite_entry_mode, ls_elite_score_clip, ls_elite_score_kappa
 
     _needs_isp = False
 
@@ -6675,6 +6763,30 @@ def handle_lucky_slider_click(mx, my, control_rects):
             ratio = max(0.0, min(1.0, (mx - rect.x) / rect.width))
             if name.startswith('lucky_tab_'):
                 lucky_settings_tab = int(name[-1])
+            elif name == 'ls_lucky_buffer_mode':
+                ls_lucky_buffer_mode = 1 if ratio > 0.5 else 0
+                if luckystack is not None:
+                    luckystack.configure(lucky_buffer_mode=['ring', 'elite'][ls_lucky_buffer_mode])
+            elif name == 'ls_elite_pool_size':
+                ls_elite_pool_size = max(20, min(300, int(20 + ratio * 280)))
+                if luckystack is not None:
+                    luckystack.configure(lucky_elite_pool_size=ls_elite_pool_size)
+            elif name == 'ls_elite_stack_interval':
+                ls_elite_stack_interval = max(2, min(15, int(2 + ratio * 13)))
+                if luckystack is not None:
+                    luckystack.configure(lucky_elite_stack_interval=float(ls_elite_stack_interval))
+            elif name == 'ls_elite_entry_mode':
+                ls_elite_entry_mode = 1 if ratio > 0.5 else 0
+                if luckystack is not None:
+                    luckystack.configure(lucky_elite_entry_mode=['min', 'mean'][ls_elite_entry_mode])
+            elif name == 'ls_elite_score_clip':
+                ls_elite_score_clip = 1 if ratio > 0.5 else 0
+                if luckystack is not None:
+                    luckystack.configure(lucky_elite_score_clip=bool(ls_elite_score_clip))
+            elif name == 'ls_elite_score_kappa':
+                ls_elite_score_kappa = max(15, min(40, int(15 + ratio * 25)))
+                if luckystack is not None:
+                    luckystack.configure(lucky_elite_score_kappa=ls_elite_score_kappa / 10.0)
             elif name == 'ls_lucky_buffer':
                 ls_lucky_buffer = max(10, min(200, int(10 + ratio * 190)))
             elif name == 'ls_lucky_keep':
@@ -8410,7 +8522,7 @@ def draw_jsk_gain_exposure(screen_width, screen_height):
     """
     Dessine les sliders Gain et Exposition en bas de l'ecran JSK LIVE,
     a droite du bouton EXIT. Toujours visibles.
-    Gain: 1-300 lineaire. Expo: 1ms-1000ms log.
+    Gain: 1-400 lineaire. Expo: 1ms-1000ms log.
     """
     global windowSurfaceObj, _font_cache
     global jsk_gain, jsk_exposure_us
@@ -8464,7 +8576,7 @@ def draw_jsk_gain_exposure(screen_width, screen_height):
     pygame.draw.rect(windowSurfaceObj, (40, 40, 50), bg_rect_gain, border_radius=5)
     pygame.draw.rect(windowSurfaceObj, (80, 80, 90), bg_rect_gain, 1, border_radius=5)
 
-    fill_ratio = min(1.0, (jsk_gain - 1) / 299.0)
+    fill_ratio = min(1.0, (jsk_gain - 1) / 399.0)
     fill_w = int(fill_ratio * (slider_w - 10))
     if fill_w > 0:
         fill_rect = pygame.Rect(sx + 5, sy_gain + 5, fill_w, slider_h - 10)
@@ -8489,14 +8601,14 @@ def _jsk_ge_slider_positions(screen_height):
 
 
 def is_click_on_jsk_gain_slider(mousex, mousey, screen_width, screen_height):
-    """Verifie si clic sur slider gain JSK. Retourne la nouvelle valeur (1-300) ou None."""
+    """Verifie si clic sur slider gain JSK. Retourne la nouvelle valeur (1-400) ou None."""
     sx, sy_gain, _, slider_w, slider_h = _jsk_ge_slider_positions(screen_height)
 
     if sx <= mousex <= sx + slider_w and sy_gain <= mousey <= sy_gain + slider_h:
         rel_x = mousex - sx
         ratio = max(0.0, min(1.0, rel_x / slider_w))
-        value = int(1 + ratio * 299)
-        return max(1, min(300, value))
+        value = int(1 + ratio * 399)
+        return max(1, min(400, value))
     return None
 
 
@@ -8732,11 +8844,11 @@ def draw_home_histogram(bgr_frame, sw, sh):
         # Tableau couleur (h_w × h_h × 3) — même pattern que l'ancien code
         output = np.zeros((h_w, h_h, 3), dtype=np.uint8)
 
-        # Canaux BGR → (0=Bleu, 1=Vert, 2=Rouge)
+        # Canaux RGB → (0=Rouge, 1=Vert, 2=Bleu) — frame passée en RGB
         channels = [
-            (0, (0,   0,   255)),   # Bleu
+            (2, (0,   0,   255)),   # Bleu
             (1, (0,   255, 0  )),   # Vert
-            (2, (255, 0,   0  )),   # Rouge
+            (0, (255, 0,   0  )),   # Rouge
         ]
         for ch_idx, rgb in channels:
             hist, _ = np.histogram(sample[:, :, ch_idx].ravel(), bins=bins)
@@ -10317,7 +10429,7 @@ def handle_home_click(mx, my):
             jsk_saved_use_native = use_native_sensor_mode
             jsk_saved_gain = gain
             jsk_saved_exposure = custom_sspeed if custom_sspeed > 0 else sspeed
-            jsk_gain = max(1, min(300, gain if gain > 0 else 10))
+            jsk_gain = max(1, min(400, gain if gain > 0 else 10))
             _init_expo = custom_sspeed if custom_sspeed > 0 else sspeed
             jsk_exposure_us = max(1000, min(2000000, _init_expo if _init_expo > 0 else 10000))
             vwidth = 1920; vheight = 1080; zoom = 0; use_native_sensor_mode = 0
@@ -14656,6 +14768,12 @@ def save_config_to_file():
     config[101] = mtf_shadows
     config[102] = mtf_midtone
     config[103] = mtf_highlights
+    config[104] = ls_lucky_buffer_mode
+    config[105] = ls_elite_pool_size
+    config[106] = ls_elite_stack_interval
+    config[107] = ls_elite_entry_mode
+    config[108] = ls_elite_score_clip
+    config[109] = ls_elite_score_kappa
     with open(config_file, 'w') as f:
         for item in range(0, len(titles)):
             f.write(titles[item] + " : " + str(config[item]) + "\n")
@@ -17425,6 +17543,12 @@ while True:
                         lucky_align_mode=ls_lucky_align,
                         lucky_score_roi_percent=float(ls_lucky_roi),
                         lucky_max_shift=float(ls_lucky_max_shift),
+                        lucky_buffer_mode=['ring', 'elite'][min(ls_lucky_buffer_mode, 1)],
+                        lucky_elite_pool_size=ls_elite_pool_size,
+                        lucky_elite_stack_interval=float(ls_elite_stack_interval),
+                        lucky_elite_entry_mode=['min', 'mean'][min(ls_elite_entry_mode, 1)],
+                        lucky_elite_score_clip=bool(ls_elite_score_clip),
+                        lucky_elite_score_kappa=ls_elite_score_kappa / 10.0,
                         png_stretch=['off', 'ghs', 'asinh', 'log', 'mtf'][min(stretch_preset, 4)],
                         png_factor=stretch_factor / 10.0,
                         png_clip_low=0.0 if stretch_preset == 1 else stretch_p_low / 10.0,
