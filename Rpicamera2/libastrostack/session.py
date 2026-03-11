@@ -147,51 +147,39 @@ class LiveStackSession:
         if self.config.max_frames > 0 and self.config.num_stacked >= self.config.max_frames:
             return self.stacker.get_result()
 
-        print(f"\n[IMG] Frame {self.files_processed + self.files_rejected + 1}")
-        
         try:
             # Détecter type si première image
             if self.is_color is None:
                 self.is_color = len(image_data.shape) == 3
-                print(f"[DETECT] Mode {'RGB' if self.is_color else 'MONO'}")
-            
+
             # 1. Contrôle qualité
             is_good, metrics, reason = self.quality_analyzer.analyze(image_data)
-            
-            if is_good:
-                print(f"  [QC] OK - FWHM:{metrics.get('median_fwhm', 0):.2f}px, "
-                      f"Ell:{metrics.get('median_ellipticity', 0):.2f}, "
-                      f"Sharp:{metrics.get('sharpness', 0):.2f}, "
-                      f"Stars:{metrics.get('num_stars', 0)}")
-            else:
+
+            if not is_good:
                 print(f"  [QC] REJECT - {reason}")
                 self.files_rejected += 1
                 self.config.quality.rejected_images.append(f"frame_{self.files_processed + self.files_rejected}")
                 self.config.quality.rejection_reasons[f"frame_{self.files_processed + self.files_rejected}"] = reason
                 return None
-            
+
             # 2. Alignement
-            # Si mode OFF, sauter l'alignement
             if self.config.alignment_mode.upper() == "OFF" or self.config.alignment_mode.upper() == "NONE":
-                print("  [ALIGN] Mode OFF - Pas d'alignement")
                 aligned = image_data
                 params = {'dx': 0, 'dy': 0, 'angle': 0, 'scale': 1.0}
                 success = True
             else:
-                print("  [ALIGN] Alignement...")
                 aligned, params, success = self.aligner.align(image_data)
 
                 if not success:
                     print("  [FAIL] Échec alignement")
                     self.files_rejected += 1
                     return None
-            
+
             # Enregistrer rotation
             if 'angle' in params:
                 self.rotation_angles.append(params['angle'])
-            
+
             # 3. Empilement
-            print("  [STACK] Empilement...")
             result = self.stacker.stack(aligned)
 
             self.files_processed += 1
@@ -199,8 +187,6 @@ class LiveStackSession:
 
             # 4. Calibration automatique ISP (si activée)
             self._check_and_calibrate_isp_if_needed()
-
-            self._print_stats()
 
             # Retourner résultat si rafraîchissement nécessaire
             if self._frame_count_since_refresh >= self.config.preview_refresh_interval:
@@ -300,12 +286,11 @@ class LiveStackSession:
         Returns:
             Array uint8 ou uint16 (selon config) pour affichage/sauvegarde
         """
-        # DEBUG prints commentés pour performance (ralentissent LuckyStack)
-        # print(f"\n[DEBUG get_preview_png] Début")
-        # print(f"  • ISP activé: {self.config.isp_enable}")
-        # print(f"  • ISP instance: {self.isp is not None}")
-        # print(f"  • Format vidéo: {self.config.video_format}")
-        # print(f"  • PNG bit depth config: {self.config.png_bit_depth}")
+        # Compteur pour logs périodiques (toutes les 5 frames)
+        if not hasattr(self, '_preview_log_count'):
+            self._preview_log_count = 0
+        self._preview_log_count += 1
+        _do_log = False
 
         result = self.stacker.get_result()
         if result is None:
@@ -313,14 +298,28 @@ class LiveStackSession:
 
         is_color = len(result.shape) == 3
 
+        if _do_log:
+            fmt = self.config.video_format or '?'
+            if is_color:
+                print(f"\n[SESSION LOG #{self._preview_log_count}] get_preview_png() — format={fmt}")
+                print(f"  STACK BRUT  : shape={result.shape} dtype={result.dtype} "
+                      f"min={result.min():.4f} max={result.max():.4f} mean={result.mean():.4f}")
+                print(f"  Canaux (0,1,2) means: "
+                      f"ch0={result[:,:,0].mean():.4f}  "
+                      f"ch1={result[:,:,1].mean():.4f}  "
+                      f"ch2={result[:,:,2].mean():.4f}")
+
         # NOUVEAU: Appliquer ISP AVANT stretch (si activé ET format RAW uniquement)
         # Pipeline optimal: Stack (linéaire) → ISP → Stretch → PNG
         # L'ISP ne doit s'appliquer QUE sur RAW12/RAW16, JAMAIS sur YUV420 (déjà traité par ISP hardware)
         is_raw_format = self.config.video_format in ['raw12', 'raw16']
         if self.config.isp_enable and self.isp is not None and is_raw_format:
-            # debayer_raw_array retourne ch0=R_physique, ch2=B_physique (COLOR_BayerRG2BGR)
+            # debayer_raw_array retourne ch0=R_physique, ch2=B_physique (COLOR_BayerRG2RGB)
             result = self.isp.process(result, return_uint8=False, swap_rb=False,
                                      format_hint=self.config.video_format)  # Reste en float32
+            if _do_log and is_color:
+                print(f"  APRÈS ISP   : min={result.min():.4f} max={result.max():.4f} "
+                      f"ch0={result[:,:,0].mean():.4f} ch1={result[:,:,1].mean():.4f} ch2={result[:,:,2].mean():.4f}")
 
         # Appliquer étirement
         is_color = len(result.shape) == 3
@@ -338,47 +337,51 @@ class LiveStackSession:
         min_val = result.min()
 
 
-        # IMPORTANT: Détecter 3 cas au lieu de 2 pour éviter bug avec ISP
-        if max_val <= 1.1:
+        # IMPORTANT: Le format explicite (video_format) est prioritaire sur max_val.
+        # Sinon, un signal RAW très faible (ex: max=208 après soustraction BL) tombe
+        # faussement dans le cas YUV420 (factor=255) car max_val <= 256.
+        _vfmt = (self.config.video_format or '').lower()
+        _is_raw_format = any(k in _vfmt for k in ('raw12', 'raw16', 'raw10', 'srggb'))
+
+        if max_val <= 1.1 and not _is_raw_format:
             # Cas 1: Déjà normalisé [0-1] (typiquement après ISP software)
-            # Marge de 1.1 au lieu de 1.0 pour tolérer léger bruit/overshoot
             normalization_factor = 1.0
             data_type_str = "Déjà normalisé [0-1]"
-        elif max_val > 256:
-            # Cas 2: Données haute résolution (RAW12/16)
-            # CORRECTION: Utiliser le max théorique du format au lieu de 65535 fixe
-            # RAW12 = 4095, RAW16 = 65535
-            # Mais si les données sont déjà débayérisées avec interpolation,
-            # le max peut dépasser le théorique → utiliser max réel + marge
-            if self.config.video_format:
-                fmt_lower = self.config.video_format.lower()
-                if 'raw12' in fmt_lower or 'srggb12' in fmt_lower:
-                    # RAW 12 bits théorique = 4095, mais débayérisé peut aller plus haut
-                    # Utiliser le max entre théorique et réel pour éviter le clipping
-                    theoretical_max = 4095.0
-                    normalization_factor = max(theoretical_max, max_val * 1.02)  # +2% marge
-                    data_type_str = f"RAW 12-bit ({self.config.video_format})"
-                elif 'raw10' in fmt_lower or 'srggb10' in fmt_lower:
-                    theoretical_max = 1023.0
-                    normalization_factor = max(theoretical_max, max_val * 1.02)
-                    data_type_str = f"RAW 10-bit ({self.config.video_format})"
-                else:
-                    # RAW 16 bits ou autre
-                    normalization_factor = 65535.0
-                    data_type_str = f"RAW 16-bit ({self.config.video_format})"
-            else:
-                # Pas de format spécifié - utiliser max réel avec marge
-                # pour s'assurer que les données occupent bien [0, 1]
+        elif _is_raw_format or max_val > 256:
+            # Cas 2: Données RAW (format explicite OU max_val > 256)
+            # Priorité au format déclaré pour ne pas se tromper à faible signal.
+            if 'raw12' in _vfmt or 'srggb12' in _vfmt:
+                theoretical_max = 4095.0
+                normalization_factor = max(theoretical_max, max_val * 1.02)
+                data_type_str = f"RAW 12-bit ({self.config.video_format})"
+            elif 'raw10' in _vfmt or 'srggb10' in _vfmt:
+                theoretical_max = 1023.0
+                normalization_factor = max(theoretical_max, max_val * 1.02)
+                data_type_str = f"RAW 10-bit ({self.config.video_format})"
+            elif 'raw16' in _vfmt or 'srggb16' in _vfmt:
+                normalization_factor = 65535.0
+                data_type_str = f"RAW 16-bit ({self.config.video_format})"
+            elif max_val > 256:
+                # Format non spécifié mais valeurs hautes → RAW auto
                 normalization_factor = max_val * 1.02 if max_val > 0 else 65535.0
                 data_type_str = f"RAW auto (max={max_val:.0f})"
+            else:
+                # RAW déclaré mais signal très faible → utiliser le max théorique du format
+                normalization_factor = 65535.0
+                data_type_str = f"RAW (signal faible, factor fixe)"
         else:
             # Cas 3: Données 8-bit (YUV420) : [0-255]
             normalization_factor = 255.0
             data_type_str = "YUV420 8-bit"
 
         # Normaliser à [0-1] (requis par apply_stretch)
+        if _do_log:
+            print(f"  NORMALISATION: {data_type_str}  factor={normalization_factor:.1f}  "
+                  f"avant: min={result.min():.1f} max={result.max():.1f}")
         result = result / normalization_factor
         result = np.clip(result, 0, 1)
+        if _do_log and is_color:
+            print(f"  APRÈS NORM  : ch0={result[:,:,0].mean():.4f} ch1={result[:,:,1].mean():.4f} ch2={result[:,:,2].mean():.4f}")
 
         # ── Soustraction black level RAW (indépendante de l'ISP software) ──
         # Appliquée uniquement si ISP software désactivé (sinon déjà fait dans ISP)
@@ -388,8 +391,10 @@ class LiveStackSession:
         if is_raw_format and not self.config.isp_enable:
             bl_adu = getattr(self.config, 'raw_black_level', 0)
             if bl_adu > 0:
-                # Fraction de la dynamique 12-bit native : correct qu'il y ait shift ou non
-                bl_norm = bl_adu / 4095.0
+                # Cohérence d'échelle : result a été divisé par normalization_factor.
+                # Les données picamera2 RAW12 sont en espace CSI-2 ×16 (0-65520),
+                # donc BL en espace normalisé = (bl_adu * 16) / normalization_factor.
+                bl_norm = (bl_adu * 16) / normalization_factor
                 result = np.clip(result - bl_norm, 0, None)
 
         # ── Suppression de gradient de fond ──
@@ -423,13 +428,19 @@ class LiveStackSession:
         # Objectif : éviter que le vmax percentile re-calculé à chaque frame cause des
         # variations de luminosité. Le fond de ciel est estimé pour éviter l'effet laiteux.
         if is_raw_format and clip_high < 100.0:
-            _vmax_now = float(np.percentile(result, clip_high))
+            _k = max(0, min(result.size - 1, int(result.size * clip_high / 100.0)))
+            _vmax_now = float(np.partition(result.ravel(), _k)[_k])
+            # Fallback: si le percentile est nul (image très creuse : ciel sombre, peu d'étoiles),
+            # utiliser le max réel pour que le stretch révèle quand même les pixels brillants.
+            if _vmax_now < 1e-10:
+                _vmax_now = float(result.max())
 
             # Estimation fond de ciel = percentile bas des pixels positifs
             # → donne le niveau du fond (sky glow) au-dessus du BL
             _pos = result[result > 1e-6]
             if len(_pos) > result.size * 0.05:  # Au moins 5% de pixels positifs
-                _vmin_now = float(np.percentile(_pos, 5))  # 5e percentile des positifs
+                _k2 = max(0, min(_pos.size - 1, int(_pos.size * 0.05)))
+                _vmin_now = float(np.partition(_pos, _k2)[_k2])
             else:
                 _vmin_now = 0.0
 
@@ -448,11 +459,18 @@ class LiveStackSession:
             if _vmax > _vmin + 1e-6:
                 # Pré-normaliser : fond de ciel → 0 (noir), étoiles → 1 (blanc)
                 result = np.clip((result - _vmin) / (_vmax - _vmin), 0, 1)
+            if _do_log:
+                print(f"  EMA vmin={_vmin:.4f} vmax={_vmax:.4f}  "
+                      f"(now: vmin={_vmin_now:.4f} vmax={_vmax_now:.4f})")
+                if is_color:
+                    print(f"  APRÈS EMA   : ch0={result[:,:,0].mean():.4f} ch1={result[:,:,1].mean():.4f} ch2={result[:,:,2].mean():.4f}")
             # Les fonctions de stretch recevront des données déjà dans [0,1] :
             # - stretch_ghs : skip interne car clip_low=0, clip_high=100
             # - stretch_asinh : percentile(data,0)=0, percentile(data,100)=1 → pas de changement
             clip_low = 0.0
             clip_high = 100.0
+
+        # (AWB auto grey-world déplacé après le stretch — voir ci-dessous)
 
         # Récupérer paramètres GHS
         ghs_D = getattr(self.config, 'ghs_D', 3.0)
@@ -547,12 +565,34 @@ class LiveStackSession:
                 mtf_highlights=_mtf_highlights,
             )
 
+        # Log après stretch
+        if _do_log:
+            is_color_s = len(stretched.shape) == 3
+            print(f"  STRETCH [{self.config.png_stretch_method}] : "
+                  f"min={stretched.min():.4f} max={stretched.max():.4f}")
+            if is_color_s:
+                print(f"  APRÈS STRETCH: ch0={stretched[:,:,0].mean():.4f} "
+                      f"ch1={stretched[:,:,1].mean():.4f} "
+                      f"ch2={stretched[:,:,2].mean():.4f}")
+
+        # ── AWB automatique grey-world (RAW uniquement, APRÈS stretch) ──
+        # Appliqué APRÈS le stretch car le stretch per-canal (for i in range(3))
+        # normalise chaque canal indépendamment et annulerait toute correction pré-stretch.
+        # N'affecte que la preview affichée, pas les données du stack.
+        if is_raw_format and is_color and getattr(self.config, 'awb_auto', False):
+            ch_means = np.array([stretched[:, :, i].mean() for i in range(3)])
+            global_mean = ch_means.mean()
+            if global_mean > 1e-6:
+                for i in range(3):
+                    if ch_means[i] > 1e-6:
+                        stretched[:, :, i] = np.clip(
+                            stretched[:, :, i] * (global_mean / ch_means[i]), 0, 1)
+                if _do_log:
+                    gains = [global_mean / m if m > 1e-6 else 1.0 for m in ch_means]
+                    print(f"  AWB AUTO    : gains ch0×{gains[0]:.3f} ch1×{gains[1]:.3f} ch2×{gains[2]:.3f}")
+
         # Convertir en uint8 ou uint16 selon configuration
         # NOUVEAU: Support PNG 16-bit
-        # print(f"  • Stretched range: [{stretched.min():.3f}, {stretched.max():.3f}]")
-        # print(f"  → Sélection bit depth:")
-        # print(f"     config.png_bit_depth = {self.config.png_bit_depth}")
-        # print(f"     config.video_format = {self.config.video_format}")
 
         if self.config.png_bit_depth == 16:
             preview = (stretched * 65535).astype(np.uint16)

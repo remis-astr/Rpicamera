@@ -9,6 +9,7 @@ Adapté du code HDR original (cupy) pour fonctionner sur RPi5 (numpy CPU)
 
 import numpy as np
 import cv2
+import threading
 
 
 # ============================================================================
@@ -48,11 +49,10 @@ def HDR_compute_12bit(image_12b, method="Median", bits_to_clip=2, type_bayer=cv2
         thresholds.append(2 ** bit_depth - 1)
 
     # Générer les images clippées (du seuil le plus haut au plus bas)
+    # np.clip() évite les copies intermédiaires inutiles
     img_list = []
     for thres in thresholds:
-        img_clipped = image_float.copy()
-        img_clipped[img_clipped > thres] = thres
-        img_8b = (img_clipped / thres * 255.0).astype(np.uint8)
+        img_8b = (np.clip(image_float, 0, thres) / thres * 255.0).astype(np.uint8)
         img_list.append(img_8b)
 
     # Préparer les poids normalisés pour la fusion
@@ -269,17 +269,43 @@ class JSKLiveProcessor:
         self._lut_g = None
         self._lut_b = None
 
-        # Buffer pour le stacking
-        self.frame_buffer = []
+        # Stacking RAW incrémental (thread-safe via lock)
+        # Le rolling mean est sur les frames RAW brutes (avant HDR/debayer),
+        # ce qui garantit que chaque frame capturée contribue au stack,
+        # même si le thread HDR+denoise est encore occupé.
+        self._raw_buf = []           # Buffer circulaire de frames RAW uint16 (mode Window)
+        self._raw_sum = None         # Somme courante float32 (mode Window)
+        self._raw_lock = threading.Lock()
+
+        # Mode EMA (Exponential Moving Average)
+        self.use_ema = False         # True = EMA, False = Rolling Window
+        self._ema = None             # Accumulateur EMA float32 (alpha = 2/(stack_count+1))
 
         # Méthodes HDR (pour affichage)
         self.hdr_methods = ["OFF", "Median", "Mean", "Mertens"]
         self.denoise_types = ["OFF", "Bilateral", "FastNLM", "Gaussian", "Median"]
 
+    @property
+    def ready(self):
+        """True si des données sont disponibles pour process_current()."""
+        if self.use_ema:
+            return self._ema is not None
+        return bool(self._raw_buf)
+
     def configure(self, **kwargs):
         """Configure les paramètres du processeur."""
         if 'stack_count' in kwargs:
-            self.stack_count = max(1, min(6, kwargs['stack_count']))
+            new_sc = max(1, min(10, int(kwargs['stack_count'])))
+            if new_sc != self.stack_count:
+                self.stack_count = new_sc
+                # Tailler le buffer immédiatement si stack_count diminue
+                with self._raw_lock:
+                    while len(self._raw_buf) > self.stack_count:
+                        oldest = self._raw_buf.pop(0)
+                        if self._raw_sum is not None:
+                            self._raw_sum -= oldest.astype(np.float32)
+            else:
+                self.stack_count = new_sc
         if 'hdr_bits_clip' in kwargs:
             self.hdr_bits_clip = max(0, min(3, kwargs['hdr_bits_clip']))
         if 'hdr_method' in kwargs:
@@ -309,6 +335,13 @@ class JSKLiveProcessor:
         if 'contrast' in kwargs:
             self.contrast = max(0.5, min(2.0, float(kwargs['contrast'])))
             self._lut_dirty = True
+        if 'use_ema' in kwargs:
+            new_ema = bool(kwargs['use_ema'])
+            if new_ema != self.use_ema:
+                self.use_ema = new_ema
+                # Réinitialiser l'accumulateur au changement de mode
+                with self._raw_lock:
+                    self._ema = None
 
     def _build_luts(self):
         """Précalcule les LUT R/G/B (contraste + gain canal). Très rapide."""
@@ -332,88 +365,101 @@ class JSKLiveProcessor:
         return cv2.merge([r, g, b])
 
     def clear_buffer(self):
-        """Vide le buffer de frames."""
-        self.frame_buffer = []
+        """Vide le buffer RAW de stacking (Window et EMA)."""
+        with self._raw_lock:
+            self._raw_buf = []
+            self._raw_sum = None
+            self._ema = None
 
-    def add_frame(self, raw_frame):
+    def add_raw_frame(self, raw_frame):
         """
-        Ajoute une frame au buffer.
-        Retourne True si le buffer est plein.
+        Ajoute une frame RAW au rolling mean (main thread, chaque frame capturée).
+        Thread-safe via lock. O(H×W) ≈ 1ms → non-bloquant.
+        Le crop carré est appliqué ici si actif.
         """
-        self.frame_buffer.append(raw_frame.copy())
-
-        # Limiter la taille du buffer
-        while len(self.frame_buffer) > self.stack_count:
-            self.frame_buffer.pop(0)
-
-        return len(self.frame_buffer) >= self.stack_count
-
-    def process(self, raw_frame=None):
-        """
-        Traite une frame RAW 12 bits avec le pipeline complet.
-        Pipeline: RAW12 → HDR (clip) → Debayer → Stack → Denoise
-
-        Args:
-            raw_frame: Frame RAW 12 bits (optionnel, utilise le buffer sinon)
-
-        Returns:
-            Image RGB 8 bits traitée, ou None si buffer incomplet
-        """
-        if raw_frame is None:
-            return None
-
-        # 0. Crop carré centré sur le RAW (avant tout traitement pour gain de performance)
+        rf = raw_frame
         if self.crop_square:
-            h, w = raw_frame.shape[:2]
-            crop_size = min(h, w)          # = 1080 sur capteur 1920×1080
+            h, w = rf.shape[:2]
+            crop_size = min(h, w)
             x_start = (w - crop_size) // 2
-            # S'assurer que x_start est pair pour préserver l'alignement Bayer
             if x_start % 2 != 0:
                 x_start += 1
-            raw_frame = raw_frame[:crop_size, x_start:x_start + crop_size]
+            rf = rf[:crop_size, x_start:x_start + crop_size]
 
-        # 1. HDR Processing sur la frame RAW brute
+        rf_f = rf.astype(np.float32)
+        with self._raw_lock:
+            if self.use_ema:
+                # Mode EMA : pas de buffer, juste une mise à jour O(H×W)
+                # alpha = 2/(N+1) → équivalent N frames de poids moyen
+                alpha = 2.0 / (self.stack_count + 1)
+                if self._ema is None or self._ema.shape != rf_f.shape:
+                    self._ema = rf_f.copy()
+                else:
+                    # ema += alpha * (new - ema)  →  in-place, une seule alloc temp
+                    self._ema += alpha * (rf_f - self._ema)
+            else:
+                # Mode Rolling Window
+                # Guard résolution : réinitialiser si la taille change (binning, crop toggle)
+                if self._raw_sum is not None and self._raw_sum.shape != rf_f.shape:
+                    self._raw_sum = None
+                    self._raw_buf = []
+
+                self._raw_buf.append(rf)
+                # Retirer les frames excédentaires (stack_count peut avoir changé via configure)
+                while len(self._raw_buf) > self.stack_count:
+                    oldest = self._raw_buf.pop(0)
+                    if self._raw_sum is not None:
+                        self._raw_sum -= oldest.astype(np.float32)
+                # Ajouter la nouvelle frame à la somme courante
+                if self._raw_sum is None:
+                    self._raw_sum = rf_f.copy()
+                else:
+                    self._raw_sum += rf_f
+
+    def process_current(self):
+        """
+        Traite la moyenne RAW courante : HDR → debayer → denoise → LUT.
+        Appelé depuis le thread de traitement (HDR+denoise = 40-150ms).
+        Le crop a déjà été appliqué dans add_raw_frame().
+        """
+        with self._raw_lock:
+            if self.use_ema:
+                if self._ema is None:
+                    return None
+                raw_mean = np.clip(self._ema, 0, 4095).astype(np.uint16)
+            else:
+                if self._raw_sum is None or not self._raw_buf:
+                    return None
+                n = len(self._raw_buf)
+                raw_mean = np.clip(self._raw_sum / n, 0, 4095).astype(np.uint16)
+
+        # HDR + debayer sur la moyenne RAW (hors lock)
         if self.hdr_method == 0 or self.hdr_bits_clip == 0:
-            # HDR OFF ou clip=0 - simple conversion 12bit->8bit sans clipping
-            rgb_image = HDR_bypass_12bit(raw_frame, self.bayer_pattern)
+            rgb_image = HDR_bypass_12bit(raw_mean, self.bayer_pattern)
         else:
             method_name = self.hdr_methods[self.hdr_method]
             rgb_image = HDR_compute_12bit(
-                raw_frame,
+                raw_mean,
                 method=method_name,
                 bits_to_clip=self.hdr_bits_clip,
                 type_bayer=self.bayer_pattern,
                 weights=self.hdr_weights
             )
 
-        # 2. Ajouter l'image RGB traitée au buffer pour stacking
-        self.frame_buffer.append(rgb_image.copy())
-        while len(self.frame_buffer) > self.stack_count:
-            self.frame_buffer.pop(0)
-
-        # 3. Stacking (si stack_count > 1 et buffer suffisant)
-        if len(self.frame_buffer) >= self.stack_count:
-            if self.stack_count > 1:
-                stacked = stack_images(self.frame_buffer[-self.stack_count:])
-            else:
-                stacked = self.frame_buffer[-1]
-        else:
-            # Buffer pas encore plein, utiliser l'image courante
-            stacked = rgb_image
-
-        # 4. Denoise
-        result = apply_denoise(stacked, self.denoise_type, self.denoise_strength)
-
-        # 5. Couleur & Contraste (LUT, impact CPU négligeable)
+        # Denoise + LUT couleur/contraste
+        result = apply_denoise(rgb_image, self.denoise_type, self.denoise_strength)
         result = self.apply_color_contrast(result)
-
         return result
 
+    def process(self, raw_frame=None):
+        """Backward-compat : add_raw_frame + process_current en un appel."""
+        if raw_frame is None:
+            return None
+        self.add_raw_frame(raw_frame)
+        return self.process_current()
+
     def process_single(self, raw_frame):
-        """
-        Traite une seule frame avec le pipeline complet (incluant buffer de stacking).
-        Pipeline: RAW12 → HDR (clip) → Debayer → Stack → Denoise
-        """
+        """Alias de process() pour compatibilité."""
         return self.process(raw_frame)
 
 

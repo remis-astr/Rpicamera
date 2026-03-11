@@ -407,6 +407,12 @@ class AdvancedStackingConfig:
     raw_black_level: int = 256        # ADU 12-bit natif capteur, 0 = désactivé
     gradient_removal: bool = False    # Suppression gradient de fond
     gradient_removal_tiles: int = 8   # Taille de la grille n×n
+    awb_auto: bool = False            # AWB auto (grey-world) pour preview stack RAW12
+
+    # BL per-canal Bayer (correction FPN 2×2 avant débayérisation)
+    # None = désactivé. tuple (R, G1, G2, B) en ADU 12-bit pour correction manuelle.
+    bl_per_channel: object = None     # Optional[tuple]
+    bl_auto_estimate: bool = False    # True = estimation auto par percentile bas
 
     # ISP Auto-calibration
     isp_auto_calibrate_method: str = 'histogram_peaks'  # 'none', 'histogram_peaks', 'gray_world'
@@ -521,6 +527,11 @@ class AdvancedStackingConfig:
         legacy.raw_black_level = self.raw_black_level
         legacy.gradient_removal = self.gradient_removal
         legacy.gradient_removal_tiles = self.gradient_removal_tiles
+        legacy.awb_auto = self.awb_auto
+
+        # BL per-canal Bayer
+        legacy.bl_per_channel = self.bl_per_channel
+        legacy.bl_auto_estimate = self.bl_auto_estimate
 
         # Stats
         legacy.num_stacked = self.num_stacked

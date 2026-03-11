@@ -353,16 +353,13 @@ class AdvancedAligner:
                 borderValue=0
             ) > 0.5
 
-            aligned = np.empty((h, w, image.shape[2]), dtype=np.float32)
-            for i in range(3):
-                chan = cv2.warpAffine(
-                    image[:, :, i].astype(np.float32), M, (w, h),
-                    flags=cv2.INTER_LINEAR,
-                    borderMode=cv2.BORDER_CONSTANT,
-                    borderValue=0
-                )
-                chan[~valid_mask] = np.nan
-                aligned[:, :, i] = chan
+            aligned = cv2.warpAffine(
+                image.astype(np.float32), M, (w, h),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0
+            )
+            aligned[~valid_mask] = np.nan
         else:
             h, w = image.shape
             _ones = np.ones((h, w), dtype=np.float32)

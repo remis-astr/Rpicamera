@@ -631,6 +631,10 @@ class RPiCameraLiveStackAdvanced:
             self.config.gradient_removal_tiles = int(kwargs['gradient_removal_tiles'])
             if hasattr(self, 'session') and self.session:
                 self.session.config.gradient_removal_tiles = int(kwargs['gradient_removal_tiles'])
+        if 'awb_auto' in kwargs:
+            self.config.awb_auto = bool(kwargs['awb_auto'])
+            if hasattr(self, 'session') and self.session:
+                self.session.config.awb_auto = bool(kwargs['awb_auto'])
 
         print(f"[DEBUG CONFIGURE] self.config.isp_enable final: {self.config.isp_enable}")
         print(f"[DEBUG CONFIGURE] self.config.isp_config_path final: {self.config.isp_config_path}")

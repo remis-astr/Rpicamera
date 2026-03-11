@@ -47,14 +47,14 @@ class ImageStacker:
 
         if self.stacked_image is None:
             # Première image : initialisation
-            self.stacked_image = image.astype(np.float64)
+            self.stacked_image = image.astype(np.float32)
 
             if is_color:
                 self.weight_map = np.ones(
-                    (image.shape[0], image.shape[1]), dtype=np.float64
+                    (image.shape[0], image.shape[1]), dtype=np.float32
                 )
             else:
-                self.weight_map = np.ones_like(image, dtype=np.float64)
+                self.weight_map = np.ones_like(image, dtype=np.float32)
 
             # Init variance pour sigma-clipping (Welford)
             if method in ('kappa_sigma', 'winsorized'):
@@ -64,7 +64,7 @@ class ImageStacker:
 
         else:
             self.config.num_stacked += 1
-            img = image.astype(np.float64)
+            img = image.astype(np.float32)
 
             if method in ('kappa_sigma', 'winsorized'):
                 # Welford's online algorithm + rejet par kappa

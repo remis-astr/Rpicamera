@@ -70,10 +70,22 @@ class StackingConfig:
         # IMX585 standard : 256 ADU (= 6.25% de 4096)
         self.raw_black_level = 256
 
+        # Soustraction BL per-canal Bayer (avant débayérisation dans debayer_raw_array)
+        # Élimine le FPN 2×2 causé par les déséquilibres inter-canal (R, G1, G2, B).
+        # None = désactivé (comportement historique, BL global appliqué après débayérisation).
+        # tuple (R, G1, G2, B) en ADU 12-bit natif pour correction manuelle.
+        self.bl_per_channel = None
+
+        # Si True, estimer automatiquement les 4 BL par percentile bas sur chaque
+        # sous-canal Bayer (robuste au fond sombre dominant en imagerie astronomique).
+        # Ignoré si bl_per_channel est fourni.
+        self.bl_auto_estimate = False
+
         # Suppression de gradient de fond (lumière parasite, vignetage)
         # Algorithme par grille de médiane/percentile (mesh-based background estimation)
         self.gradient_removal = False
         self.gradient_removal_tiles = 8   # Taille de la grille n×n (8 = grille 8×8)
+        self.awb_auto = False             # AWB auto (grey-world) pour preview stack RAW12
 
         # Paramètres ISP (Image Signal Processor)
         self.isp_enable = False            # Activer l'ISP (pour RAW12/16)

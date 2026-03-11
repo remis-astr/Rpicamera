@@ -147,6 +147,42 @@ class CollimationDetector:
         """Retourne le dict des cercles verrouilles {name: (cx,cy,r)}."""
         return dict(self._locked)
 
+    def set_circle_position(self, name, cx, cy, r):
+        """Positionne un cercle manuellement (en coordonnees image originale).
+
+        Contrairement a set_circle_locked() qui copie la position detectee,
+        set_circle_position() permet :
+        - Toute position, y compris partiellement hors image (utile pour le focuser)
+        - Un rayon tres petit (min 5px pour camera, 10px pour les autres cercles)
+
+        La position est stockee dans _locked (bypass la detection Hough).
+
+        Args:
+            name: nom du cercle ('focuser', 'secondary', 'primary', 'camera')
+            cx, cy: centre en pixels de l'image originale (peut etre negatif ou > dim)
+            r: rayon en pixels de l'image originale
+        """
+        if name not in self.circle_config:
+            return
+        min_r = 5 if name == 'camera' else 10
+        r = max(min_r, int(r))
+        self._locked[name] = (int(cx), int(cy), r)
+        self.circles[name] = self._locked[name]
+        # Vider l'historique pour eviter interference avec la position manuelle
+        if name in self._history:
+            del self._history[name]
+        # Recalculer focuser_center si le focuser est repositionne
+        if name == 'focuser':
+            self.focuser_center = (int(cx), int(cy))
+        # Recalculer les excentricites
+        if self.focuser_center is not None:
+            for n in ['secondary', 'primary', 'camera']:
+                if n in self.circles:
+                    ox, oy, _ = self.circles[n]
+                    fcx, fcy = self.focuser_center
+                    dist = np.sqrt((ox - fcx) ** 2 + (oy - fcy) ** 2)
+                    self.eccentricities[n] = round(dist, 1)
+
     def set_circle_radius_range(self, name, min_pct, max_pct):
         """Change la plage de rayon d'un cercle (en % de min(h,w))."""
         if name in self.circle_config:
@@ -433,7 +469,12 @@ class CollimationDetector:
             return None
 
         # Excentricite max en proportion du rayon du focuser
-        max_ecc = max(self.eccentricities.values())
+        # Seuls le secondaire et le reflet camera sont pertinents pour le score
+        # (le reflet du primaire n'est pas un indicateur de collimation direct)
+        relevant = {k: v for k, v in self.eccentricities.items() if k in ('secondary', 'camera')}
+        if not relevant:
+            return None
+        max_ecc = max(relevant.values())
         # 0 px d'ecart = 100%, focuser_r/4 d'ecart = 0%
         score = max(0, 100 - (max_ecc / (focuser_r * 0.25)) * 100)
         return int(score)
