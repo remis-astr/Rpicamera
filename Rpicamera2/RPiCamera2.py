@@ -1124,7 +1124,7 @@ def auto_fix_bad_pixels_bayer(raw_bayer, sigma=5.0, min_threshold_adu=20.0, blen
     return np.clip(fixed, 0, 65535).astype(np.uint16)
 
 
-def debayer_raw_array(raw_array, raw_format_str, red_gain=1.0, blue_gain=1.0, apply_denoise=True, swap_rb=False, fix_bad_pixels=False, sigma_threshold=5.0, min_adu_threshold=20.0):
+def debayer_raw_array(raw_array, raw_format_str, red_gain=1.0, blue_gain=1.0, apply_denoise=True, swap_rb=False, fix_bad_pixels=False, sigma_threshold=5.0, min_adu_threshold=20.0, bl_per_channel=None, bl_auto_estimate=False, use_vng=False, global_black_level=0):
     """
     Débayérise un array RAW Bayer (SRGGB12 ou SRGGB16) en RGB uint16 avec balance des blancs.
 
@@ -1140,6 +1140,17 @@ def debayer_raw_array(raw_array, raw_format_str, red_gain=1.0, blue_gain=1.0, ap
         fix_bad_pixels: Activer la correction automatique des pixels morts (défaut=False)
         sigma_threshold: Seuil de détection des pixels morts en sigma (défaut=5.0)
         min_adu_threshold: Seuil minimum absolu en ADU (défaut=20.0, 0=désactivé)
+        bl_per_channel: tuple (R, G1, G2, B) en ADU 12-bit natif pour correction FPN 2×2.
+                        None = désactivé. Soustrait avant débayérisation sur chaque sous-canal.
+        bl_auto_estimate: Si True et bl_per_channel est None, estimer automatiquement les 4 BL
+                          par percentile bas de chaque sous-canal Bayer (robuste en astro).
+        use_vng: Si True, utiliser l'algorithme VNG (Variable Number of Gradients) au lieu
+                 du bilinéaire. Réduit les artefacts 2×2 de démosaïcisation (~20% plus lent).
+        global_black_level: Black level global en ADU 12-bit (ex: 256 pour IMX585). Soustrait
+                            de tous les canaux RGB APRÈS débayérisation mais AVANT les gains AWB.
+                            Évite que blue_gain amplifie le BL → teinte bleue progressive.
+                            Ignoré si bl_per_channel ou bl_auto_estimate sont actifs (FPN mode).
+                            0 = désactivé (défaut).
 
     Returns:
         Array numpy uint16 (height, width, 3) RGB [0-65535]
@@ -1182,6 +1193,29 @@ def debayer_raw_array(raw_array, raw_format_str, red_gain=1.0, blue_gain=1.0, ap
         if fix_bad_pixels:
             raw_image = auto_fix_bad_pixels_bayer(raw_image, sigma=sigma_threshold, min_threshold_adu=min_adu_threshold)
 
+        # *** SOUSTRACTION BLACK LEVEL PER-CANAL BAYER (correction FPN 2×2) ***
+        # Élimine les déséquilibres de gain/offset entre R, G1, G2, B du circuit de lecture.
+        # DOIT être fait AVANT débayérisation pour agir sur chaque sous-canal séparément.
+        # Pattern SRGGB : R=(pair,pair), G1=(pair,impair), G2=(impair,pair), B=(impair,impair).
+        # Données picamera2 en espace CSI-2 ×16 : BL 256 ADU natif → valeur 4096 dans raw_image.
+        if bl_per_channel is not None or bl_auto_estimate:
+            _offsets_adu = list(bl_per_channel) if bl_per_channel is not None else [None, None, None, None]
+            _raw_f = raw_image.astype(np.float32)
+            for _idx, (_sy, _sx) in enumerate([(0, 0), (0, 1), (1, 0), (1, 1)]):
+                _sub = _raw_f[_sy::2, _sx::2]
+                if _offsets_adu[_idx] is None:
+                    # Auto-estimation : percentile 5% du sous-canal
+                    # -16 de marge (= 1 ADU natif) pour ne pas écrêter les pixels très sombres
+                    _p5 = float(np.percentile(_sub, 5))
+                    _bl_val = max(0.0, _p5 - 16.0)
+                    # Plafond : évite la sur-soustraction sur scènes lumineuses/saturées
+                    # IMX585 BL nominal = 256 ADU 12-bit = 4096 CSI-2 ×16, marge ×1.3 → ~5325
+                    _bl_val = min(_bl_val, 256.0 * 16.0 * 1.3)
+                else:
+                    _bl_val = float(_offsets_adu[_idx]) * 16.0  # ADU 12-bit → espace CSI-2 ×16
+                _raw_f[_sy::2, _sx::2] = np.maximum(_sub - _bl_val, 0.0)
+            raw_image = _raw_f.astype(np.uint16)
+
         # *** DÉBRUITAGE PRÉ-DEBAYER (optionnel) ***
         # DÉSACTIVÉ car cause écran noir pendant le stack (trop lent)
         # if apply_denoise:
@@ -1189,14 +1223,35 @@ def debayer_raw_array(raw_array, raw_format_str, red_gain=1.0, blue_gain=1.0, ap
 
         # Débayériser DIRECTEMENT en uint16 (préserve la dynamique complète)
         # OpenCV supporte la débayérisation sur uint16
-        # COLOR_BayerRG2BGR : pour l'IMX585/picamera2, donne ch0=R_physique, ch2=B_physique
-        # → l'aligneur utilise 0.299*ch0 comme poids rouge → luminance correcte → pas de dérive
-        # Le swap R/B pour l'affichage est fait UNIQUEMENT à la couche display (après stack/stretch)
-        rgb_uint16 = cv2.cvtColor(raw_image, cv2.COLOR_BayerRG2BGR)
+        # NOTE: COLOR_BayerRG2BGR sur IMX585/picamera2 SRGGB12 donne ch0=R_physique, ch2=B_physique
+        # (comportement empirique pour ce capteur, non-standard OpenCV BGR mais vérifié en pratique)
+        # → AWB gains corrects : ch0×red_gain (R_phys), ch2×blue_gain (B_phys)
+        # → Aligner : luminance = 0.299×ch0(R) + 0.587×ch1(G) + 0.114×ch2(B) → poids corrects
+        # → Affichage pygame sans swap : ch0(R_phys)→Rouge ✓
+        # VNG (Variable Number of Gradients) : réduit les artefacts 2×2 de démosaïcisation
+        # mais est ~20% plus lent. use_vng=True pour activer.
+        # LIMITATION OpenCV : COLOR_BayerRG2BGR_VNG ne supporte que CV_8U (pas uint16).
+        # Solution : convertir en uint8 (>>8) pour VNG, puis remettre à l'échelle ×256.
+        if use_vng:
+            _raw8 = (raw_image >> 8).astype(np.uint8)
+            _rgb8 = cv2.cvtColor(_raw8, cv2.COLOR_BayerRG2BGR_VNG)
+            # Conversion directe uint8→float32 (évite l'intermédiaire uint16)
+            rgb_float = _rgb8.astype(np.float32) * 256.0
+        else:
+            rgb_uint16 = cv2.cvtColor(raw_image, cv2.COLOR_BayerRG2BGR)
+            # *** Appliquer la balance des blancs (AWB gains) ***
+            # Sortie RGB: ch0=R_physique, ch1=G, ch2=B_physique
+            rgb_float = rgb_uint16.astype(np.float32)
 
-        # *** Appliquer la balance des blancs (AWB gains) ***
-        # Sortie BGR: ch0=R_physique, ch1=G, ch2=B_physique (pour ce capteur)
-        rgb_float = rgb_uint16.astype(np.float32)
+        # *** SOUSTRACTION BLACK LEVEL GLOBAL (avant gains AWB) ***
+        # Soustrait le BL de tous les canaux AVANT d'appliquer les gains AWB.
+        # Évite que blue_gain (ex: 2.30) amplifie le BL → teinte bleue progressive en stack.
+        # En espace CSI-2 ×16 : 256 ADU 12-bit → 4096 dans raw_image → présent dans rgb_float.
+        # Désactivé si bl_per_channel ou bl_auto_estimate sont actifs (FPN mode gère déjà le BL).
+        if global_black_level > 0 and bl_per_channel is None and not bl_auto_estimate:
+            _bl_csi2 = float(global_black_level) * 16.0
+            rgb_float -= _bl_csi2
+            np.clip(rgb_float, 0.0, None, out=rgb_float)
 
         if swap_rb:
             # Mode swap_rb : inverser rouge et bleu
@@ -1208,14 +1263,9 @@ def debayer_raw_array(raw_array, raw_format_str, red_gain=1.0, blue_gain=1.0, ap
             rgb_float[:, :, 2] *= blue_gain  # ch2 = B_physique → blue_gain ✓
         # Canal Vert (index 1) : gain = 1.0, pas de modification
 
-        # Cliper et reconvertir en uint16
-        rgb_uint16 = np.clip(rgb_float, 0, 65535).astype(np.uint16)
-
-        # Retourner en uint16 pour préserver la dynamique 12/16-bit
-        # et être compatible avec libastrostack
-        # Note: Pour SRGGB12, les valeurs sont déjà dans la bonne plage (0-65520)
-        # car le capteur shifte de 4 bits à gauche.
-        return rgb_uint16
+        # Cliper et retourner en float32 (évite une conversion uint16→float32 chez le caller)
+        # Dynamique préservée : [0.0, 65535.0] — compatible libastrostack
+        return np.clip(rgb_float, 0.0, 65535.0)
 
     except Exception as e:
         print(f"[ERROR] Débayérisation échouée: {e}")
@@ -1227,6 +1277,71 @@ def debayer_raw_array(raw_array, raw_format_str, red_gain=1.0, blue_gain=1.0, ap
             return np.zeros((height, width, 3), dtype=np.uint16)
         except:
             return np.zeros((1090, 1928, 3), dtype=np.uint16)
+
+
+def _ls_process_frame_thread(arr_copy, proc_kw, livestack_obj):
+    """
+    Thread de traitement LiveStack : process_frame + get_preview + post-traitement.
+    Retourne un ndarray uint8 (H, W, 3) prêt pour pygame.surfarray.make_surface(), ou None.
+    Appelé depuis ThreadPoolExecutor(max_workers=1) → pas de concurrence sur livestack_obj.
+    """
+    try:
+        if not proc_kw.get('skip_exp', False):
+            # Sauvegarde DNG individuelle si demandée (via queue déjà existante)
+            _save_mode = proc_kw.get('ls_save_dng_mode', 0)
+            _prev_acc  = proc_kw.get('prev_accepted', 0)
+            _save_q    = proc_kw.get('save_queue')
+
+            livestack_obj.process_frame(arr_copy)
+
+            # Mettre à jour le compteur DNG après stacking (frame acceptée ou non)
+            if _save_mode > 0 and _save_q is not None:
+                _cur_acc   = livestack_obj.get_stats().get('accepted_frames', 0)
+                _should_sv = (_save_mode == 2) or (_save_mode == 1 and _cur_acc > _prev_acc)
+                if _should_sv:
+                    _save_q.put((arr_copy.copy(), _cur_acc))
+                proc_kw['_last_accepted'] = _cur_acc   # passé au main loop via proc_kw mutable
+
+        stacked = livestack_obj.get_preview_for_display()
+        if stacked is None:
+            return None
+
+        # Post-traitement → uint8 pour pygame
+        if proc_kw.get('raw_format', 0) >= 2:
+            if stacked.dtype != np.uint8:
+                stacked = np.clip(stacked, 0, 255).astype(np.uint8)
+        else:
+            stacked = apply_isp_to_preview(stacked)
+            if proc_kw.get('stretch_preset', 0) != 0:
+                stacked = astro_stretch(stacked)
+            if stacked.dtype != np.uint8:
+                stacked = np.clip(stacked, 0, 255).astype(np.uint8)
+
+        return stacked
+
+    except Exception as _e:
+        print(f"[LS THREAD] {_e}")
+        return None
+
+
+def _jsk_process_thread(jsk_processor, do_stretch):
+    """
+    Thread de traitement JSK LIVE : HDR + denoise + stretch sur la moyenne RAW courante.
+    Le stacking (rolling mean RAW) est fait dans le main thread à chaque frame via add_raw_frame().
+    Retourne un ndarray uint8 (H, W, 3) RGB prêt pour pygame.surfarray.make_surface(), ou None.
+    """
+    try:
+        result = jsk_processor.process_current()
+        if result is None:
+            return None
+        if do_stretch:
+            result = astro_stretch(result)
+        if result.dtype != np.uint8:
+            result = np.clip(result, 0, 255).astype(np.uint8)
+        return result
+    except Exception as _e:
+        print(f"[JSK THREAD] {_e}")
+        return None
 
 
 def calculate_snr(image):
@@ -1529,6 +1644,7 @@ mtf_highlights = 100  # MTF highlights (x100, 50-100 → 0.5-1.0)
 jsk_live_mode = 0           # 0=OFF, 1=Active
 jsk_settings_visible = 0    # 0=Masqué, 1=Affiché
 jsk_stack_count = 1         # 1-10 images à empiler (après HDR)
+jsk_use_ema = 0             # 0=Rolling Window, 1=EMA (Exponential Moving Average)
 jsk_hdr_bits_clip = 2       # 1-3 bits de poids fort à enlever
 jsk_hdr_method = 2          # 0=OFF, 1=Median, 2=Mean, 3=Mertens
 jsk_denoise_type = 0        # 0=OFF, 1=Bilateral, 2=FastNLM, 3=Gaussian, 4=Median
@@ -1680,6 +1796,15 @@ collimation_gain = 0              # Gain en mode collimation (0=AUTO, 1-max)
 collimation_exposure_us = 0       # Exposition en µs en mode collimation (0=AUTO)
 collimation_saved_gain = 0        # Sauvegarde du gain global a l'entree
 collimation_saved_exposure = 0    # Sauvegarde de l'exposition globale a l'entree
+collimation_manual_mode = 0          # 0=AUTO, 1=MANUEL (deplacement manuel des cercles)
+collimation_selected_circle = None   # Cercle selectionne en mode manuel ('focuser', etc.)
+_colim_dragging = False              # True si drag en cours (mode manuel)
+_colim_drag_type = None              # 'move' ou 'resize'
+_colim_drag_start_r_img = 0         # Rayon image au debut du drag
+_colim_drag_center_img = (0, 0)     # Centre image au debut du drag
+_collimation_circle_selector_rects = {}  # Rects des boutons selecteur de cercle (mode manuel)
+_colim_r_minus_rect = None           # Rect bouton R-
+_colim_r_plus_rect = None            # Rect bouton R+
 
 # METRICS Settings - Phase 2 Demande 5 et 6
 focus_method = 1        # 0=OFF, 1=Laplacian, 2=Gradient, 3=Sobel, 4=Tenengrad
@@ -1888,6 +2013,18 @@ isp_wb_blue = 100             # 0.5-2.0 → 50-200 (défaut 1.0)
 isp_gamma = 100               # 0.5-3.0 → 50-300 (défaut 1.0, correspond à gamma 2.2)
 isp_black_level = 256         # 0-500 direct (défaut 256 pour IMX585 12-bit)
 ls_gradient_removal = 0       # 0=OFF, 1=ON  (suppression gradient fond de ciel, RAW uniquement)
+ls_raw_awb_auto = 0           # 0=OFF, 1=ON  (AWB auto grey-world pour preview stack RAW12)
+
+# Correction FPN 2×2 : soustraction black level per-canal Bayer avant débayérisation
+# 0=OFF  1=auto-estimation (percentile bas de chaque sous-canal)  2=valeurs manuelles
+ls_bl_per_channel_enable = 1
+ls_bl_r  = 256  # ADU 12-bit canal R   (IMX585 nominal ≈ 256)
+ls_bl_g1 = 258  # ADU 12-bit canal G1  (position pair,impair)
+ls_bl_g2 = 260  # ADU 12-bit canal G2  (position impair,pair)
+ls_bl_b  = 253  # ADU 12-bit canal B
+
+# Algorithme de débayérisation : 0=bilinéaire (défaut, rapide), 1=VNG (meilleure qualité)
+debayer_vng = 1
 isp_brightness = 0            # -0.5-0.5 → -50-50 (défaut 0)
 isp_contrast = 100            # 0.5-2.0 → 50-200 (défaut 1.0)
 isp_saturation = 100          # 0.0-2.0 → 0-200 (défaut 1.0)
@@ -2602,6 +2739,9 @@ metrics_interval = max(1, min(metrics_interval, 10))  # 1-10 frames
 
 # Sensor mode
 use_native_sensor_mode = max(0, min(use_native_sensor_mode, 1))  # 0-1: Binning/Native
+# Synchroniser le bouton binning avec l'état réel de la caméra
+# home_binning=1 ↔ use_native_sensor_mode=0 (binning actif)
+home_binning = 1 - use_native_sensor_mode
 
 # ISP parameter
 isp_enable = max(0, min(isp_enable, 1))  # 0-1: OFF/ON
@@ -5344,18 +5484,22 @@ def _ls_ge_slider_positions(screen_height, screen_width=1920):
 def draw_ls_gain_expo_zoom(screen_width, screen_height):
     """Dessine les sliders Gain, Expo, Zoom en haut-centre — Live Stack interface."""
     global windowSurfaceObj, _font_cache, ls_gain, ls_exposure_us, ls_zoom
+    global home_gain_scale_idx, home_expo_scale_idx, _HOME_GAIN_SCALES, _HOME_EXPO_SCALES_MS
     import math
     sx, sy_gain, sy_expo, sy_zoom, slider_w, slider_h = _ls_ge_slider_positions(screen_height, screen_width)
 
-    min_exp_us, max_exp_us = 1000, 100000  # 1ms – 100ms
-    exp_c = max(min_exp_us, min(ls_exposure_us, max_exp_us))
+    _gain_max = _HOME_GAIN_SCALES[max(0, min(home_gain_scale_idx, len(_HOME_GAIN_SCALES)-1))]
+    _expo_max_us = _HOME_EXPO_SCALES_MS[max(0, min(home_expo_scale_idx, len(_HOME_EXPO_SCALES_MS)-1))] * 1000
+
+    min_exp_us = 1000
+    exp_c = max(min_exp_us, min(ls_exposure_us, _expo_max_us))
     log_min = math.log10(min_exp_us)
-    log_max = math.log10(max_exp_us)
-    expo_ratio = (math.log10(exp_c) - log_min) / (log_max - log_min)
+    log_max = math.log10(_expo_max_us)
+    expo_ratio = (math.log10(exp_c) - log_min) / max(0.001, log_max - log_min)
 
     expo_ms = ls_exposure_us / 1000.0
     expo_text = f"Expo: {expo_ms:.1f}ms" if expo_ms < 10 else f"Expo: {expo_ms:.0f}ms"
-    gain_ratio = ls_gain / 300.0 if ls_gain > 0 else 0.0
+    gain_ratio = ls_gain / _gain_max if ls_gain > 0 else 0.0
     gain_text = f"Gain: {'AUTO' if ls_gain == 0 else ls_gain}"
     zoom_ratio = ls_zoom / 5.0
     zoom_text = f"Zoom: {ls_zoom}x"
@@ -5382,21 +5526,25 @@ def draw_ls_gain_expo_zoom(screen_width, screen_height):
 
 
 def is_click_on_ls_gain_slider(mx, my, screen_width, screen_height):
-    """Retourne nouvelle valeur gain (0-300) ou None."""
+    """Retourne nouvelle valeur gain (0-gain_max) ou None."""
+    global home_gain_scale_idx, _HOME_GAIN_SCALES
+    _gain_max = _HOME_GAIN_SCALES[max(0, min(home_gain_scale_idx, len(_HOME_GAIN_SCALES)-1))]
     sx, sy_gain, _, _, slider_w, slider_h = _ls_ge_slider_positions(screen_height, screen_width)
     if sx <= mx <= sx + slider_w and sy_gain <= my <= sy_gain + slider_h:
-        return max(0, min(300, int((mx - sx) / slider_w * 300)))
+        return max(0, min(_gain_max, int((mx - sx) / slider_w * _gain_max)))
     return None
 
 
 def is_click_on_ls_expo_slider(mx, my, screen_width, screen_height):
-    """Retourne nouvelle valeur expo en µs (1000-100000) ou None."""
+    """Retourne nouvelle valeur expo en µs (1000-expo_max) ou None."""
+    global home_expo_scale_idx, _HOME_EXPO_SCALES_MS
     import math
+    _expo_max_us = _HOME_EXPO_SCALES_MS[max(0, min(home_expo_scale_idx, len(_HOME_EXPO_SCALES_MS)-1))] * 1000
     sx, _, sy_expo, _, slider_w, slider_h = _ls_ge_slider_positions(screen_height, screen_width)
     if sx <= mx <= sx + slider_w and sy_expo <= my <= sy_expo + slider_h:
         ratio = max(0.0, min(1.0, (mx - sx) / slider_w))
         log_min = math.log10(1000)
-        log_max = math.log10(100000)
+        log_max = math.log10(_expo_max_us)
         return int(10 ** (log_min + ratio * (log_max - log_min)))
     return None
 
@@ -5520,7 +5668,7 @@ def draw_ls_controls(screen_width, screen_height):
     global ls_settings_tab, livestack_active, ls_sched_frames_done
     global stretch_preset, isp_gamma, isp_brightness, isp_contrast, isp_saturation
     global ls_cam_brightness, ls_cam_contrast, ls_cam_saturation, raw_format
-    global isp_black_level, ls_gradient_removal
+    global isp_black_level, ls_gradient_removal, ls_raw_awb_auto
     global log_factor, mtf_shadows, mtf_midtone, mtf_highlights
 
     panel_w  = 260
@@ -5783,20 +5931,59 @@ def draw_ls_controls(screen_width, screen_height):
             f"Saturation: {isp_saturation/100:.1f}", isp_saturation, 0, 200, (180, 140, 180))
         start_y += slider_h + margin
 
-        # Section RAW uniquement (black level + gradient removal)
+        # Section RAW uniquement (black level + gradient removal + débayer)
         if raw_format >= 2:
             windowSurfaceObj.blit(
                 _font_cache[ck_sect].render("RAW", True, (110, 195, 135)),
                 (panel_x + 2, start_y))
             start_y += 16
+
+            # Sélecteur méthode de débayérisation (Bilinéaire / VNG)
+            _db_lbl = "VNG" if debayer_vng else "Bilinéaire"
+            control_rects['ls_raw_debayer'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Débayer: {_db_lbl}", debayer_vng, 0, 1, (100, 160, 190))
+            start_y += slider_h + margin
+
+            # Sélecteur mode correction Black Level (3 états)
+            _bl_mode_names = ["Global", "Auto FPN", "Manuel"]
+            _bl_mode_lbl = _bl_mode_names[min(ls_bl_per_channel_enable, 2)]
+            control_rects['ls_raw_bl_mode'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"BL Mode: {_bl_mode_lbl}", ls_bl_per_channel_enable, 0, 2, (160, 140, 110))
+            start_y += slider_h + margin
+
+            # Black Level global (actif seulement en mode Global)
+            _bl_global_active = (ls_bl_per_channel_enable == 0)
+            _bl_color = (160, 140, 110) if _bl_global_active else (60, 55, 45)
+            _bl_suffix = "" if _bl_global_active else " [-]"
             control_rects['ls_raw_black_level'] = draw_jsk_slider(
                 panel_x, start_y, slider_w, slider_h,
-                f"Black Level: {isp_black_level}", isp_black_level, 0, 500, (160, 140, 110))
+                f"Black Level: {isp_black_level}{_bl_suffix}", isp_black_level, 0, 500, _bl_color)
             start_y += slider_h + margin
+
+            # Sliders BL par canal (visibles seulement en mode Manuel)
+            if ls_bl_per_channel_enable == 2:
+                for _ch_lbl, _ch_val, _ch_key in [
+                    ("BL R",  ls_bl_r,  'ls_raw_bl_r'),
+                    ("BL G1", ls_bl_g1, 'ls_raw_bl_g1'),
+                    ("BL G2", ls_bl_g2, 'ls_raw_bl_g2'),
+                    ("BL B",  ls_bl_b,  'ls_raw_bl_b'),
+                ]:
+                    control_rects[_ch_key] = draw_jsk_slider(
+                        panel_x, start_y, slider_w, slider_h,
+                        f"{_ch_lbl}: {_ch_val}", _ch_val, 0, 512, (110, 130, 160))
+                    start_y += slider_h + margin
+
             _gr_lbl = "ON" if ls_gradient_removal else "OFF"
             control_rects['ls_raw_gradient'] = draw_jsk_slider(
                 panel_x, start_y, slider_w, slider_h,
                 f"Gradient BG: {_gr_lbl}", ls_gradient_removal, 0, 1, (110, 160, 140))
+            start_y += slider_h + margin
+            _awb_lbl = "ON" if ls_raw_awb_auto else "OFF"
+            control_rects['ls_raw_awb_auto'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"AWB Auto: {_awb_lbl}", ls_raw_awb_auto, 0, 1, (180, 160, 110))
             start_y += slider_h + margin
 
         # Section ISP caméra (hardware) — uniquement en mode RGB/YUV
@@ -5830,7 +6017,8 @@ def handle_ls_slider_click(mx, my, control_rects):
     global ls_scheduler_enabled, ls_sched_gain, ls_sched_expo_us, ls_sched_frames
     global stretch_preset, isp_gamma, isp_brightness, isp_contrast, isp_saturation
     global ls_cam_brightness, ls_cam_contrast, ls_cam_saturation, picam2, use_picamera2
-    global livestack, isp_black_level, ls_gradient_removal
+    global livestack, isp_black_level, ls_gradient_removal, ls_raw_awb_auto
+    global debayer_vng, ls_bl_per_channel_enable, ls_bl_r, ls_bl_g1, ls_bl_g2, ls_bl_b
     global log_factor, mtf_shadows, mtf_midtone, mtf_highlights
     import math as _math
 
@@ -5925,14 +6113,35 @@ def handle_ls_slider_click(mx, my, control_rects):
                 if use_picamera2 and picam2 is not None:
                     if livestack is None or not livestack.is_running:
                         picam2.set_controls({"Saturation": ls_cam_saturation / 10.0})
+            elif name == 'ls_raw_debayer':
+                # Toggle bilinéaire (0) / VNG (1)
+                debayer_vng = 1 if ratio > 0.5 else 0
+            elif name == 'ls_raw_bl_mode':
+                # 3 états : 0=Global, 1=Auto FPN, 2=Manuel
+                ls_bl_per_channel_enable = int(ratio * 2 + 0.5)
+                ls_bl_per_channel_enable = max(0, min(2, ls_bl_per_channel_enable))
             elif name == 'ls_raw_black_level':
-                isp_black_level = int(ratio * 500)           # 0-500 direct
-                if livestack is not None:
-                    livestack.configure(raw_black_level=isp_black_level)
+                # BL global — actif seulement en mode Global (ls_bl_per_channel_enable == 0)
+                # En mode Auto/Manuel, le BL est géré par debayer_raw_array() per-canal
+                if ls_bl_per_channel_enable == 0:
+                    isp_black_level = int(ratio * 500)
+                    # Note: raw_black_level=0 dans session (BL géré dans debayer désormais)
+            elif name == 'ls_raw_bl_r':
+                ls_bl_r = int(ratio * 512)
+            elif name == 'ls_raw_bl_g1':
+                ls_bl_g1 = int(ratio * 512)
+            elif name == 'ls_raw_bl_g2':
+                ls_bl_g2 = int(ratio * 512)
+            elif name == 'ls_raw_bl_b':
+                ls_bl_b = int(ratio * 512)
             elif name == 'ls_raw_gradient':
                 ls_gradient_removal = 1 if ratio > 0.5 else 0
                 if livestack is not None:
                     livestack.configure(gradient_removal=bool(ls_gradient_removal))
+            elif name == 'ls_raw_awb_auto':
+                ls_raw_awb_auto = 1 if ratio > 0.5 else 0
+                if livestack is not None:
+                    livestack.configure(awb_auto=bool(ls_raw_awb_auto))
 
             # Propager les paramètres stacking vers livestack.configure()
             # (les paramètres UI-only ou caméra-directs sont déjà traités ci-dessus)
@@ -7820,14 +8029,20 @@ def apply_isp_to_preview(array):
         if img.max() > 0:
             img = img / img.max()
 
-    # 2. White balance - ATTENTION: pygame fait un swap R↔B pour l'affichage ([:,:,[2,1,0]])
-    # Donc on doit appliquer wb_r sur canal 2 et wb_b sur canal 0 pour que l'effet
-    # corresponde visuellement au label du slider
+    # 2. White balance
+    # RAW12 (raw_format >= 2) : ch0=R_phys, ch2=B_phys, PAS de swap à l'affichage
+    # RGB8/YUV (raw_format < 2) : ch0=B_phys, ch2=R_phys, swap [:,:,[2,1,0]] à l'affichage
     if wb_r != 1.0 or wb_g != 1.0 or wb_b != 1.0:
-        # INVERSÉ pour compenser le swap pygame [:,:,[2,1,0]]
-        img[:, :, 2] = img[:, :, 2] * wb_r  # Canal 2 natif → Rouge à l'écran
-        img[:, :, 1] = img[:, :, 1] * wb_g  # Canal 1 = Vert (inchangé)
-        img[:, :, 0] = img[:, :, 0] * wb_b  # Canal 0 natif → Bleu à l'écran
+        if raw_format >= 2:
+            # RAW12 : appliquer directement sur les canaux physiques
+            img[:, :, 0] = img[:, :, 0] * wb_r  # ch0=R_phys → Rouge ✓
+            img[:, :, 1] = img[:, :, 1] * wb_g
+            img[:, :, 2] = img[:, :, 2] * wb_b  # ch2=B_phys → Bleu ✓
+        else:
+            # RGB8/YUV : inversé pour compenser le swap pygame [:,:,[2,1,0]]
+            img[:, :, 2] = img[:, :, 2] * wb_r  # ch2(R_phys) → Rouge après swap ✓
+            img[:, :, 1] = img[:, :, 1] * wb_g
+            img[:, :, 0] = img[:, :, 0] * wb_b  # ch0(B_phys) → Bleu après swap ✓
         img = np.clip(img, 0, 1)
 
     # 3. Gamma correction (IDENTIQUE à ISP._apply_gamma)
@@ -7908,12 +8123,22 @@ def save_with_external_processing(stacker_obj, filename=None, raw_format_name=No
         print(f"[SAVE] Erreur récupération résultat: {e}")
         return None
 
-    # Appliquer ISP externe
-    processed = apply_isp_to_preview(raw_result.copy())
+    # Générer le PNG via session.get_preview_png() = même pipeline que l'affichage
+    # (normalisation, BL, gradient removal, EMA percentile, stretch configuré)
+    processed_png = None
+    if hasattr(stacker_obj, 'session') and stacker_obj.session is not None:
+        _orig_stack = stacker_obj.session.stacker.stacked_image
+        stacker_obj.session.stacker.stacked_image = raw_result
+        try:
+            processed_png = stacker_obj.session.get_preview_png()
+        finally:
+            stacker_obj.session.stacker.stacked_image = _orig_stack
 
-    # Appliquer stretch externe (si activé)
-    if stretch_preset != 0:
-        processed = astro_stretch(processed)
+    # Fallback si session indisponible
+    if processed_png is None:
+        processed_png = apply_isp_to_preview(raw_result.copy())
+        if stretch_preset != 0:
+            processed_png = astro_stretch(processed_png)
 
     # Générer le nom de fichier
     if filename is None:
@@ -7930,47 +8155,54 @@ def save_with_external_processing(stacker_obj, filename=None, raw_format_name=No
     output_dir = stacker_obj.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Sauvegarder FITS (linéaire, 32-bit)
+    # Sauvegarder FITS (stack brut linéaire — sans ISP ni stretch pour usage scientifique)
     fits_path = output_dir / f"{filename}.fit"
     try:
         from astropy.io import fits
 
-        # Pour FITS: utiliser le résultat brut linéaire (pas de stretch)
-        fits_data = apply_isp_to_preview(raw_result.copy())
+        # FITS = données linéaires brutes du stack (float32, espace uint16 CSI-2 ×16)
+        fits_data = raw_result.copy().astype(np.float32)
 
         # Convertir en format FITS (channels, height, width)
         if len(fits_data.shape) == 3:
             fits_data = np.transpose(fits_data, (2, 0, 1))
 
-        hdu = fits.PrimaryHDU(fits_data.astype(np.float32))
+        hdu = fits.PrimaryHDU(fits_data)
         hdu.header['NAXIS'] = 3
-        hdu.header['COMMENT'] = 'Created by RPiCamera2 with external ISP processing'
+        hdu.header['COMMENT'] = 'Linear RAW stack - RPiCamera2 (no ISP, no stretch)'
         hdu.header['STACKCNT'] = stacker_obj.session.config.num_stacked if stacker_obj.session else 0
         hdul = fits.HDUList([hdu])
         hdul.writeto(str(fits_path), overwrite=True)
-        print(f"[SAVE] FITS: {fits_path}")
+        print(f"[SAVE] FITS (linéaire brut): {fits_path}")
     except Exception as e:
         print(f"[SAVE] Erreur FITS: {e}")
 
-    # Sauvegarder PNG (avec stretch, 16-bit)
+    # Sauvegarder PNG (pipeline identique au preview — stretch + BL + gradient removal)
     png_path = output_dir / f"{filename}.png"
     try:
         import cv2
 
-        # Convertir en uint16 pour PNG 16-bit
-        if processed.dtype == np.float32:
-            png_data = np.clip(processed / 255.0 * 65535, 0, 65535).astype(np.uint16)
-        elif processed.dtype == np.uint8:
-            png_data = (processed.astype(np.uint16) * 257)  # 0-255 -> 0-65535
+        # Convertir processed_png en uint16 pour PNG 16-bit
+        if processed_png.dtype == np.uint16:
+            png_data = processed_png
+        elif processed_png.dtype == np.uint8:
+            png_data = (processed_png.astype(np.uint16) * 257)  # 0-255 → 0-65535
+        elif processed_png.dtype == np.float32 or processed_png.dtype == np.float64:
+            _pmax = processed_png.max()
+            if _pmax <= 1.0:
+                png_data = np.clip(processed_png * 65535, 0, 65535).astype(np.uint16)
+            else:
+                png_data = np.clip(processed_png / _pmax * 65535, 0, 65535).astype(np.uint16)
         else:
-            png_data = np.clip(processed, 0, 65535).astype(np.uint16)
+            png_data = np.clip(processed_png, 0, 65535).astype(np.uint16)
 
-        # Convertir RGB -> BGR pour OpenCV
+        # RAW12 : ch0=R_physique (pas de swap pour pygame), mais cv2.imwrite attend BGR
+        # → inverser les canaux R/B pour l'écriture fichier
         if len(png_data.shape) == 3 and png_data.shape[2] == 3:
-            png_data = cv2.cvtColor(png_data, cv2.COLOR_RGB2BGR)
+            png_data = png_data[:, :, ::-1]   # RGB → BGR pour cv2
 
         cv2.imwrite(str(png_path), png_data)
-        print(f"[SAVE] PNG: {png_path} (16-bit, traitement externe)")
+        print(f"[SAVE] PNG (pipeline preview): {png_path}")
     except Exception as e:
         print(f"[SAVE] Erreur PNG: {e}")
 
@@ -8249,7 +8481,7 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
         Dict avec les rects des contrôles pour détection clics
     """
     global windowSurfaceObj, _font_cache
-    global jsk_stack_count, jsk_hdr_bits_clip, jsk_hdr_method
+    global jsk_stack_count, jsk_hdr_bits_clip, jsk_hdr_method, jsk_use_ema
     global jsk_denoise_type, jsk_denoise_strength
     global jsk_hdr_methods, jsk_denoise_types, jsk_hdr_weights
     global stretch_preset, ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
@@ -8336,6 +8568,13 @@ def draw_jsk_controls(screen_width, screen_height, image_array=None):
         control_rects['jsk_stack'] = draw_jsk_slider(
             panel_x, start_y, slider_width, slider_height,
             f"Stack: {jsk_stack_count}", jsk_stack_count, 1, 10, (100, 180, 140)
+        )
+        start_y += slider_height + margin
+
+        ema_label = f"Mode: {'EMA  (α={:.2f})'.format(2.0/(jsk_stack_count+1)) if jsk_use_ema else 'Window'}"
+        control_rects['jsk_ema_toggle'] = draw_jsk_slider(
+            panel_x, start_y, slider_width, slider_height,
+            ema_label, jsk_use_ema, 0, 1, (100, 160, 200)
         )
         start_y += slider_height + margin
 
@@ -10442,13 +10681,16 @@ def handle_home_click(mx, my):
                 denoise_strength=jsk_denoise_strength, hdr_weights=jsk_hdr_weights,
                 color_enabled=jsk_color_enabled == 1,
                 r_gain=jsk_r_gain/100.0, g_gain=jsk_g_gain/100.0, b_gain=jsk_b_gain/100.0,
-                contrast=jsk_contrast/100.0)
+                contrast=jsk_contrast/100.0, use_ema=jsk_use_ema == 1)
             jsk_recorder = JSKVideoRecorder()
             if capture_thread is not None:
                 capture_thread.set_capture_params({'type': 'raw'})
             display_modes = pygame.display.list_modes()
             _mw, _mh = display_modes[0] if display_modes and display_modes != -1 else (1024, 600)
             windowSurfaceObj = pygame.display.set_mode((_mw, _mh), pygame.FULLSCREEN, 24)
+            # Init ThreadPoolExecutor pour traitement non-bloquant
+            import concurrent.futures as _cfe_jsk
+            pygame._jskp = {'executor': _cfe_jsk.ThreadPoolExecutor(max_workers=1), 'future': None}
             windowSurfaceObj.fill((0, 0, 0))
             pygame.display.update()
             print("[HOME] Mode JSK LIVE activé")
@@ -10583,7 +10825,7 @@ def handle_jsk_slider_click(mousex, mousey, control_rects):
     Returns:
         True si un contrôle a été modifié, False sinon
     """
-    global jsk_stack_count, jsk_hdr_bits_clip, jsk_hdr_method
+    global jsk_stack_count, jsk_hdr_bits_clip, jsk_hdr_method, jsk_use_ema
     global jsk_denoise_type, jsk_denoise_strength, jsk_hdr_weights
     global stretch_preset, ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP
     global stretch_factor
@@ -10607,6 +10849,8 @@ def handle_jsk_slider_click(mousex, mousey, control_rects):
             if name == 'jsk_stack':
                 jsk_stack_count = int(1 + ratio * 9)
                 jsk_stack_count = max(1, min(10, jsk_stack_count))
+            elif name == 'jsk_ema_toggle':
+                jsk_use_ema = 1 if ratio >= 0.5 else 0
             elif name == 'jsk_hdr_clip':
                 jsk_hdr_bits_clip = int(ratio * 3)
                 jsk_hdr_bits_clip = max(0, min(3, jsk_hdr_bits_clip))
@@ -10685,7 +10929,8 @@ def handle_jsk_slider_click(mousex, mousey, control_rects):
                     r_gain=jsk_r_gain / 100.0,
                     g_gain=jsk_g_gain / 100.0,
                     b_gain=jsk_b_gain / 100.0,
-                    contrast=jsk_contrast / 100.0
+                    contrast=jsk_contrast / 100.0,
+                    use_ema=jsk_use_ema == 1
                 )
 
             return True
@@ -12017,7 +12262,7 @@ def handle_sun_slider_click(mx, my, control_rects):
 # COLLIMATION FULLSCREEN CONTROLS
 # ============================================================================
 
-def draw_collimation_overlay(screen_width, screen_height, detector, scale_x, scale_y, circle_enabled=None, circle_locked=None):
+def draw_collimation_overlay(screen_width, screen_height, detector, scale_x, scale_y, circle_enabled=None, circle_locked=None, selected_circle=None, manual_mode=0):
     """
     Dessine l'overlay de collimation sur le flux live.
 
@@ -12098,8 +12343,20 @@ def draw_collimation_overlay(screen_width, screen_height, detector, scale_x, sca
         color = CIRCLE_COLORS[name]
         label = CIRCLE_LABELS[name]
 
-        # Cercle détecté (trait épais)
-        pygame.draw.circle(windowSurfaceObj, color, (sx, sy), sr, 2)
+        # Cercle détecté — plus épais si sélectionné en mode manuel
+        is_selected = (manual_mode == 1 and name == selected_circle)
+        circle_width = 4 if is_selected else 2
+        pygame.draw.circle(windowSurfaceObj, color, (sx, sy), sr, circle_width)
+
+        # Anneau externe pour indiquer la sélection
+        if is_selected:
+            pygame.draw.circle(windowSurfaceObj, (255, 255, 255), (sx, sy), sr + 5, 1)
+            # Petites flèches cardinales indiquant que le cercle est déplaçable
+            arrow_d = min(sr + 18, sr + 18)
+            for dx, dy in [(0, -1), (0, 1), (-1, 0), (1, 0)]:
+                ax = sx + dx * arrow_d
+                ay = sy + dy * arrow_d
+                pygame.draw.circle(windowSurfaceObj, (255, 255, 255), (ax, ay), 3, 0)
 
         # Point au centre du cercle
         pygame.draw.circle(windowSurfaceObj, color, (sx, sy), 4, 0)
@@ -12151,13 +12408,29 @@ def draw_collimation_overlay(screen_width, screen_height, detector, scale_x, sca
     n_detected = len(circles)
 
     # Titre en haut au centre
-    title_text = font_title.render("COLLIMATION NEWTON", True, (200, 200, 200))
+    if manual_mode == 1:
+        title_str = "COLLIMATION NEWTON  [MODE MANUEL]"
+        title_color = (200, 160, 255)
+    else:
+        title_str = "COLLIMATION NEWTON"
+        title_color = (200, 200, 200)
+    title_text = font_title.render(title_str, True, title_color)
     title_x = (screen_width - title_text.get_width()) // 2
     windowSurfaceObj.blit(title_text, (title_x, 10))
 
     # Nombre de cercles détectés
     det_text = font_label.render(f"Cercles: {n_detected}/4", True, (180, 180, 180))
     windowSurfaceObj.blit(det_text, (title_x, 38))
+
+    # Indication d'aide en mode manuel
+    if manual_mode == 1:
+        if selected_circle is not None:
+            hint = f"[{selected_circle.upper()}] Centre=deplacer  Bord=redimensionner  R+/R-=taille"
+        else:
+            hint = "Selectionner un cercle a gauche, puis toucher/glisser pour repositionner"
+        hint_surf = font_label.render(hint, True, (180, 140, 220))
+        hint_x = (screen_width - hint_surf.get_width()) // 2
+        windowSurfaceObj.blit(hint_surf, (hint_x, 58))
 
     # Score
     if score is not None:
@@ -12806,6 +13079,172 @@ def handle_collimation_panel_click(mousex, mousey, slider_rects, circle_enabled,
             return changes
 
     return None
+
+
+# --- Bouton AUTO/MANUEL ---
+
+def draw_collimation_manual_button(screen_width, screen_height, manual_mode):
+    """Bouton AUTO/MANUEL en bas à gauche (à droite de PARAM/SETTINGS)."""
+    global windowSurfaceObj, _font_cache
+
+    icon_size = 50
+    margin = 15
+    # À droite de EXIT (margin+50+10) et PARAM (+50+10)
+    icon_x = margin + icon_size + 10 + icon_size + 10
+    icon_y = screen_height - icon_size - margin
+
+    if manual_mode:
+        bg_color = (60, 30, 100)
+        border_color = (140, 80, 200)
+        text_color = (200, 160, 255)
+    else:
+        bg_color = (35, 45, 35)
+        border_color = (70, 90, 70)
+        text_color = (140, 170, 140)
+
+    icon_rect = pygame.Rect(icon_x, icon_y, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg_color, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border_color, icon_rect, 2, border_radius=8)
+
+    for sz in [15, 13]:
+        if sz not in _font_cache:
+            _font_cache[sz] = pygame.font.Font(None, sz)
+    font = _font_cache[15]
+
+    line1 = font.render("MANUEL" if manual_mode else "AUTO", True, text_color)
+    line2 = font.render("MODE", True, text_color)
+    cx_btn, cy_btn = icon_rect.centerx, icon_rect.centery
+    windowSurfaceObj.blit(line1, line1.get_rect(center=(cx_btn, cy_btn - 7)))
+    windowSurfaceObj.blit(line2, line2.get_rect(center=(cx_btn, cy_btn + 7)))
+
+    return icon_rect
+
+
+def is_click_on_collimation_manual(mousex, mousey, screen_width, screen_height):
+    """Vérifie si clic sur le bouton AUTO/MANUEL."""
+    icon_size = 50
+    margin = 15
+    icon_x = margin + icon_size + 10 + icon_size + 10
+    icon_y = screen_height - icon_size - margin
+    return (icon_x <= mousex <= icon_x + icon_size and
+            icon_y <= mousey <= icon_y + icon_size)
+
+
+def draw_collimation_circle_selector(screen_width, screen_height, selected_circle, circle_enabled):
+    """Dessine 4 boutons de sélection de cercle (en mode manuel) sur la gauche.
+
+    Returns:
+        dict {name: pygame.Rect}
+    """
+    global windowSurfaceObj, _font_cache
+
+    btn_w = 110
+    btn_h = 32
+    margin = 15
+    gap = 5
+
+    for sz in [15]:
+        if sz not in _font_cache:
+            _font_cache[sz] = pygame.font.Font(None, sz)
+    font = _font_cache[15]
+
+    labels = {
+        'focuser':   'Port. Ocul.',
+        'secondary': 'Secondaire',
+        'primary':   'Ref. Prim.',
+        'camera':    'Ref. Camera',
+    }
+
+    rects = {}
+    # Au-dessus de la rangée des boutons EXIT/PARAM/MANUEL (screen_h - 65)
+    total_h = len(CIRCLE_ORDER) * (btn_h + gap) - gap
+    start_y = screen_height - 65 - 10 - total_h
+
+    for i, name in enumerate(CIRCLE_ORDER):
+        color = CIRCLE_COLORS[name]
+        enabled = circle_enabled.get(name, False)
+        is_selected = (name == selected_circle)
+        btn_y = start_y + i * (btn_h + gap)
+        rect = pygame.Rect(margin, btn_y, btn_w, btn_h)
+
+        if is_selected and enabled:
+            bg = tuple(min(255, c // 3) for c in color)
+            border_clr = color
+            border_w = 2
+            txt_color = color
+        elif enabled:
+            bg = (40, 40, 50)
+            border_clr = tuple(max(0, c // 2) for c in color)
+            border_w = 1
+            txt_color = tuple(min(255, c // 2 + 60) for c in color)
+        else:
+            bg = (30, 30, 35)
+            border_clr = (55, 55, 65)
+            border_w = 1
+            txt_color = (70, 70, 80)
+
+        pygame.draw.rect(windowSurfaceObj, bg, rect, border_radius=5)
+        pygame.draw.rect(windowSurfaceObj, border_clr, rect, border_w, border_radius=5)
+        label = font.render(labels[name], True, txt_color)
+        windowSurfaceObj.blit(label, label.get_rect(center=rect.center))
+
+        if is_selected and enabled:
+            arrow = font.render(">", True, color)
+            windowSurfaceObj.blit(arrow, (margin + btn_w + 3, btn_y + btn_h // 2 - 6))
+
+        rects[name] = rect
+
+    return rects
+
+
+def draw_collimation_radius_buttons(screen_width, screen_height, selected_circle, circles, scale_r):
+    """Dessine les boutons R- / R+ pour ajuster le rayon du cercle sélectionné.
+
+    Positionnés sous les boutons ZOOM+/ZOOM- (côté gauche, haut de l'écran).
+
+    Returns:
+        (r_minus_rect, r_plus_rect) ou (None, None)
+    """
+    global windowSurfaceObj, _font_cache
+
+    if selected_circle is None or selected_circle not in circles:
+        return None, None
+
+    btn_w = 50
+    btn_h = 36
+    margin = 15
+    gap = 8
+    # ZOOM buttons: y=margin+40, h=36. Place R+/R- just below with a gap.
+    y_btn = margin + 40 + 36 + gap + 4
+
+    color = CIRCLE_COLORS[selected_circle]
+    r_img = circles[selected_circle][2]
+
+    for sz in [20, 16]:
+        if sz not in _font_cache:
+            _font_cache[sz] = pygame.font.Font(None, sz)
+    font_btn = _font_cache[20]
+    font_sm = _font_cache[16]
+
+    # Bouton R-
+    minus_rect = pygame.Rect(margin, y_btn, btn_w, btn_h)
+    pygame.draw.rect(windowSurfaceObj, (50, 30, 30), minus_rect, border_radius=6)
+    pygame.draw.rect(windowSurfaceObj, (130, 60, 60), minus_rect, 1, border_radius=6)
+    minus_text = font_btn.render("R-", True, (210, 120, 120))
+    windowSurfaceObj.blit(minus_text, minus_text.get_rect(center=minus_rect.center))
+
+    # Bouton R+
+    plus_rect = pygame.Rect(margin + btn_w + gap, y_btn, btn_w, btn_h)
+    pygame.draw.rect(windowSurfaceObj, (30, 50, 30), plus_rect, border_radius=6)
+    pygame.draw.rect(windowSurfaceObj, (60, 130, 60), plus_rect, 1, border_radius=6)
+    plus_text = font_btn.render("R+", True, (120, 210, 120))
+    windowSurfaceObj.blit(plus_text, plus_text.get_rect(center=plus_rect.center))
+
+    # Label rayon actuel
+    r_label = font_sm.render(f"R={r_img}px", True, color)
+    windowSurfaceObj.blit(r_label, (margin + 2 * btn_w + 2 * gap, y_btn + 10))
+
+    return minus_rect, plus_rect
 
 
 # ============================================================================
@@ -15007,7 +15446,9 @@ while True:
                         # Overlay collimation (cercles, croix, texte)
                         draw_collimation_overlay(max_width, max_height, collimation_detector,
                                                 scale_x, scale_y, collimation_circle_enabled,
-                                                circle_locked=collimation_circle_locked)
+                                                circle_locked=collimation_circle_locked,
+                                                selected_circle=collimation_selected_circle,
+                                                manual_mode=collimation_manual_mode)
 
                     except Exception as e:
                         if collimation_last_surface is not None:
@@ -15021,7 +15462,9 @@ while True:
                         draw_collimation_overlay(max_width, max_height, collimation_detector,
                                                 collimation_last_scale[0], collimation_last_scale[1],
                                                 collimation_circle_enabled,
-                                                circle_locked=collimation_circle_locked)
+                                                circle_locked=collimation_circle_locked,
+                                                selected_circle=collimation_selected_circle,
+                                                manual_mode=collimation_manual_mode)
 
                 # Boutons (toujours visibles meme sans frame)
                 draw_collimation_exit_button(max_width, max_height)
@@ -15030,6 +15473,16 @@ while True:
                 draw_collimation_exposure_slider(max_width, max_height, collimation_exposure_us)
                 draw_collimation_zoom_buttons(max_width, max_height, collimation_zoom)
                 draw_collimation_settings_icon(max_width, max_height, collimation_settings_visible == 1)
+                draw_collimation_manual_button(max_width, max_height, collimation_manual_mode == 1)
+
+                # Mode manuel : sélecteur de cercle + boutons R+/-
+                if collimation_manual_mode == 1:
+                    _collimation_circle_selector_rects = draw_collimation_circle_selector(
+                        max_width, max_height, collimation_selected_circle, collimation_circle_enabled)
+                    _circles_for_r = collimation_detector.circles if collimation_detector else {}
+                    _scale_r = max(collimation_last_scale) if collimation_last_scale != (1.0, 1.0) else 1.0
+                    _colim_r_minus_rect, _colim_r_plus_rect = draw_collimation_radius_buttons(
+                        max_width, max_height, collimation_selected_circle, _circles_for_r, _scale_r)
 
                 # Panneau de parametres par cercle (si visible)
                 if collimation_settings_visible == 1:
@@ -15183,10 +15636,10 @@ while True:
                         else:
                             jsk_raw_input = raw_array
 
-                        # Normaliser vers 12-bit (0-4095) si les valeurs dépassent
+                        # Normaliser vers 12-bit (0-4095) : CSI-2 ×16 → décalage fixe de 4 bits
+                        # (facteur constant = pas de variation de luminosité entre frames)
                         if jsk_raw_input is not None and jsk_raw_input.max() > 4095:
-                            max_val = jsk_raw_input.max()
-                            jsk_raw_input = (jsk_raw_input.astype(np.float32) / max_val * 4095).astype(np.uint16)
+                            jsk_raw_input = (jsk_raw_input >> 4).astype(np.uint16)
                     else:
                         # Frame ISP reçue (3D) → forcer le mode RAW pour les prochaines captures
                         if capture_thread is not None:
@@ -15201,44 +15654,44 @@ while True:
                     screen_info = pygame.display.Info()
                     max_width, max_height = screen_info.current_w, screen_info.current_h
 
-                # Traitement image RAW avec pipeline JSK (HDR + Denoise)
+                # Stacking RAW : alimenter le rolling mean à chaque frame (O(H×W), non-bloquant)
                 if jsk_raw_input is not None:
-                    jsk_result = jsk_processor.process_single(jsk_raw_input)
-                    if jsk_result is not None:
-                        # Appliquer le stretch si activé
-                        if stretch_preset != 0:
-                            jsk_result = astro_stretch(jsk_result)
-                        # Convertir en surface pygame
-                        jsk_surface = pygame.surfarray.make_surface(np.swapaxes(jsk_result, 0, 1))
-                        # Affichage: letterbox si crop carré, plein écran sinon
-                        if jsk_crop_square:
-                            img_h = jsk_result.shape[0]
-                            img_w = jsk_result.shape[1]
-                            # Scale pour tenir dans max_height (image carrée → hauteur = max_height)
-                            scaled_size = min(max_height, max_width)
-                            jsk_surface_scaled = pygame.transform.scale(jsk_surface, (scaled_size, scaled_size))
-                            windowSurfaceObj.fill((0, 0, 0))
-                            blit_x = (max_width - scaled_size) // 2
-                            blit_y = (max_height - scaled_size) // 2
-                            windowSurfaceObj.blit(jsk_surface_scaled, (blit_x, blit_y))
-                            _jsk_last_surface = jsk_surface_scaled
-                            _jsk_last_blit_pos = (blit_x, blit_y)
-                        else:
-                            jsk_surface = pygame.transform.scale(jsk_surface, (max_width, max_height))
-                            _jsk_last_surface = jsk_surface
-                            _jsk_last_blit_pos = (0, 0)
-                            windowSurfaceObj.blit(jsk_surface, (0, 0))
-                        # Enregistrer la frame si recording actif
-                        if jsk_recorder is not None and jsk_recorder.is_recording:
-                            jsk_recorder.write_frame(jsk_result)
-                else:
-                    # Pas de nouvelle frame: réafficher la dernière image valide
-                    if _jsk_last_surface is not None:
-                        if jsk_crop_square:
-                            windowSurfaceObj.fill((0, 0, 0))
-                        windowSurfaceObj.blit(_jsk_last_surface, _jsk_last_blit_pos)
-                    else:
+                    jsk_processor.add_raw_frame(jsk_raw_input)
+
+                # Traitement HDR+denoise en thread dédié (non-bloquant)
+                _jskp = getattr(pygame, '_jskp', None)
+                if _jskp is not None:
+                    # Récupérer le résultat du thread précédent s'il est terminé
+                    if _jskp['future'] is not None and _jskp['future'].done():
+                        _r = _jskp['future'].result()
+                        _jskp['future'] = None
+                        if _r is not None:
+                            # Enregistrer la frame (avant mise à l'échelle écran)
+                            if jsk_recorder is not None and jsk_recorder.is_recording:
+                                jsk_recorder.write_frame(_r)
+                            # Convertir en surface pygame et mettre en cache
+                            _surf = pygame.surfarray.make_surface(np.swapaxes(_r, 0, 1))
+                            if jsk_crop_square:
+                                scaled_size = min(max_height, max_width)
+                                _surf = pygame.transform.scale(_surf, (scaled_size, scaled_size))
+                                _jsk_last_blit_pos = ((max_width - scaled_size) // 2,
+                                                      (max_height - scaled_size) // 2)
+                            else:
+                                _surf = pygame.transform.scale(_surf, (max_width, max_height))
+                                _jsk_last_blit_pos = (0, 0)
+                            _jsk_last_surface = _surf
+                    # Soumettre dès que le thread est libre (traite toujours la moyenne courante)
+                    if _jskp['future'] is None and jsk_processor.ready:
+                        _jskp['future'] = _jskp['executor'].submit(
+                            _jsk_process_thread, jsk_processor, stretch_preset != 0)
+
+                # Afficher depuis le cache (toujours non-bloquant)
+                if _jsk_last_surface is not None:
+                    if jsk_crop_square:
                         windowSurfaceObj.fill((0, 0, 0))
+                    windowSurfaceObj.blit(_jsk_last_surface, _jsk_last_blit_pos)
+                else:
+                    windowSurfaceObj.fill((0, 0, 0))
 
                 # TOUJOURS dessiner les boutons JSK LIVE (même sans image RAW)
                 draw_jsk_settings_icon(max_width, max_height, jsk_settings_visible == 1)
@@ -15306,27 +15759,33 @@ while True:
 
                     # *** Passer les gains AWB pour corriger la balance des blancs en RAW ***
                     # Les gains sont appliqués correctement : rouge sur rouge, bleu sur bleu
-                    array_uint16 = debayer_raw_array(raw_array, raw_formats[raw_format],
-                                                      red_gain=(red/10),    # Curseur rouge → canal rouge
-                                                      blue_gain=(blue/10),  # Curseur bleu → canal bleu
-                                                      fix_bad_pixels=bool(fix_bad_pixels) and livestack_active,  # SEULEMENT LiveStack, PAS LuckyStack
-                                                      sigma_threshold=fix_bad_pixels_sigma/10.0,
-                                                      min_adu_threshold=fix_bad_pixels_min_adu/10.0)
+                    # Construire les paramètres BL per-canal (correction FPN 2×2)
+                    _bl_tuple = None
+                    _bl_auto  = False
+                    if ls_bl_per_channel_enable == 1:
+                        _bl_auto = True
+                    elif ls_bl_per_channel_enable == 2:
+                        _bl_tuple = (ls_bl_r, ls_bl_g1, ls_bl_g2, ls_bl_b)
+                    # BL global : actif seulement si FPN per-canal désactivé (mode 0)
+                    # Soustrait AVANT les gains AWB → empêche blue_gain d'amplifier le BL
+                    _bl_global_debayer = isp_black_level if (raw_format >= 2 and ls_bl_per_channel_enable == 0) else 0
+                    # debayer_raw_array retourne float32 [0-65535] directement
+                    array = debayer_raw_array(raw_array, raw_formats[raw_format],
+                                              red_gain=(red/10),
+                                              blue_gain=(blue/10),
+                                              fix_bad_pixels=bool(fix_bad_pixels) and livestack_active,
+                                              sigma_threshold=fix_bad_pixels_sigma/10.0,
+                                              min_adu_threshold=fix_bad_pixels_min_adu/10.0,
+                                              bl_per_channel=_bl_tuple,
+                                              bl_auto_estimate=_bl_auto,
+                                              use_vng=bool(debayer_vng),
+                                              global_black_level=_bl_global_debayer)
 
-                    # *** DIAGNOSTIC: Vérifier que le débayerisation a retourné 3D ***
-                    if len(array_uint16.shape) != 3:
-                        print(f"[ERROR] debayer_raw_array a retourné un array {len(array_uint16.shape)}D!")
-                        print(f"  Input shape: {raw_array.shape}, dtype: {raw_array.dtype}")
-                        print(f"  Output shape: {array_uint16.shape}, dtype: {array_uint16.dtype}")
-                        # Forcer conversion en 3D pour éviter crash
-                        if len(array_uint16.shape) == 2:
-                            print(f"  → Conversion forcée en RGB grayscale")
-                            array_uint16 = np.stack([array_uint16, array_uint16, array_uint16], axis=-1)
-
-                    # CORRECTION: Garder la pleine dynamique 16-bit [0-65535] pour RAW12/16
-                    # Ne plus compresser à [0-255] car libastrostack gère correctement les données haute résolution
-                    # Convertir juste en float32 pour compatibilité avec libastrostack
-                    array = array_uint16.astype(np.float32)  # Garder [0-65535]
+                    # Vérifier que le débayérisage a retourné 3D
+                    if len(array.shape) != 3:
+                        print(f"[ERROR] debayer_raw_array a retourné un array {len(array.shape)}D!")
+                        if len(array.shape) == 2:
+                            array = np.stack([array, array, array], axis=-1).astype(np.float32)
 
                     # Boost de contraste: UNIQUEMENT pour le mode stretch preview (pas pour stacking)
                     # Le stacking nécessite des données linéaires brutes du capteur
@@ -15339,9 +15798,8 @@ while True:
                         metadata = metadata_from_thread if metadata_from_thread else {}
                         print(f"\n[STACKING] Mode actif, capture depuis stream RAW")
                         print(f"  Format RAW: {raw_formats[raw_format]}")
-                        print(f"  Array débayérisé uint16: shape={array_uint16.shape}, range=[{array_uint16.min()}, {array_uint16.max()}]")
-                        print(f"  Array après conversion float32: shape={array.shape}, dtype={array.dtype}, range=[{array.min():.2f}, {array.max():.2f}]")
-                        print(f"  Dynamique préservée: {len(np.unique(array_uint16))} niveaux distincts")
+                        print(f"  Array débayérisé float32: shape={array.shape}, range=[{array.min():.0f}, {array.max():.0f}]")
+                        print(f"  Dynamique préservée: {len(np.unique(array.astype(np.uint16)))} niveaux distincts")
                         if isp_enable == 1:
                             print(f"  Traitement ISP software: DÉSACTIVÉ (libastrostack ISP actif)")
                         else:
@@ -15373,6 +15831,17 @@ while True:
                         # PyGame et OpenCV utilisent BGR, donc on garde l'ordre natif
                         # Ne PAS inverser les canaux !
                         array = array[:, :, 0:3].copy()  # Prendre les 3 premiers canaux BGR tel quel
+
+                        # LOG DIAGNOSTIC RGB8 (toutes les 5 frames)
+                        if not hasattr(pygame, '_ls_diag_counter'):
+                            pygame._ls_diag_counter = 0
+                        pygame._ls_diag_counter += 1
+                        if pygame._ls_diag_counter % 5 == 1:
+                            print(f"\n[DIAG RGB8 #{pygame._ls_diag_counter}] Après extraction XRGB→BGR:")
+                            print(f"  Shape={array.shape} dtype={array.dtype}  min={array.min()}  max={array.max()}")
+                            print(f"  ch0(B) mean={array[:,:,0].mean():.1f}  "
+                                  f"ch1(G) mean={array[:,:,1].mean():.1f}  "
+                                  f"ch2(R) mean={array[:,:,2].mean():.1f}")
 
                         if show_cmds == 1 and (livestack_active or luckystack_active) and not hasattr(pygame, '_stacking_xrgb_shown'):
                             metadata = metadata_from_thread if metadata_from_thread else {}
@@ -15428,90 +15897,101 @@ while True:
                 # ===== LIVE STACK PROCESSING =====
                 livestack_display_done = False
                 if livestack_active and livestack is not None:
-                    # Capturer frame RAW si mode save DNG activé
-                    _raw_frame_to_save = None
-                    if ls_save_dng_mode > 0:
-                        _raw_frame_to_save = array.copy()
-                    _ls_prev_accepted_count = getattr(pygame, '_ls_prev_accepted', 0)
 
-                    # Traiter la frame avec LiveStack (module avancé)
-                    livestack.process_frame(array)
+                    # --- Init exécuteur et queue DNG (une seule fois) ---
+                    if not hasattr(pygame, '_ls_proc'):
+                        import concurrent.futures as _cfe
+                        import queue as _queue_mod
+                        import threading as _threading_mod
+                        pygame._ls_proc = {
+                            'executor': _cfe.ThreadPoolExecutor(max_workers=1),
+                            'future': None,
+                            'last_display': None,
+                        }
+                        # Worker thread DNG save (démarré ici pour être prêt dès le 1er frame)
+                        def _ls_raw_worker():
+                            try:
+                                from astropy.io import fits as _fits
+                                _use_fits = True
+                            except ImportError:
+                                _use_fits = False
+                            _raw_dir = os.path.expanduser("~/stacks/raw_frames")
+                            os.makedirs(_raw_dir, exist_ok=True)
+                            while True:
+                                item = pygame._ls_raw_save_queue.get()
+                                if item is None:
+                                    break
+                                _arr, _n = item
+                                try:
+                                    if _use_fits:
+                                        _fits.writeto(f"{_raw_dir}/frame_{_n:04d}.fit", _arr, overwrite=True)
+                                    else:
+                                        np.save(f"{_raw_dir}/frame_{_n:04d}.npy", _arr)
+                                except Exception as _e:
+                                    print(f"[LS RAW SAVE] Erreur: {_e}")
+                        if not hasattr(pygame, '_ls_raw_save_queue'):
+                            pygame._ls_raw_save_queue = _queue_mod.Queue()
+                            _t = _threading_mod.Thread(target=_ls_raw_worker, daemon=True)
+                            _t.start()
+                    _lsp = pygame._ls_proc
 
-                    # Sauvegarder frame RAW individuelle si demandé
-                    if ls_save_dng_mode > 0 and _raw_frame_to_save is not None:
-                        _cur_acc = livestack.get_stats().get('accepted_frames', 0)
-                        _should_save = (ls_save_dng_mode == 2) or \
-                                       (ls_save_dng_mode == 1 and _cur_acc > _ls_prev_accepted_count)
-                        if _should_save:
-                            if not hasattr(pygame, '_ls_raw_save_queue'):
-                                import queue as _queue_mod
-                                import threading as _threading_mod
-                                pygame._ls_raw_save_queue = _queue_mod.Queue()
-                                def _ls_raw_worker():
-                                    try:
-                                        from astropy.io import fits as _fits
-                                        _use_fits = True
-                                    except ImportError:
-                                        _use_fits = False
-                                    _raw_dir = os.path.expanduser("~/stacks/raw_frames")
-                                    os.makedirs(_raw_dir, exist_ok=True)
-                                    while True:
-                                        item = pygame._ls_raw_save_queue.get()
-                                        if item is None:
-                                            break
-                                        _arr, _n = item
-                                        try:
-                                            if _use_fits:
-                                                _fits.writeto(f"{_raw_dir}/frame_{_n:04d}.fit", _arr, overwrite=True)
-                                            else:
-                                                np.save(f"{_raw_dir}/frame_{_n:04d}.npy", _arr)
-                                        except Exception as _e:
-                                            print(f"[LS RAW SAVE] Erreur: {_e}")
-                                _t = _threading_mod.Thread(target=_ls_raw_worker, daemon=True)
-                                _t.start()
-                            pygame._ls_raw_save_queue.put((_raw_frame_to_save, _cur_acc))
-                        pygame._ls_prev_accepted = _cur_acc
+                    # --- Garde d'exposition : rejeter les frames résiduelles ---
+                    _skip_exposure_mismatch = False
+                    _target_exp = getattr(pygame, '_ls_target_exposure_us', 0)
+                    if _target_exp > 0 and raw_format >= 2 and metadata_from_thread:
+                        _frame_exp = metadata_from_thread.get('ExposureTime', 0)
+                        if _frame_exp > 0:
+                            _ratio = _frame_exp / _target_exp
+                            if _ratio < 0.5 or _ratio > 2.0:
+                                _skip_exp_count = getattr(pygame, '_ls_exposure_skip_count', 0) + 1
+                                pygame._ls_exposure_skip_count = _skip_exp_count
+                                if _skip_exp_count <= 5:
+                                    print(f"[LS GUARD] Frame rejetée: exposition={_frame_exp}µs "
+                                          f"(cible={_target_exp}µs, ratio={_ratio:.2f}) — frame résiduelle ignorée")
+                                _skip_exposure_mismatch = True
 
-                    # Récupérer le master stack pour affichage
+                    # --- Récupérer le résultat du thread précédent ---
+                    if _lsp['future'] is not None and _lsp['future'].done():
+                        try:
+                            _res = _lsp['future'].result()
+                            if _res is not None:
+                                _lsp['last_display'] = _res
+                        except Exception as _ex:
+                            if show_cmds == 1:
+                                print(f"[LS THREAD] {_ex}")
+                        _lsp['future'] = None
+
+                    # --- Soumettre la frame au thread si le thread est libre ---
+                    if _lsp['future'] is None:
+                        _proc_kw = {
+                            'skip_exp':        _skip_exposure_mismatch,
+                            'raw_format':      raw_format,
+                            'stretch_preset':  stretch_preset,
+                            'ls_save_dng_mode': ls_save_dng_mode,
+                            'prev_accepted':   getattr(pygame, '_ls_prev_accepted', 0),
+                            'save_queue':      pygame._ls_raw_save_queue if ls_save_dng_mode > 0 else None,
+                        }
+                        _lsp['future'] = _lsp['executor'].submit(
+                            _ls_process_frame_thread, array.copy(), _proc_kw, livestack
+                        )
+                        # Mettre à jour le compteur DNG (sera mis à jour par le thread via proc_kw)
+                        pygame._ls_prev_accepted = getattr(pygame, '_ls_prev_accepted', 0)
+
+                    # --- Affichage depuis le dernier résultat disponible ---
                     try:
-                        # Récupérer le résultat stacké
-                        stacked_array = livestack.get_preview_for_display()
+                        stacked_array = _lsp['last_display']
 
                         if stacked_array is not None:
-                            if raw_format >= 2:
-                                # MODE RAW: get_preview_for_display() appelle session.get_preview_png()
-                                # qui a déjà appliqué : BL, gradient removal, clipping percentiles, stretch.
-                                # Aucun traitement externe → évite double soustraction BL et double stretch.
-                                if stacked_array.dtype != np.uint8:
-                                    stacked_array = np.clip(stacked_array, 0, 255).astype(np.uint8)
-                                if not hasattr(pygame, '_livestack_display_info_shown'):
-                                    print(f"\n[LIVESTACK DISPLAY RAW] Pipeline session (BL+stretch+clipping)")
-                                    pygame._livestack_display_info_shown = True
-                            else:
-                                # MODE RGB/YUV: appliquer contraste/saturation logiciel si non-défaut
-                                stacked_array = apply_isp_to_preview(stacked_array)
-                                if stretch_preset != 0:
-                                    stacked_array = astro_stretch(stacked_array)
-                                if stacked_array.dtype != np.uint8:
-                                    stacked_array = np.clip(stacked_array, 0, 255).astype(np.uint8)
-                                if not hasattr(pygame, '_livestack_display_info_shown'):
-                                    print(f"\n[LIVESTACK DISPLAY RGB/YUV] Pipeline libastrostack + ISP:")
-                                    print(f"  ✓ apply_isp_to_preview() (contraste/saturation)")
-                                    print(f"  ✓ astro_stretch() si activé")
-                                    pygame._livestack_display_info_shown = True
-
                             # Convertir en surface pygame
                             if len(stacked_array.shape) == 3:
-                                # Transposer (H,W,C) → (W,H,C) pour pygame
                                 transposed = np.swapaxes(stacked_array, 0, 1)
                                 if raw_format >= 2:
-                                    # RAW: BayerRG2BGR → ch0=R_physique → pas de swap
+                                    # RAW: ch0=R_physique → pas de swap
                                     image = pygame.surfarray.make_surface(transposed)
                                 else:
-                                    # RGB/YUV: picamera2 BGR → swap BGR→RGB pour pygame
+                                    # RGB/YUV: BGR → swap pour pygame
                                     image = pygame.surfarray.make_surface(transposed[:, :, [2, 1, 0]])
                             else:
-                                # MONO
                                 image = pygame.surfarray.make_surface(stacked_array.T)
 
                             # Redimensionner en fullscreen si stretch activé
@@ -15528,17 +16008,17 @@ while True:
 
                             # Afficher
                             windowSurfaceObj.blit(image, (0, 0))
-                            # Interface LS au-dessus du stack (boutons, sliders, stats)
                             if ls_interface_mode == 1:
                                 draw_ls_interface(max_width, max_height)
                             pygame.display.update()
 
-                            # Afficher les statistiques Live Stack (mode texte classique si pas interface LS)
+                            # Statistiques
                             stats = livestack.get_stats()
                             if not ls_interface_mode:
                                 stats_text = f"LiveStack: {stats['accepted_frames']}/{stats['total_frames']} | Rejected: {stats['rejected_frames']}"
                                 text(0, 0, 2, 2, 1, stats_text, ft, 1)
-                            # Vérifier arrêt automatique scheduler
+
+                            # Arrêt automatique scheduler
                             if ls_scheduler_enabled and ls_sched_frames > 0:
                                 ls_sched_frames_done = stats.get('accepted_frames', 0)
                                 if ls_sched_frames_done >= ls_sched_frames:
@@ -15551,14 +16031,13 @@ while True:
                                             del pygame._ls_prev_accepted
                                     print(f"[SCHEDULER] {ls_sched_frames} frames stackées — arrêt automatique")
 
-                            # Sauvegarder PNG intermédiaire (si activé)
+                            # PNG intermédiaire
                             accepted = stats['accepted_frames']
                             if ls_save_progress == 1 and accepted > 0:
                                 if not hasattr(pygame, '_livestack_last_saved'):
                                     pygame._livestack_last_saved = 0
                                 if accepted > pygame._livestack_last_saved:
                                     try:
-                                        # Mode RAW: utiliser traitement externe pour cohérence preview/stack
                                         if raw_format >= 2:
                                             save_with_external_processing(livestack, filename=f"livestack_progress_{accepted:04d}", raw_format_name=raw_formats[raw_format])
                                         else:
@@ -15570,20 +16049,16 @@ while True:
                                         if show_cmds == 1:
                                             print(f"[LIVESTACK] Erreur save PNG: {e}")
 
-                            # Marquer que l'affichage est fait
                             livestack_display_done = True
                         else:
-                            # Pas encore de stack, afficher le flux vidéo en attendant
+                            # Pas encore de stack disponible
                             livestack_display_done = False
-                            # Afficher message d'attente avec stats détaillées
                             stats = livestack.get_stats()
                             wait_text = f"LiveStack: {stats['accepted_frames']}/{stats['total_frames']} acceptées | Rejetées: {stats['rejected_frames']}"
-                            text(0, 0, 2, 2, 1, wait_text, ft, 1)  # top=2 pour position absolue à gauche
-
-                            # Afficher aussi un warning si trop de rejets (QC trop strict)
+                            text(0, 0, 2, 2, 1, wait_text, ft, 1)
                             if stats['total_frames'] > 20 and stats['accepted_frames'] == 0:
                                 warning_text = "⚠ Toutes les frames rejetées! Désactiver QC ou réduire min_stars"
-                                text(0, 1, 2, 2, 1, warning_text, ft, 1)  # top=2 pour position absolue à gauche
+                                text(0, 1, 2, 2, 1, warning_text, ft, 1)
 
                     except Exception as e:
                         if show_cmds == 1:
@@ -15676,7 +16151,7 @@ while True:
                                 # Transposer (H,W,C) → (W,H,C) pour pygame
                                 transposed = np.swapaxes(stacked_array, 0, 1)
                                 if raw_format >= 2:
-                                    # RAW: BayerRG2BGR → ch0=R_physique → pas de swap
+                                    # RAW: BayerRG2RGB → ch0=R_physique → pas de swap (pygame attend RGB)
                                     image = pygame.surfarray.make_surface(transposed)
                                 else:
                                     # RGB/YUV: picamera2 BGR → swap BGR→RGB pour pygame
@@ -16621,6 +17096,32 @@ while True:
                 ls_zoom = new_z
                 _lucky_ge_dragging = 'zoom'
                 continue
+        # === COLLIMATION MANUEL : début du drag (déplacer ou redimensionner) ===
+        if collimation_mode == 1 and collimation_manual_mode == 1 and collimation_detector is not None:
+            if collimation_selected_circle is not None and collimation_selected_circle in collimation_detector.circles:
+                mx, my = event.pos
+                _sc_cx, _sc_cy, _sc_r = collimation_detector.circles[collimation_selected_circle]
+                _sx, _sy = collimation_last_scale
+                _sr_scale = max(_sx, _sy)
+                _cx_s = int(_sc_cx * _sx)
+                _cy_s = int(_sc_cy * _sy)
+                _r_s = int(_sc_r * _sr_scale)
+                _dx_c = mx - _cx_s
+                _dy_c = my - _cy_s
+                _dist_c = (_dx_c * _dx_c + _dy_c * _dy_c) ** 0.5
+                _dist_edge = abs(_dist_c - _r_s)
+                if _dist_c < 50:
+                    _colim_dragging = True
+                    _colim_drag_type = 'move'
+                    _colim_drag_center_img = (_sc_cx, _sc_cy)
+                    _colim_drag_start_r_img = _sc_r
+                    continue
+                elif _dist_edge < 35:
+                    _colim_dragging = True
+                    _colim_drag_type = 'resize'
+                    _colim_drag_center_img = (_sc_cx, _sc_cy)
+                    _colim_drag_start_r_img = _sc_r
+                    continue
       elif event.type == pygame.MOUSEMOTION:
         # === HOME SCREEN : Drag sliders gain/expo/zoom ===
         if _home_ge_dragging is not None and focus_mode == 0:
@@ -16856,6 +17357,31 @@ while True:
                 continue
             else:
                 _lucky_slider_dragging = False
+        # === COLLIMATION MANUEL : mise à jour du drag en cours ===
+        if _colim_dragging and collimation_mode == 1 and collimation_manual_mode == 1:
+            if event.buttons[0]:
+                mx, my = event.pos
+                _sx, _sy = collimation_last_scale
+                _sr_scale = max(_sx, _sy)
+                _name = collimation_selected_circle
+                if _name and collimation_detector is not None:
+                    if _colim_drag_type == 'move':
+                        _new_cx = int(mx / _sx) if _sx > 0 else int(mx)
+                        _new_cy = int(my / _sy) if _sy > 0 else int(my)
+                        collimation_detector.set_circle_position(_name, _new_cx, _new_cy, _colim_drag_start_r_img)
+                    elif _colim_drag_type == 'resize':
+                        _fcx_s = _colim_drag_center_img[0] * _sx
+                        _fcy_s = _colim_drag_center_img[1] * _sy
+                        _dx_r = mx - _fcx_s
+                        _dy_r = my - _fcy_s
+                        _new_r_screen = max(5, (_dx_r * _dx_r + _dy_r * _dy_r) ** 0.5)
+                        _new_r_img = max(5, int(_new_r_screen / _sr_scale)) if _sr_scale > 0 else max(5, int(_new_r_screen))
+                        collimation_detector.set_circle_position(
+                            _name, _colim_drag_center_img[0], _colim_drag_center_img[1], _new_r_img)
+                continue
+            else:
+                _colim_dragging = False
+                _colim_drag_type = None
       # MOVE HISTAREA
       elif (event.type == MOUSEBUTTONUP):
         mousex, mousey = event.pos
@@ -17210,6 +17736,12 @@ while True:
                         livestack_active = True
                         kill_preview_process()
                         preview()
+                        # Appliquer l'exposition/gain LS après reconfiguration caméra.
+                        # preview() utilise sspeed/gain (sliders principaux) → on écrase
+                        # immédiatement avec les valeurs dédiées au stack LS.
+                        apply_controls_immediately(
+                            gain_value=_cam_gain if _cam_gain > 0 else None,
+                            exposure_time=_cam_expo)
 
                     ls_sched_frames_done = 0
                     for _attr in ['_livestack_last_saved', '_livestack_display_info_shown',
@@ -17278,17 +17810,25 @@ while True:
                         preview_refresh=ls_preview_refresh,
                     )
                     _vfmt_map = {0: 'yuv420', 1: 'xrgb8888', 2: 'raw12', 3: 'raw16'}
+                    # En mode RAW (raw_format >= 2), le BL est toujours soustrait dans debayer_raw_array()
+                    # (soit global_black_level soit bl_per_channel) → session.get_preview_png() ne doit pas
+                    # soustraire une deuxième fois → raw_black_level=0 pour tout mode RAW.
                     livestack.configure(
                         isp_enable=False,
                         isp_config_path=None,
                         video_format=_vfmt_map.get(raw_format, 'yuv420'),
-                        raw_black_level=isp_black_level if raw_format >= 2 else 0,
+                        raw_black_level=0,
                         gradient_removal=bool(ls_gradient_removal) if raw_format >= 2 else False,
+                        awb_auto=bool(ls_raw_awb_auto) if raw_format >= 2 else False,
                     )
                     livestack.camera_params['raw_format'] = raw_formats[raw_format]
                     livestack.reset()
                     livestack.start()
                     livestack_active = True
+                    # Mémoriser l'exposition cible pour rejeter les frames résiduelles
+                    # (la caméra prend 2-3 frames pour appliquer un nouveau ExposureTime)
+                    pygame._ls_target_exposure_us = _cam_expo
+                    pygame._ls_exposure_skip_count = 0
                     pygame._livestack_last_saved = 0
                     _sched_str = f" [Scheduler: {ls_sched_frames} frames]" if ls_scheduler_enabled else ""
                     print(f"[LS INTERFACE] Stack démarré{_sched_str}")
@@ -17791,12 +18331,75 @@ while True:
                 screen_info = pygame.display.Info()
                 fs_width, fs_height = screen_info.current_w, screen_info.current_h
 
+            # --- Fin du drag manuel : on consomme le relâchement sans déclencher d'action ---
+            if _colim_dragging:
+                _colim_dragging = False
+                _colim_drag_type = None
+                continue
+
+            # --- Clic sur bouton AUTO/MANUEL ---
+            if is_click_on_collimation_manual(mousex, mousey, fs_width, fs_height):
+                collimation_manual_mode = 1 - collimation_manual_mode
+                if collimation_manual_mode == 0:
+                    collimation_selected_circle = None
+                    print("[COLIM] Mode AUTO")
+                else:
+                    print("[COLIM] Mode MANUEL")
+                continue
+
+            # --- Mode manuel : clic sur sélecteur de cercle ---
+            if collimation_manual_mode == 1 and _collimation_circle_selector_rects:
+                _sel_handled = False
+                for _cname, _crect in _collimation_circle_selector_rects.items():
+                    if _crect.collidepoint(mousex, mousey):
+                        _sel_handled = True
+                        if collimation_circle_enabled.get(_cname, False):
+                            if collimation_selected_circle == _cname:
+                                collimation_selected_circle = None
+                            else:
+                                collimation_selected_circle = _cname
+                                # Verrouiller automatiquement si pas encore fait
+                                if collimation_detector is not None and _cname in collimation_detector.circles:
+                                    if not collimation_detector.is_circle_locked(_cname):
+                                        collimation_detector.set_circle_locked(_cname, True)
+                                        collimation_circle_locked[_cname] = True
+                                        print(f"[COLIM] {_cname} selectionne + verrouille (mode manuel)")
+                                    else:
+                                        print(f"[COLIM] {_cname} selectionne")
+                        break
+                if _sel_handled:
+                    continue
+
+            # --- Mode manuel : boutons R- / R+ ---
+            if collimation_manual_mode == 1 and collimation_selected_circle is not None:
+                _r_step = 5 if collimation_selected_circle == 'camera' else 10
+                if _colim_r_minus_rect is not None and _colim_r_minus_rect.collidepoint(mousex, mousey):
+                    if collimation_detector is not None and collimation_selected_circle in collimation_detector.circles:
+                        _cx_r, _cy_r, _rr = collimation_detector.circles[collimation_selected_circle]
+                        _min_r = 5 if collimation_selected_circle == 'camera' else 10
+                        collimation_detector.set_circle_position(
+                            collimation_selected_circle, _cx_r, _cy_r, max(_min_r, _rr - _r_step))
+                    continue
+                if _colim_r_plus_rect is not None and _colim_r_plus_rect.collidepoint(mousex, mousey):
+                    if collimation_detector is not None and collimation_selected_circle in collimation_detector.circles:
+                        _cx_r, _cy_r, _rr = collimation_detector.circles[collimation_selected_circle]
+                        collimation_detector.set_circle_position(
+                            collimation_selected_circle, _cx_r, _cy_r, _rr + _r_step)
+                    continue
+
             # Clic sur EXIT
             if is_click_on_collimation_exit(mousex, mousey, fs_height):
                 collimation_mode = 0
                 collimation_detector = None
                 collimation_last_surface = None
                 collimation_settings_visible = 0
+                collimation_manual_mode = 0
+                collimation_selected_circle = None
+                _colim_dragging = False
+                _colim_drag_type = None
+                _collimation_circle_selector_rects = {}
+                _colim_r_minus_rect = None
+                _colim_r_plus_rect = None
                 collimation_circle_locked = {
                     'focuser': False, 'secondary': False, 'primary': False, 'camera': False
                 }
@@ -18338,6 +18941,13 @@ while True:
             if is_click_on_jsk_exit(mousex, mousey, fs_height):
                 # Quitter le mode JSK LIVE
                 jsk_live_mode = 0
+                # Arrêter le thread de traitement proprement
+                _jskp_exit = getattr(pygame, '_jskp', None)
+                if _jskp_exit is not None:
+                    if _jskp_exit['future'] is not None:
+                        _jskp_exit['future'].cancel()
+                    _jskp_exit['executor'].shutdown(wait=False)
+                    pygame._jskp = None
                 jsk_settings_visible = 0
                 jsk_crop_square = 0
                 jsk_binning = 1
