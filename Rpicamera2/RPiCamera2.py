@@ -5646,7 +5646,7 @@ def draw_ls_stats_bar(screen_width, screen_height, stats, is_scheduler=False,
 def _draw_ls_tab_bar(panel_x, panel_w, y):
     """Dessine la barre d'onglets LS (5 onglets) et retourne les rects."""
     global windowSurfaceObj, _font_cache, ls_settings_tab
-    tab_labels = ["Capture", "Qualité", "Stacking", "Scheduler", "Image"]
+    tab_labels = ["Capture", "Qualité", "Stacking", "Scheduler", "Image", "Stretch"]
     n = len(tab_labels)
     tab_h = 24
     tab_w = panel_w // n
@@ -5684,6 +5684,7 @@ def draw_ls_controls(screen_width, screen_height):
     global ls_cam_brightness, ls_cam_contrast, ls_cam_saturation, raw_format
     global isp_black_level, ls_gradient_removal, ls_raw_awb_auto
     global log_factor, mtf_shadows, mtf_midtone, mtf_highlights
+    global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP, ghs_preset, stretch_factor, stretch_p_low, stretch_p_high
     global ls_planetary_enable, ls_planetary_mode, ls_planetary_disk_min, ls_planetary_disk_max
     global fix_bad_pixels, fix_bad_pixels_sigma, fix_bad_pixels_min_adu
 
@@ -5929,34 +5930,6 @@ def draw_ls_controls(screen_width, screen_height):
     # =====================================================
     elif ls_settings_tab == 4:
         windowSurfaceObj.blit(
-            _font_cache[ck_sect].render("Stretch", True, (110, 195, 135)),
-            (panel_x + 2, start_y))
-        start_y += 16
-        _preset_names = ['OFF', 'GHS', 'Arcsinh', 'Log', 'MTF']
-        control_rects['ls_img_stretch'] = draw_jsk_slider(
-            panel_x, start_y, slider_w, slider_h,
-            f"Stretch: {_preset_names[min(stretch_preset, 4)]}", stretch_preset, 0, 4, (95, 155, 115))
-        start_y += slider_h + margin
-        if stretch_preset == 3:
-            control_rects['ls_img_log_factor'] = draw_jsk_slider(
-                panel_x, start_y, slider_w, slider_h,
-                f"Facteur Log: {log_factor}", log_factor, 0, 1000, (90, 150, 110))
-            start_y += slider_h + margin
-        elif stretch_preset == 4:
-            control_rects['ls_img_mtf_shadows'] = draw_jsk_slider(
-                panel_x, start_y, slider_w, slider_h,
-                f"Shadows: {mtf_shadows/100:.2f}", mtf_shadows, 0, 50, (90, 150, 110))
-            start_y += slider_h + margin
-            control_rects['ls_img_mtf_midtone'] = draw_jsk_slider(
-                panel_x, start_y, slider_w, slider_h,
-                f"Midtone: {mtf_midtone/100:.2f}", mtf_midtone, 1, 99, (90, 150, 110))
-            start_y += slider_h + margin
-            control_rects['ls_img_mtf_highlights'] = draw_jsk_slider(
-                panel_x, start_y, slider_w, slider_h,
-                f"Highlights: {mtf_highlights/100:.2f}", mtf_highlights, 50, 100, (90, 150, 110))
-            start_y += slider_h + margin
-
-        windowSurfaceObj.blit(
             _font_cache[ck_sect].render("Couleur", True, (110, 195, 135)),
             (panel_x + 2, start_y))
         start_y += 16
@@ -6062,6 +6035,84 @@ def draw_ls_controls(screen_width, screen_height):
                 f"Saturation cam: {ls_cam_saturation/10:.1f}", ls_cam_saturation, 0, 20, (190, 140, 190))
             start_y += slider_h + margin
 
+    # =====================================================
+    # ONGLET 5 : Stretch
+    # =====================================================
+    elif ls_settings_tab == 5:
+        _preset_names = ['OFF', 'GHS', 'Arcsinh', 'Log', 'MTF']
+        control_rects['ls_img_stretch'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Stretch: {_preset_names[min(stretch_preset, 4)]}", stretch_preset, 0, 4, (95, 155, 115))
+        start_y += slider_h + margin
+
+        if stretch_preset == 1:
+            # GHS : 5 paramètres
+            control_rects['ls_str_ghs_D'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"D (intensite): {ghs_D/10:.1f}", ghs_D, -10, 100, (100, 180, 140))
+            start_y += slider_h + margin
+            control_rects['ls_str_ghs_b'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"b (local): {ghs_b/10:.1f}", ghs_b, -300, 100, (100, 160, 180))
+            start_y += slider_h + margin
+            control_rects['ls_str_ghs_SP'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"SP (sym): {ghs_SP/100:.2f}", ghs_SP, 0, 100, (180, 140, 100))
+            start_y += slider_h + margin
+            control_rects['ls_str_ghs_LP'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"LP (ombres): {ghs_LP/100:.2f}", ghs_LP, 0, 100, (140, 100, 180))
+            start_y += slider_h + margin
+            control_rects['ls_str_ghs_HP'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"HP (hautes l.): {ghs_HP/100:.2f}", ghs_HP, 0, 100, (180, 100, 140))
+            start_y += slider_h + margin
+
+        elif stretch_preset == 2:
+            # Arcsinh : facteur + clip
+            control_rects['ls_str_asinh_factor'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Facteur: {stretch_factor/10:.1f}", stretch_factor, 0, 1500, (200, 160, 100))
+            start_y += slider_h + margin
+            control_rects['ls_str_clip_low'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Clip bas: {stretch_p_low/10:.1f}%", stretch_p_low, 0, 2, (180, 140, 100))
+            start_y += slider_h + margin
+            control_rects['ls_str_clip_high'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Clip haut: {stretch_p_high/100:.2f}%", stretch_p_high, 9950, 10000, (100, 180, 140))
+            start_y += slider_h + margin
+
+        elif stretch_preset == 3:
+            # Log : facteur + clip
+            control_rects['ls_img_log_factor'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Facteur Log: {log_factor}", log_factor, 0, 1000, (120, 170, 50))
+            start_y += slider_h + margin
+            control_rects['ls_str_clip_low'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Clip bas: {stretch_p_low/10:.1f}%", stretch_p_low, 0, 2, (180, 140, 100))
+            start_y += slider_h + margin
+            control_rects['ls_str_clip_high'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Clip haut: {stretch_p_high/100:.2f}%", stretch_p_high, 9950, 10000, (100, 180, 140))
+            start_y += slider_h + margin
+
+        elif stretch_preset == 4:
+            # MTF : shadows, midtone, highlights
+            control_rects['ls_img_mtf_shadows'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Shadows: {mtf_shadows/100:.2f}", mtf_shadows, 0, 50, (80, 120, 160))
+            start_y += slider_h + margin
+            control_rects['ls_img_mtf_midtone'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Midtone: {mtf_midtone/100:.2f}", mtf_midtone, 1, 99, (50, 160, 200))
+            start_y += slider_h + margin
+            control_rects['ls_img_mtf_highlights'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Highlights: {mtf_highlights/100:.2f}", mtf_highlights, 50, 100, (100, 200, 220))
+            start_y += slider_h + margin
+
     return control_rects
 
 
@@ -6077,6 +6128,7 @@ def handle_ls_slider_click(mx, my, control_rects):
     global livestack, isp_black_level, ls_gradient_removal, ls_raw_awb_auto
     global debayer_vng, ls_bl_per_channel_enable, ls_bl_r, ls_bl_g1, ls_bl_g2, ls_bl_b
     global log_factor, mtf_shadows, mtf_midtone, mtf_highlights
+    global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP, stretch_factor, stretch_p_low, stretch_p_high
     global ls_planetary_enable, ls_planetary_mode, ls_planetary_disk_min, ls_planetary_disk_max
     global fix_bad_pixels, fix_bad_pixels_sigma, fix_bad_pixels_min_adu
     import math as _math
@@ -6151,6 +6203,41 @@ def handle_ls_slider_click(mx, my, control_rects):
                 mtf_highlights = int(50 + ratio * 50)
                 if livestack is not None:
                     livestack.configure(mtf_highlights=mtf_highlights / 100.0)
+            # --- GHS params ---
+            elif name == 'ls_str_ghs_D':
+                ghs_D = max(-10, min(100, int(-10 + ratio * 110 + 0.5)))
+                if livestack is not None:
+                    livestack.configure(ghs_D=ghs_D / 10.0)
+            elif name == 'ls_str_ghs_b':
+                ghs_b = max(-300, min(100, int(-300 + ratio * 400 + 0.5)))
+                if livestack is not None:
+                    livestack.configure(ghs_b=ghs_b / 10.0)
+            elif name == 'ls_str_ghs_SP':
+                ghs_SP = int(ratio * 100 + 0.5)
+                if livestack is not None:
+                    livestack.configure(ghs_SP=ghs_SP / 100.0)
+            elif name == 'ls_str_ghs_LP':
+                ghs_LP = int(ratio * 100 + 0.5)
+                if livestack is not None:
+                    livestack.configure(ghs_LP=ghs_LP / 100.0)
+            elif name == 'ls_str_ghs_HP':
+                ghs_HP = int(ratio * 100 + 0.5)
+                if livestack is not None:
+                    livestack.configure(ghs_HP=ghs_HP / 100.0)
+            # --- Arcsinh params ---
+            elif name == 'ls_str_asinh_factor':
+                stretch_factor = int(ratio * 1500 + 0.5)
+                if livestack is not None:
+                    livestack.configure(png_factor=stretch_factor / 10.0)
+            # --- Clip bas/haut (Arcsinh + Log) ---
+            elif name == 'ls_str_clip_low':
+                stretch_p_low = max(0, min(2, int(ratio * 2 + 0.5)))
+                if livestack is not None:
+                    livestack.configure(png_clip_low=stretch_p_low / 10.0)
+            elif name == 'ls_str_clip_high':
+                stretch_p_high = max(9950, min(10000, int(9950 + ratio * 50 + 0.5)))
+                if livestack is not None:
+                    livestack.configure(png_clip_high=stretch_p_high / 100.0)
             elif name == 'ls_img_brightness':
                 isp_brightness = int(-50 + ratio * 100) # -50-50
             elif name == 'ls_img_contrast':
@@ -9705,7 +9792,7 @@ def _draw_home_tab_bar(panel_x, panel_w, y):
     """Dessine la barre d'onglets pour le panneau réglages home screen (5 onglets)."""
     global windowSurfaceObj, _font_cache, home_settings_tab
     tab_h = 22
-    tabs = [("Img", 0), ("Cap", 1), ("Vid", 2), ("TL/Sky", 3), ("Sys", 4)]
+    tabs = [("Img", 0), ("Cap", 1), ("Vid", 2), ("TL/Sky", 3)]
     n_tabs = len(tabs)
     tab_w = (panel_w - 2) // n_tabs
     rects = {}
@@ -9739,7 +9826,7 @@ def draw_home_settings_panel(sw, sh):
     global use_native_sensor_mode, focus_method, star_metric, isp_enable, snr_display
     global metrics_interval, allsky_mode, allsky_mean_target, allsky_max_gain, allsky_apply_stretch
     global allsky_stack_enable, allsky_stack_count
-    if home_settings_tab > 4:
+    if home_settings_tab > 3:
         home_settings_tab = 0
 
     panel_w = 240
@@ -9831,29 +9918,13 @@ def draw_home_settings_panel(sw, sh):
     elif home_settings_tab == 1:
         _extn_nm   = _n(extns, extn)  if 'extns' in globals() else str(extn)
         _raw_nm    = _n(_RAW_NAMES, raw_format)
-        _str_nm    = _n(stretch_presets, stretch_preset) if 'stretch_presets' in globals() else str(stretch_preset)
-        _ghsp_nm   = _n(ghs_presets,    ghs_preset)    if 'ghs_presets'    in globals() else str(ghs_preset)
         _nextn_max = len(extns)-1    if 'extns'    in globals() else 5
-        _sl('cfg_extn',     f"Format fichier: {_extn_nm}",    extn,      0, _nextn_max, (80, 100, 120))
-        _sl('cfg_raw',      f"Capteur: {_raw_nm}",            raw_format,0, 3,          (80, 90, 130))
-        _sl('cfg_quality',  f"Qualite JPEG: {quality}",       quality,   0, 100,        (90, 120, 90))
-        _sl('cfg_isp',      f"ISP actif: {_yn(isp_enable)}",  isp_enable,0, 1,          (80, 90, 110))
-        # --- Stretch aperçu : sélecteur puis params selon le type choisi ---
-        _nstr_max = len(stretch_presets)-1 if 'stretch_presets' in globals() else 2
-        _sl('cfg_str_prev', f"Stretch: {_str_nm}", stretch_preset, 0, _nstr_max, (80, 100, 140))
-        if stretch_preset == 2:
-            # Arcsinh : seuil bas, seuil haut, facteur
-            _sl('cfg_str_low',  f"Seuil bas: {stretch_p_low/10:.1f}%",    stretch_p_low,  0, 2,          (70, 130, 110))
-            _sl('cfg_str_high', f"Seuil haut: {stretch_p_high/100:.2f}%", stretch_p_high, 9980, 10000,   (70, 120, 120))
-            _sl('cfg_str_fac',  f"Facteur: {stretch_factor/10:.1f}",       stretch_factor, 0, 1500,       (80, 120, 110))
-        elif stretch_preset == 1:
-            # GHS : preset puis 5 paramètres
-            _sl('cfg_ghs_pre', f"Preset: {_ghsp_nm}",      ghs_preset, 0, len(ghs_presets)-1 if 'ghs_presets' in globals() else 3, (90, 80, 150))
-            _sl('cfg_ghs_D',   f"D (intensite): {ghs_D/10:.1f}",  ghs_D,  -10, 100, (90, 70, 160))
-            _sl('cfg_ghs_b',   f"b (local): {ghs_b/10:.1f}",      ghs_b,  -50, 150, (80, 70, 150))
-            _sl('cfg_ghs_SP',  f"SP (sym): {ghs_SP/100:.2f}",     ghs_SP,   0, 100, (80, 80, 140))
-            _sl('cfg_ghs_LP',  f"LP (ombres): {ghs_LP/100:.2f}",  ghs_LP,   0, 100, (70, 80, 130))
-            _sl('cfg_ghs_HP',  f"HP (hautes l.): {ghs_HP/100:.2f}", ghs_HP, 0, 100, (70, 90, 120))
+        _nhdr_max  = len(v3_hdrs)-1  if 'v3_hdrs'  in globals() else 4
+        _hdr_nm    = v3_hdrs[v3_hdr] if 'v3_hdrs'  in globals() and 0 <= v3_hdr < len(v3_hdrs) else str(v3_hdr)
+        _sl('cfg_extn',    f"Format fichier: {_extn_nm}", extn,      0, _nextn_max, (80, 100, 120))
+        _sl('cfg_raw',     f"Capteur: {_raw_nm}",         raw_format,0, 3,          (80, 90, 130))
+        _sl('cfg_quality', f"Qualite JPEG: {quality}",    quality,   0, 100,        (90, 120, 90))
+        _sl('cfg_v3hdr',   f"HDR: {_hdr_nm}",             v3_hdr,    0, _nhdr_max,  (80, 100, 100))
 
     # ── Tab 2 : Vid ── vidéo ──────────────────────────────────────────────────
     elif home_settings_tab == 2:
@@ -9882,20 +9953,6 @@ def draw_home_settings_panel(sw, sh):
         _sl('cfg_allsky_stk',   f"AllSky stack: {_yn(allsky_stack_enable)}", allsky_stack_enable, 0, 1, (80, 100, 120))
         _sl('cfg_allsky_cnt',   f"AllSky nb stack: {allsky_stack_count}", allsky_stack_count, 2, 10,   (80, 100, 110))
 
-    # ── Tab 4 : Sys ── Système / Capteur / Focus / SNR ───────────────────────
-    elif home_settings_tab == 4:
-        _focm_nm = _n(focus_methods, focus_method) if 'focus_methods' in globals() else str(focus_method)
-        _starm_nm= _n(star_metrics,  star_metric)  if 'star_metrics'  in globals() else str(star_metric)
-        _v3sp_nm = _n(v3_f_speeds,   v3_f_speed)   if 'v3_f_speeds'   in globals() else str(v3_f_speed)
-        _v3rg_nm = _n(v3_f_ranges,   v3_f_range)   if 'v3_f_ranges'   in globals() else str(v3_f_range)
-        _sl('cfg_native',  f"Mode natif: {_yn(use_native_sensor_mode)}", use_native_sensor_mode, 0, 1, (80, 100, 80))
-        _sl('cfg_v3speed', f"V3 vitesse AF: {_v3sp_nm}", v3_f_speed, 0, len(v3_f_speeds)-1 if 'v3_f_speeds' in globals() else 1, (90, 90, 80))
-        _sl('cfg_v3range', f"V3 plage AF: {_v3rg_nm}",  v3_f_range, 0, len(v3_f_ranges)-1 if 'v3_f_ranges' in globals() else 2, (80, 90, 90))
-        _sl('cfg_v3hdr',   f"V3 HDR: {_yn(v3_hdr)}",    v3_hdr,     0, 1,   (80, 100, 100))
-        _sl('cfg_focus_m', f"Focus: {_focm_nm}",         focus_method, 0, len(focus_methods)-1 if 'focus_methods' in globals() else 4, (80, 110, 90))
-        _sl('cfg_star_m',  f"Metrique: {_starm_nm}",     star_metric,  0, len(star_metrics)-1 if 'star_metrics' in globals() else 2, (90, 100, 80))
-        _sl('cfg_snr',     f"SNR display: {_yn(snr_display)}", snr_display, 0, 1, (70, 100, 110))
-        _sl('cfg_metrics', f"SNR intervalle: {metrics_interval}s", metrics_interval, 1, 10, (70, 90, 120))
 
     return control_rects
 
@@ -10203,6 +10260,24 @@ def draw_focus_overlay(sw, sh):
                   focus_method == i, mabg, mabdr, macol)
         sx += tw + 2
 
+    sx += 14  # séparateur
+
+    # Label "SNR:"
+    lbl_snr = fnt_xs.render("SNR:", True, (140, 148, 168))
+    windowSurfaceObj.blit(lbl_snr, lbl_snr.get_rect(midleft=(sx, row2_y + row2_h // 2)))
+    sx += lbl_snr.get_width() + 5
+
+    # 2 segments SNR (index = snr_display)
+    _snr_data = [
+        ("OFF", (36, 38, 50),  (62, 65, 80),   (100, 105, 122)),
+        ("ON",  (10, 55, 72),  (25, 142, 178), (40, 188, 228)),
+    ]
+    for i, (sl, sabg, sabdr, sacol) in enumerate(_snr_data):
+        tw = max(fnt_sm.size(sl)[0] + 16, 40)
+        _draw_seg(f'focus_snr_{i}', sx, seg_y, tw, seg_h, sl,
+                  snr_display == i, sabg, sabdr, sacol)
+        sx += tw + 2
+
     # ── Graphiques en transparence sur le preview (même zone bas 25%) ──────────
     band_y = int(sh * 0.75)
     band_h = sh - band_y
@@ -10268,7 +10343,7 @@ def draw_focus_overlay(sw, sh):
 def handle_focus_overlay_click(mx, my):
     """Gère les clics sur l'overlay focus."""
     global focus_mode, focus_gain, focus_exposure_us, focus_zoom_focus
-    global focus_method, star_metric, metrics_interval, histarea, zoom
+    global focus_method, star_metric, metrics_interval, snr_display, histarea, zoom
     global _focus_overlay_rects
     global xx, xy, preview_width, preview_height
     global windowSurfaceObj, picam2
@@ -10351,6 +10426,17 @@ def handle_focus_overlay_click(mx, my):
         r = rects.get(f'focus_foc_{i}')
         if r and r.collidepoint(mx, my):
             focus_method = i
+            try:
+                save_config_to_file()
+            except Exception:
+                pass
+            return
+
+    # Segments SNR (snr_display 0/1 = OFF/ON)
+    for i in range(2):
+        r = rects.get(f'focus_snr_{i}')
+        if r and r.collidepoint(mx, my):
+            snr_display = i
             try:
                 save_config_to_file()
             except Exception:
@@ -10443,7 +10529,7 @@ def draw_jsk_slider(x, y, width, height, label, value, vmin, vmax, color=(100, 1
 
     # Position curseur
     if vmax > vmin:
-        ratio = (value - vmin) / (vmax - vmin)
+        ratio = max(0.0, min(1.0, (value - vmin) / (vmax - vmin)))
     else:
         ratio = 0
     cursor_x = x + 5 + int(ratio * (width - 15))
@@ -10659,27 +10745,14 @@ def handle_home_click(mx, my):
                 _home_cam_restart_with_msg()
             elif key == 'cfg_IRF':
                 IRF = int(ratio + 0.5)
-            elif key == 'cfg_native':
-                use_native_sensor_mode = int(ratio + 0.5)
             elif key == 'cfg_focus_m':
                 _nfm = len(focus_methods)-1 if 'focus_methods' in globals() else 4
                 focus_method = int(ratio * _nfm + 0.5)
             elif key == 'cfg_star_m':
                 star_metric = int(ratio * 2 + 0.5)
-            elif key == 'cfg_v3speed':
-                _nvs = len(v3_f_speeds)-1 if 'v3_f_speeds' in globals() else 1
-                v3_f_speed = int(ratio * _nvs + 0.5)
-            elif key == 'cfg_v3range':
-                _nvr = len(v3_f_ranges)-1 if 'v3_f_ranges' in globals() else 2
-                v3_f_range = int(ratio * _nvr + 0.5)
             elif key == 'cfg_v3hdr':
-                v3_hdr = int(ratio + 0.5)
-            elif key == 'cfg_isp':
-                isp_enable = int(ratio + 0.5)
-            elif key == 'cfg_snr':
-                snr_display = int(ratio + 0.5)
-            elif key == 'cfg_metrics':
-                metrics_interval = max(1, int(ratio * 9 + 1 + 0.5))
+                _nhdr = len(v3_hdrs)-1 if 'v3_hdrs' in globals() else 4
+                v3_hdr = int(ratio * _nhdr + 0.5)
             elif key == 'cfg_allsky':
                 allsky_mode = int(ratio + 0.5)
             elif key == 'cfg_allsky_tg':
@@ -10700,29 +10773,6 @@ def handle_home_click(mx, my):
                 profile = int(ratio * 2 + 0.5)
             elif key == 'cfg_level':
                 level = int(ratio * 2 + 0.5)
-            # --- Stretch ---
-            elif key == 'cfg_str_prev':
-                _nsp = len(stretch_presets)-1 if 'stretch_presets' in globals() else 2
-                stretch_preset = int(ratio * _nsp + 0.5)
-            elif key == 'cfg_str_low':
-                stretch_p_low = int(ratio * 2 + 0.5)
-            elif key == 'cfg_str_high':
-                stretch_p_high = max(9980, min(10000, int(9980 + ratio * 20 + 0.5)))
-            elif key == 'cfg_str_fac':
-                stretch_factor = int(ratio * 1500 + 0.5)
-            elif key == 'cfg_ghs_pre':
-                _ngp = len(ghs_presets)-1 if 'ghs_presets' in globals() else 3
-                ghs_preset = int(ratio * _ngp + 0.5)
-            elif key == 'cfg_ghs_D':
-                ghs_D = max(-10, min(100, int(-10 + ratio * 110 + 0.5)))
-            elif key == 'cfg_ghs_b':
-                ghs_b = max(-50, min(150, int(-50 + ratio * 200 + 0.5)))
-            elif key == 'cfg_ghs_SP':
-                ghs_SP = int(ratio * 100 + 0.5)
-            elif key == 'cfg_ghs_LP':
-                ghs_LP = int(ratio * 100 + 0.5)
-            elif key == 'cfg_ghs_HP':
-                ghs_HP = int(ratio * 100 + 0.5)
             else:
                 changed = False
             if changed:
