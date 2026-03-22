@@ -2,6 +2,7 @@
 
 RPiCamera is a control and recording application for Raspberry Pi cameras, optimized for the IMX585 sensor and designed to work with a custom libcamera build (libcamera-imx585). The software provides a Pygame graphical interface, advanced camera parameter control via Picamera2/libcamera, and features useful for astrophotography (focusing assistance, histograms, live stacking support, etc.).
 
+<img width="1024" height="600" alt="20260322_16h12m36s_grim" src="https://github.com/user-attachments/assets/f69fa734-58c1-48ed-99dc-77e8b3b8b362" />
 
 
 ## Requirements
