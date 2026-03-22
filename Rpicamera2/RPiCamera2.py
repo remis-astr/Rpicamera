@@ -5684,6 +5684,8 @@ def draw_ls_controls(screen_width, screen_height):
     global ls_cam_brightness, ls_cam_contrast, ls_cam_saturation, raw_format
     global isp_black_level, ls_gradient_removal, ls_raw_awb_auto
     global log_factor, mtf_shadows, mtf_midtone, mtf_highlights
+    global ls_planetary_enable, ls_planetary_mode, ls_planetary_disk_min, ls_planetary_disk_max
+    global fix_bad_pixels, fix_bad_pixels_sigma, fix_bad_pixels_min_adu
 
     panel_w  = 260
     panel_m  = 10
@@ -5736,6 +5738,33 @@ def draw_ls_controls(screen_width, screen_height):
             panel_x, start_y, slider_w, slider_h,
             f"Refresh: /{ls_preview_refresh} img", ls_preview_refresh, 1, 10, (55, 125, 75))
         start_y += slider_h + margin + 8
+
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Planétaire", True, (110, 195, 135)),
+            (panel_x + 2, start_y))
+        start_y += 16
+
+        control_rects['ls_planetary_enable'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Planétaire: {'ON' if ls_planetary_enable else 'OFF'}", ls_planetary_enable, 0, 1, (160, 140, 75))
+        start_y += slider_h + margin
+
+        if ls_planetary_enable:
+            _plm_names = ['Disque', 'Surface', 'Hybride']
+            _plm_lbl = _plm_names[ls_planetary_mode] if 0 <= ls_planetary_mode < len(_plm_names) else "?"
+            control_rects['ls_planetary_mode'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Mode: {_plm_lbl}", ls_planetary_mode, 0, 2, (140, 155, 75))
+            start_y += slider_h + margin
+            control_rects['ls_planetary_disk_min'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Disque min: {ls_planetary_disk_min}px", ls_planetary_disk_min, 10, 500, (130, 145, 75))
+            start_y += slider_h + margin
+            control_rects['ls_planetary_disk_max'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Disque max: {ls_planetary_disk_max}px", ls_planetary_disk_max, 50, 1000, (130, 145, 75))
+            start_y += slider_h + margin
+        start_y += 8
 
         windowSurfaceObj.blit(
             _font_cache[ck_sect].render("Sauvegarde", True, (110, 195, 135)),
@@ -6000,6 +6029,20 @@ def draw_ls_controls(screen_width, screen_height):
                 f"AWB Auto: {_awb_lbl}", ls_raw_awb_auto, 0, 1, (180, 160, 110))
             start_y += slider_h + margin
 
+            control_rects['ls_raw_fix_bad'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Pix chauds: {'ON' if fix_bad_pixels else 'OFF'}", fix_bad_pixels, 0, 1, (190, 100, 100))
+            start_y += slider_h + margin
+            if fix_bad_pixels:
+                control_rects['ls_raw_fix_sig'] = draw_jsk_slider(
+                    panel_x, start_y, slider_w, slider_h,
+                    f"Sigma: {fix_bad_pixels_sigma}", fix_bad_pixels_sigma, 10, 100, (175, 100, 110))
+                start_y += slider_h + margin
+                control_rects['ls_raw_fix_adu'] = draw_jsk_slider(
+                    panel_x, start_y, slider_w, slider_h,
+                    f"ADU min: {fix_bad_pixels_min_adu}", fix_bad_pixels_min_adu, 10, 500, (160, 100, 120))
+                start_y += slider_h + margin
+
         # Section ISP caméra (hardware) — uniquement en mode RGB/YUV
         if raw_format < 2:
             windowSurfaceObj.blit(
@@ -6034,6 +6077,8 @@ def handle_ls_slider_click(mx, my, control_rects):
     global livestack, isp_black_level, ls_gradient_removal, ls_raw_awb_auto
     global debayer_vng, ls_bl_per_channel_enable, ls_bl_r, ls_bl_g1, ls_bl_g2, ls_bl_b
     global log_factor, mtf_shadows, mtf_midtone, mtf_highlights
+    global ls_planetary_enable, ls_planetary_mode, ls_planetary_disk_min, ls_planetary_disk_max
+    global fix_bad_pixels, fix_bad_pixels_sigma, fix_bad_pixels_min_adu
     import math as _math
 
     for name, rect in control_rects.items():
@@ -6156,6 +6201,20 @@ def handle_ls_slider_click(mx, my, control_rects):
                 ls_raw_awb_auto = 1 if ratio > 0.5 else 0
                 if livestack is not None:
                     livestack.configure(awb_auto=bool(ls_raw_awb_auto))
+            elif name == 'ls_planetary_enable':
+                ls_planetary_enable = 1 if ratio > 0.5 else 0
+            elif name == 'ls_planetary_mode':
+                ls_planetary_mode = max(0, min(2, int(ratio * 2 + 0.5)))
+            elif name == 'ls_planetary_disk_min':
+                ls_planetary_disk_min = max(10, min(500, int(10 + ratio * 490 + 0.5)))
+            elif name == 'ls_planetary_disk_max':
+                ls_planetary_disk_max = max(50, min(1000, int(50 + ratio * 950 + 0.5)))
+            elif name == 'ls_raw_fix_bad':
+                fix_bad_pixels = 1 if ratio > 0.5 else 0
+            elif name == 'ls_raw_fix_sig':
+                fix_bad_pixels_sigma = max(10, int(10 + ratio * 90 + 0.5))
+            elif name == 'ls_raw_fix_adu':
+                fix_bad_pixels_min_adu = max(10, int(10 + ratio * 490 + 0.5))
 
             # Propager les paramètres stacking vers livestack.configure()
             # (les paramètres UI-only ou caméra-directs sont déjà traités ci-dessus)
@@ -7053,6 +7112,9 @@ def draw_lucky_controls(screen_width, screen_height):
     # ONGLET 3 : Filtres de netteté post-stack
     # =====================================================
     elif lucky_settings_tab == 3:
+        # Sliders compacts pour tenir dans 600px de hauteur
+        slider_h = 22
+        margin   = 2
         # ── CLAHE ──────────────────────────────────────
         windowSurfaceObj.blit(
             _font_cache[ck_sect].render("CLAHE (contraste local)", True, (100, 200, 160)),
@@ -9640,10 +9702,10 @@ def draw_home_bottom_bar(sw, sh):
 
 
 def _draw_home_tab_bar(panel_x, panel_w, y):
-    """Dessine la barre d'onglets pour le panneau réglages home screen (7 onglets)."""
+    """Dessine la barre d'onglets pour le panneau réglages home screen (5 onglets)."""
     global windowSurfaceObj, _font_cache, home_settings_tab
     tab_h = 22
-    tabs = [("Img", 0), ("Cap", 1), ("Vid", 2), ("TL/Sky", 3), ("LS", 4), ("Lk", 5), ("Sys", 6)]
+    tabs = [("Img", 0), ("Cap", 1), ("Vid", 2), ("TL/Sky", 3), ("Sys", 4)]
     n_tabs = len(tabs)
     tab_w = (panel_w - 2) // n_tabs
     rects = {}
@@ -9667,23 +9729,18 @@ def _draw_home_tab_bar(panel_x, panel_w, y):
 
 
 def draw_home_settings_panel(sw, sh):
-    """Panneau de réglages à 7 onglets — home screen (côté droit)."""
+    """Panneau de réglages à 5 onglets — home screen (côté droit)."""
     global windowSurfaceObj, _font_cache, home_settings_tab
     global mode, speed, gain, brightness, contrast, saturation, ev, awb, meter, blue, red
     global sharpness, denoise, quality, vformat, codec, vlen, fps, tinterval, tshots, extn, raw_format, str_cap
     global vflip, hflip, rotate, profile, level, v3_hdr, v3_f_speed, v3_f_range
     global stretch_preset, stretch_p_low, stretch_p_high, stretch_factor
     global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP, ghs_preset
-    global ls_preview_refresh, ls_alignment_mode, ls_enable_qc, ls_max_fwhm, ls_min_sharpness
-    global ls_max_drift, ls_min_stars, ls_stack_method, ls_stack_kappa, ls_stack_iterations
-    global ls_save_progress, ls_save_final, ls_planetary_enable, ls_planetary_mode
-    global ls_planetary_disk_min, ls_planetary_disk_max
-    global ls_lucky_buffer, ls_lucky_keep, ls_lucky_score, ls_lucky_stack, ls_lucky_align, ls_lucky_roi
-    global ls_lucky_save_progress, ls_lucky_save_final
-    global use_native_sensor_mode, focus_method, star_metric, fix_bad_pixels
-    global fix_bad_pixels_sigma, fix_bad_pixels_min_adu, isp_enable, snr_display
+    global use_native_sensor_mode, focus_method, star_metric, isp_enable, snr_display
     global metrics_interval, allsky_mode, allsky_mean_target, allsky_max_gain, allsky_apply_stretch
     global allsky_stack_enable, allsky_stack_count
+    if home_settings_tab > 4:
+        home_settings_tab = 0
 
     panel_w = 240
     panel_x = sw - panel_w
@@ -9781,11 +9838,6 @@ def draw_home_settings_panel(sw, sh):
         _sl('cfg_raw',      f"Capteur: {_raw_nm}",            raw_format,0, 3,          (80, 90, 130))
         _sl('cfg_quality',  f"Qualite JPEG: {quality}",       quality,   0, 100,        (90, 120, 90))
         _sl('cfg_isp',      f"ISP actif: {_yn(isp_enable)}",  isp_enable,0, 1,          (80, 90, 110))
-        # Pixels chauds : sous-options masquées quand OFF
-        _sl('cfg_fixbad',   f"Pix chauds: {_yn(fix_bad_pixels)}", fix_bad_pixels, 0, 1, (100, 80, 80))
-        if fix_bad_pixels:
-            _sl('cfg_fixsig', f"Sigma: {fix_bad_pixels_sigma}", fix_bad_pixels_sigma, 10, 100, (100, 80, 90))
-            _sl('cfg_fixadu', f"ADU min: {fix_bad_pixels_min_adu}", fix_bad_pixels_min_adu, 10, 500, (90, 80, 100))
         # --- Stretch aperçu : sélecteur puis params selon le type choisi ---
         _nstr_max = len(stretch_presets)-1 if 'stretch_presets' in globals() else 2
         _sl('cfg_str_prev', f"Stretch: {_str_nm}", stretch_preset, 0, _nstr_max, (80, 100, 140))
@@ -9830,43 +9882,8 @@ def draw_home_settings_panel(sw, sh):
         _sl('cfg_allsky_stk',   f"AllSky stack: {_yn(allsky_stack_enable)}", allsky_stack_enable, 0, 1, (80, 100, 120))
         _sl('cfg_allsky_cnt',   f"AllSky nb stack: {allsky_stack_count}", allsky_stack_count, 2, 10,   (80, 100, 110))
 
-    # ── Tab 4 : LS ── Live Stack ──────────────────────────────────────────────
+    # ── Tab 4 : Sys ── Système / Capteur / Focus / SNR ───────────────────────
     elif home_settings_tab == 4:
-        _align_nm = _n(ls_alignment_modes, ls_alignment_mode) if 'ls_alignment_modes' in globals() else str(ls_alignment_mode)
-        _stkm_nm  = _n(stack_methods,      ls_stack_method)   if 'stack_methods'      in globals() else str(ls_stack_method)
-        _plm_nm   = _n(planetary_modes,    ls_planetary_mode) if 'planetary_modes'    in globals() else str(ls_planetary_mode)
-        _sl('cfg_ls_refresh',  f"Refresh: {ls_preview_refresh}fr",     ls_preview_refresh,   1, 10,   (80, 100, 140))
-        _sl('cfg_ls_align',    f"Alignement: {_align_nm}",             ls_alignment_mode,    0, len(ls_alignment_modes)-1 if 'ls_alignment_modes' in globals() else 3, (80, 110, 130))
-        _sl('cfg_ls_qc',       f"Ctrl qualite: {_yn(ls_enable_qc)}",   ls_enable_qc,         0, 1,    (90, 120, 90))
-        _sl('cfg_ls_fwhm',     f"FWHM max: {ls_max_fwhm}",            ls_max_fwhm,          0, 500,  (100, 110, 80))
-        _sl('cfg_ls_sharp',    f"Nettete min: {ls_min_sharpness}",     ls_min_sharpness,     0, 100,  (110, 100, 70))
-        _sl('cfg_ls_drift',    f"Derive max: {ls_max_drift}px",        ls_max_drift,         100, 5000,(90, 80, 110))
-        _sl('cfg_ls_stars',    f"Etoiles min: {ls_min_stars}",         ls_min_stars,         0, 50,   (80, 80, 120))
-        _sl('cfg_ls_method',   f"Stacking: {_stkm_nm}",               ls_stack_method,      0, len(stack_methods)-1 if 'stack_methods' in globals() else 4, (100, 100, 140))
-        _sl('cfg_ls_kappa',    f"Kappa x10: {ls_stack_kappa}",         ls_stack_kappa,       10, 50,  (90, 100, 130))
-        _sl('cfg_ls_iter',     f"Iterations: {ls_stack_iterations}",   ls_stack_iterations,  1, 10,   (80, 110, 120))
-        _sl('cfg_ls_saveprog', f"Save progres: {_yn(ls_save_progress)}", ls_save_progress,  0, 1,    (70, 120, 90))
-        _sl('cfg_ls_savefin',  f"Save final: {_yn(ls_save_final)}",    ls_save_final,        0, 1,    (70, 110, 100))
-        _sl('cfg_ls_planet',   f"Planetaire: {_yn(ls_planetary_enable)}", ls_planetary_enable, 0, 1, (100, 80, 80))
-        _sl('cfg_ls_plmode',   f"Mode pl: {_plm_nm}",                 ls_planetary_mode,    0, len(planetary_modes)-1 if 'planetary_modes' in globals() else 2, (100, 80, 90))
-        _sl('cfg_ls_plmin',    f"Disque min: {ls_planetary_disk_min}px", ls_planetary_disk_min, 10, 1000, (90, 80, 100))
-        _sl('cfg_ls_plmax',    f"Disque max: {ls_planetary_disk_max}px", ls_planetary_disk_max, 10, 1000, (90, 80, 100))
-
-    # ── Tab 5 : Lk ── Lucky Stack ─────────────────────────────────────────────
-    elif home_settings_tab == 5:
-        _score_nm = _n(lucky_score_methods, ls_lucky_score) if 'lucky_score_methods' in globals() else str(ls_lucky_score)
-        _stkl_nm  = _n(lucky_stack_methods, ls_lucky_stack) if 'lucky_stack_methods' in globals() else str(ls_lucky_stack)
-        _sl('cfg_lk_buffer', f"Buffer: {ls_lucky_buffer}fr",    ls_lucky_buffer,        10, 200, (80, 60, 120))
-        _sl('cfg_lk_keep',   f"Garder: {ls_lucky_keep}%",       ls_lucky_keep,          5, 100,  (80, 70, 110))
-        _sl('cfg_lk_score',  f"Score: {_score_nm}",             ls_lucky_score,         0, len(lucky_score_methods)-1 if 'lucky_score_methods' in globals() else 3, (90, 60, 100))
-        _sl('cfg_lk_stack',  f"Stacking: {_stkl_nm}",          ls_lucky_stack,         0, len(lucky_stack_methods)-1 if 'lucky_stack_methods' in globals() else 2, (90, 70, 90))
-        _sl('cfg_lk_align',  f"Alignement: {_yn(ls_lucky_align)}", ls_lucky_align,      0, 1,    (80, 80, 100))
-        _sl('cfg_lk_roi',    f"ROI: {ls_lucky_roi}%",           ls_lucky_roi,           0, 100,  (70, 80, 110))
-        _sl('cfg_lk_savepg', f"Save progres: {_yn(ls_lucky_save_progress)}", ls_lucky_save_progress, 0, 1, (70, 100, 80))
-        _sl('cfg_lk_savefn', f"Save final: {_yn(ls_lucky_save_final)}", ls_lucky_save_final, 0, 1, (70, 90, 90))
-
-    # ── Tab 6 : Sys ── Système / Capteur / Focus / SNR ───────────────────────
-    elif home_settings_tab == 6:
         _focm_nm = _n(focus_methods, focus_method) if 'focus_methods' in globals() else str(focus_method)
         _starm_nm= _n(star_metrics,  star_metric)  if 'star_metrics'  in globals() else str(star_metric)
         _v3sp_nm = _n(v3_f_speeds,   v3_f_speed)   if 'v3_f_speeds'   in globals() else str(v3_f_speed)
@@ -10419,10 +10436,10 @@ def draw_jsk_slider(x, y, width, height, label, value, vmin, vmax, color=(100, 1
     label_text = fontObj.render(label, True, (220, 220, 220))
     windowSurfaceObj.blit(label_text, (x + 5, y + 2))
 
-    # Barre
-    bar_y = y + 22
-    bar_height = height - 27
-    pygame.draw.rect(windowSurfaceObj, (50, 50, 60), (x + 5, bar_y, width - 10, bar_height))
+    # Barre — position adaptative selon la hauteur du slider
+    bar_h  = max(height - 22, 4)
+    bar_y  = y + height - bar_h
+    pygame.draw.rect(windowSurfaceObj, (50, 50, 60), (x + 5, bar_y, width - 10, bar_h))
 
     # Position curseur
     if vmax > vmin:
@@ -10432,10 +10449,10 @@ def draw_jsk_slider(x, y, width, height, label, value, vmin, vmax, color=(100, 1
     cursor_x = x + 5 + int(ratio * (width - 15))
 
     # Barre remplie
-    pygame.draw.rect(windowSurfaceObj, color, (x + 5, bar_y, cursor_x - x - 5, bar_height))
+    pygame.draw.rect(windowSurfaceObj, color, (x + 5, bar_y, cursor_x - x - 5, bar_h))
 
     # Curseur
-    pygame.draw.rect(windowSurfaceObj, (200, 200, 220), (cursor_x, bar_y - 2, 5, bar_height + 4))
+    pygame.draw.rect(windowSurfaceObj, (200, 200, 220), (cursor_x, bar_y - 2, 5, bar_h + 4))
 
     # Bordure
     pygame.draw.rect(windowSurfaceObj, (80, 80, 90), slider_rect, 1)
@@ -10460,14 +10477,7 @@ def handle_home_click(mx, my):
     global mode, speed, brightness, contrast, saturation, ev, awb, meter
     global sharpness, denoise, quality, vformat, codec, vlen, fps, tinterval, tshots, extn, raw_format, str_cap
     global vflip, hflip, rotate, IRF, profile, level, v3_hdr, v3_f_speed, v3_f_range
-    global ls_preview_refresh, ls_alignment_mode, ls_enable_qc, ls_max_fwhm, ls_min_sharpness
-    global ls_max_drift, ls_min_stars, ls_stack_method, ls_stack_kappa, ls_stack_iterations
-    global ls_save_progress, ls_save_final, ls_planetary_enable, ls_planetary_mode
-    global ls_planetary_disk_min, ls_planetary_disk_max
-    global ls_lucky_buffer, ls_lucky_keep, ls_lucky_score, ls_lucky_stack, ls_lucky_align, ls_lucky_roi
-    global ls_lucky_save_progress, ls_lucky_save_final
-    global use_native_sensor_mode, focus_method, star_metric, fix_bad_pixels
-    global fix_bad_pixels_sigma, fix_bad_pixels_min_adu, isp_enable, snr_display
+    global use_native_sensor_mode, focus_method, star_metric, isp_enable, snr_display
     global metrics_interval, allsky_mode, allsky_mean_target, allsky_max_gain, allsky_apply_stretch
     global allsky_stack_enable, allsky_stack_count
     global stretch_preset, stretch_p_low, stretch_p_high, stretch_factor
@@ -10649,55 +10659,6 @@ def handle_home_click(mx, my):
                 _home_cam_restart_with_msg()
             elif key == 'cfg_IRF':
                 IRF = int(ratio + 0.5)
-            elif key == 'cfg_ls_refresh':
-                ls_preview_refresh = max(1, int(ratio * 9 + 1 + 0.5))
-            elif key == 'cfg_ls_align':
-                ls_alignment_mode = int(ratio * 3 + 0.5)
-            elif key == 'cfg_ls_qc':
-                ls_enable_qc = int(ratio + 0.5)
-            elif key == 'cfg_ls_fwhm':
-                ls_max_fwhm = int(ratio * 500 + 0.5)
-            elif key == 'cfg_ls_sharp':
-                ls_min_sharpness = int(ratio * 100 + 0.5)
-            elif key == 'cfg_ls_drift':
-                ls_max_drift = max(100, int(100 + ratio * 4900 + 0.5))
-            elif key == 'cfg_ls_stars':
-                ls_min_stars = int(ratio * 50 + 0.5)
-            elif key == 'cfg_ls_method':
-                ls_stack_method = int(ratio * 4 + 0.5)
-            elif key == 'cfg_ls_kappa':
-                ls_stack_kappa = max(10, int(10 + ratio * 40 + 0.5))
-            elif key == 'cfg_ls_iter':
-                ls_stack_iterations = max(1, int(ratio * 9 + 1 + 0.5))
-            elif key == 'cfg_ls_saveprog':
-                ls_save_progress = int(ratio + 0.5)
-            elif key == 'cfg_ls_savefin':
-                ls_save_final = int(ratio + 0.5)
-            elif key == 'cfg_ls_planet':
-                ls_planetary_enable = int(ratio + 0.5)
-            elif key == 'cfg_ls_plmode':
-                _npm = len(planetary_modes)-1 if 'planetary_modes' in globals() else 2
-                ls_planetary_mode = int(ratio * _npm + 0.5)
-            elif key == 'cfg_ls_plmin':
-                ls_planetary_disk_min = max(10, int(10 + ratio * 990 + 0.5))
-            elif key == 'cfg_ls_plmax':
-                ls_planetary_disk_max = max(10, int(10 + ratio * 990 + 0.5))
-            elif key == 'cfg_lk_buffer':
-                ls_lucky_buffer = max(10, int(10 + ratio * 190 + 0.5))
-            elif key == 'cfg_lk_keep':
-                ls_lucky_keep = max(5, int(5 + ratio * 95 + 0.5))
-            elif key == 'cfg_lk_score':
-                ls_lucky_score = int(ratio * 5 + 0.5)
-            elif key == 'cfg_lk_stack':
-                ls_lucky_stack = int(ratio * 2 + 0.5)
-            elif key == 'cfg_lk_align':
-                ls_lucky_align = int(ratio + 0.5)
-            elif key == 'cfg_lk_roi':
-                ls_lucky_roi = int(ratio * 100 + 0.5)
-            elif key == 'cfg_lk_savepg':
-                ls_lucky_save_progress = int(ratio + 0.5)
-            elif key == 'cfg_lk_savefn':
-                ls_lucky_save_final = int(ratio + 0.5)
             elif key == 'cfg_native':
                 use_native_sensor_mode = int(ratio + 0.5)
             elif key == 'cfg_focus_m':
@@ -10713,12 +10674,6 @@ def handle_home_click(mx, my):
                 v3_f_range = int(ratio * _nvr + 0.5)
             elif key == 'cfg_v3hdr':
                 v3_hdr = int(ratio + 0.5)
-            elif key == 'cfg_fixbad':
-                fix_bad_pixels = int(ratio + 0.5)
-            elif key == 'cfg_fixsig':
-                fix_bad_pixels_sigma = max(10, int(10 + ratio * 90 + 0.5))
-            elif key == 'cfg_fixadu':
-                fix_bad_pixels_min_adu = max(10, int(10 + ratio * 490 + 0.5))
             elif key == 'cfg_isp':
                 isp_enable = int(ratio + 0.5)
             elif key == 'cfg_snr':
