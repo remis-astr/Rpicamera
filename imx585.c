@@ -223,6 +223,12 @@ static const int imx585_tpg_val[] = {
 #define IMX585_CROP_800x600_H_START     1528U
 #define IMX585_CROP_800x600_V_START     788U
 
+/* 640x480 crop */
+#define IMX585_CROP_640x480_WIDTH       640U
+#define IMX585_CROP_640x480_HEIGHT      480U
+#define IMX585_CROP_640x480_H_START     1608U
+#define IMX585_CROP_640x480_V_START     848U
+
 /* Native and active array */
 #define IMX585_NATIVE_WIDTH             3856U
 #define IMX585_NATIVE_HEIGHT            2180U
@@ -585,6 +591,19 @@ static const struct cci_reg_sequence mode_800x600_crop_regs[] = {
 	{ IMX585_REG_PIX_VWIDTH, IMX585_CROP_800x600_HEIGHT },
 };
 
+/* 640x480 centered crop */
+static const struct cci_reg_sequence mode_640x480_crop_regs[] = {
+	{ IMX585_REG_WINMODE, IMX585_WINMODE_CROP },
+	{ IMX585_REG_ADDMODE, IMX585_ADDMODE_NONE },
+	{ CCI_REG8(0x3022), 0x02 }, /* ADBIT 12-bit */
+	{ CCI_REG8(0x3023), 0x01 }, /* MDBIT 12-bit */
+	{ CCI_REG8(0x30d5), 0x04 }, /* DIG_CLP_VSTART non-binning */
+	{ IMX585_REG_PIX_HST, IMX585_CROP_640x480_H_START },
+	{ IMX585_REG_PIX_HWIDTH, IMX585_CROP_640x480_WIDTH },
+	{ IMX585_REG_PIX_VST, IMX585_CROP_640x480_V_START },
+	{ IMX585_REG_PIX_VWIDTH, IMX585_CROP_640x480_HEIGHT },
+};
+
 /* --------------------------------------------------------------------------
  * Mode list
  * --------------------------------------------------------------------------
@@ -721,6 +740,25 @@ static struct imx585_mode supported_modes[] = {
 		.reg_list = {
 			.num_of_regs = ARRAY_SIZE(mode_800x600_crop_regs),
 			.regs = mode_800x600_crop_regs,
+		},
+	},
+	{
+		/* 640x480 centered crop */
+		.width = IMX585_CROP_640x480_WIDTH,
+		.height = IMX585_CROP_640x480_HEIGHT,
+		.hmax_div = 1,
+		.min_hmax = 396,
+		.min_vmax = 510,
+		.is_crop_mode = true,
+		.crop = {
+			.left = IMX585_CROP_640x480_H_START + IMX585_PIXEL_ARRAY_LEFT,
+			.top = IMX585_CROP_640x480_V_START + IMX585_PIXEL_ARRAY_TOP,
+			.width = IMX585_CROP_640x480_WIDTH,
+			.height = IMX585_CROP_640x480_HEIGHT,
+		},
+		.reg_list = {
+			.num_of_regs = ARRAY_SIZE(mode_640x480_crop_regs),
+			.regs = mode_640x480_crop_regs,
 		},
 	},
 };
