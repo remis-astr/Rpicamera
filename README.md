@@ -2,36 +2,12 @@
 
 RPiCamera is a control and recording application for Raspberry Pi cameras, optimized for the IMX585 sensor and designed to work with a custom libcamera build (libcamera-imx585). The software provides a Pygame graphical interface, advanced camera parameter control via Picamera2/libcamera, and features useful for astrophotography (focusing assistance, histograms, live stacking support, etc.).
 
-This project is derived from Rpicamera.py developed by: Gordon999 (https://github.com/Gordon999)
 
-<img src="PXL_20251124.jpg" alt="Preview Mode" width="400">
-<img src="1.png" alt="Preview Mode" width="400">
-<img src="2.png" alt="Preview Mode" width="400">
-<img src="3.png" alt="Preview Mode" width="400">
-<img src="4.png" alt="Preview Mode" width="400">
-
----
-
-## Key features
-
-- Interactive Pygame GUI + Picamera2 preview
-- Very long-exposure preview and capture
-- Video: H.264, MJPEG, YUV420 (and SER export for planetary use)
-- Image capture: RAW, JPG, PNG, RGB, YUV
-- Configurable timelapse
-- Network streaming: TCP / UDP / RTSP
-- Real-time analysis: histograms (RGB / luminance), HFR / FWHM for focus assistance, Laplacian-based SNR
-- Advanced controls: custom white balance, exposure/gain, gamma, noise reduction, HDR modes
-- GPIO support (gpiozero) for external buttons
-- Integration with Astro Live Stacker (ALS) for live stacking workflows
-
----
 
 ## Requirements
 
 Recommended OS: Raspberry Pi OS (Bullseye or Bookworm), fully updated. Package names and availability may differ across distributions.
 
-Note: For IMX585 support you must follow the instructions in the custom libcamera repository: https://github.com/will12753/libcamera-imx585
 
 ### System packages (APT)
 
@@ -107,72 +83,4 @@ pip install -r requirements.txt  # if a requirements file is present
 python RPiCamera2.py
 ```
 
----
 
-## File structure and recommended configuration
-
-- Photos: `~/Pictures/` (for large RAWs, prefer an external USB drive)
-  - Example: pic_dir = "/media/admin/USBdrive/Pictures"
-- Videos: `~/Videos/`
-- User configuration file: `~/PiLCConfig104.txt`
-- Sensor tuning file: `~/imx585_lowlight.json` (IMX585 low-light settings)
-
----
-
-## Sensor tuning (IMX585)
-
-To take full advantage of the IMX585:
-- Use provided or customized JSON tuning files (for example `imx585_lowlight.json`).
-- Experiment with exposure/gain, HDR and noise reduction settings.
-- See the `will12753/libcamera-imx585` repo for build instructions and examples.
-
----
-
-## Live stacking (Astro Live Stacker)
-
-RPiCamera can produce image sequences (timelapse or continuous captures) compatible with Astro Live Stacker (ALS). To use ALS:
-- Configure ALS to monitor the folder where RPiCamera writes images (prefer a USB drive for edit the photos in software).
-- Use TIMELAPSE or continuous capture modes depending on your workflow.
-
----
-
-## Astrophotography / SER format
-
-- SER is commonly used for planetary imaging. The project provides YUV->SER export for certain capture modes and resolutions where applicable.
-- 87 FPS acquisition mode is available in zoom/ROI mode. Use fast storage (SD/SSD) to avoid dropped frames.
-
----
-
-## Contributing
-
-Contributions are welcome:
-- Open issues and PRs for bugs and new features.
-- Add support for additional sensors.
-- Help implementing RAW video -> SER export.
-- Improvements: auto-stretch / quality preview.
-- Native live stacking surface/planet integration.
-- Advanced timelapse features (ALLSKY video).
-
----
-
-## License
-
-This project includes the original copyright header from Gordon999. Check the `LICENSE` file for full terms. The software is provided "AS IS" without warranty.
-
----
-
-## Useful links
-
-- Original: https://github.com/Gordon999
-- Custom libcamera IMX585: https://github.com/will12753/libcamera-imx585
-- IMX585 sensor: https://soho-enterprise.com/
-- Astro Live Stacker: https://als-app.org/
-- Picamera2 / Raspberry Pi documentation: https://www.raspberrypi.com/documentation/
-
-- ---------------------------------------------------------------------------
-
-I don't own a smart telescope, but I caught mine thinking about what he wanted to be. I managed to take a picture of him doing just that.
-
-<img src="5.jpg" alt="Preview Mode" width="400">
-
-This little guy is amazing;
