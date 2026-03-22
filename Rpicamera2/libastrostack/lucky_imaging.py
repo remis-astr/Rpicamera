@@ -69,12 +69,14 @@ except ImportError:
 
 class ScoreMethod(Enum):
     """Méthodes de calcul du score de qualité"""
-    LAPLACIAN = "laplacian"       # Variance du Laplacien (rapide, recommandé)
-    GRADIENT = "gradient"          # Magnitude du gradient
-    SOBEL = "sobel"               # Filtre de Sobel
-    TENENGRAD = "tenengrad"       # Tenengrad (Sobel au carré)
-    BRENNER = "brenner"           # Gradient de Brenner
-    FFT = "fft"                   # Analyse fréquentielle (plus lent)
+    LAPLACIAN = "laplacian"             # Variance du Laplacien (rapide, recommandé)
+    GRADIENT = "gradient"               # Magnitude du gradient
+    SOBEL = "sobel"                     # Filtre de Sobel
+    TENENGRAD = "tenengrad"             # Tenengrad (Sobel au carré)
+    BRENNER = "brenner"                 # Gradient de Brenner
+    FFT = "fft"                         # Analyse fréquentielle (plus lent)
+    LOCAL_VARIANCE = "local_variance"   # Variance locale sur patches (micro-détails)
+    PSD = "psd"                         # Densité spectrale de puissance haute fréquence
 
 
 class StackMethod(Enum):
@@ -448,6 +450,8 @@ class QualityScorer:
             ScoreMethod.TENENGRAD: self._score_tenengrad,
             ScoreMethod.BRENNER: self._score_brenner,
             ScoreMethod.FFT: self._score_fft,
+            ScoreMethod.LOCAL_VARIANCE: self._score_local_variance,
+            ScoreMethod.PSD: self._score_psd,
         }
         return methods.get(method, self._score_laplacian)
     
@@ -540,6 +544,35 @@ class QualityScorer:
         mask_radius = min(h, w) // 8
         magnitude[cy-mask_radius:cy+mask_radius, cx-mask_radius:cx+mask_radius] = 0
         return float(np.mean(magnitude))
+
+    def _score_local_variance(self, gray: np.ndarray) -> float:
+        """Score par variance locale sur patches - sensible aux micro-détails locaux.
+        Divise l'image en patches, mesure la variance de chacun et retourne le 90e
+        percentile : détecte un détail net même dans une petite zone de l'image."""
+        patch_size = max(8, min(32, min(gray.shape) // 8))
+        img_f = gray.astype(np.float32)
+        ksize = (patch_size, patch_size)
+        mean = cv2.boxFilter(img_f, cv2.CV_32F, ksize)
+        mean_sq = cv2.boxFilter(img_f * img_f, cv2.CV_32F, ksize)
+        var_map = mean_sq - mean * mean
+        np.clip(var_map, 0, None, out=var_map)  # Évite les artefacts float négatifs
+        return float(np.percentile(var_map, 90))
+
+    def _score_psd(self, gray: np.ndarray) -> float:
+        """Score par densité spectrale de puissance (PSD) haute fréquence.
+        Mesure l'énergie (amplitude²) au-delà du quart de la fréquence de Nyquist,
+        via masque radial sur rfft2. Plus sensible aux fins détails que _score_fft."""
+        f = np.fft.rfft2(gray.astype(np.float32))
+        psd = np.abs(f) ** 2
+        h, w2 = psd.shape
+        r_cut = max(1, min(h, w2) // 4)
+        # Distance radiale depuis DC (coin [0,0] pour rfft2)
+        Y = np.arange(h, dtype=np.float32)
+        Y = np.minimum(Y, h - Y)          # Périodicité verticale
+        X = np.arange(w2, dtype=np.float32)
+        dist2 = Y[:, None] ** 2 + X[None, :] ** 2
+        mask = dist2 > (r_cut ** 2)
+        return float(np.mean(psd[mask])) if mask.any() else float(np.mean(psd))
 
 
 class FrameAligner:
@@ -1004,8 +1037,12 @@ class LuckyImagingStacker:
             selected_scores = [scores_list[i] for i in best_indices]
             self.stats['selection_threshold'] = min(selected_scores) if selected_scores else 0
 
-        # 3. Récupérer les frames sélectionnées
+        # 3. Récupérer les frames sélectionnées, triées par score décroissant
+        # (frames[0] = meilleure frame → utilisée comme référence d'alignement)
         selected_frames = self.buffer.get_frames_by_indices(best_indices)
+        if selected_scores and len(selected_frames) == len(selected_scores):
+            selected_frames = [f for _, f in sorted(
+                zip(selected_scores, selected_frames), key=lambda x: x[0], reverse=True)]
         time_select = (time.perf_counter() - t_select) * 1000
 
         print(f"[LUCKY] Sélection: {len(selected_frames)}/{len(self.buffer)} images "
@@ -1271,6 +1308,8 @@ class LuckyImagingStacker:
                 'tenengrad': ScoreMethod.TENENGRAD,
                 'brenner': ScoreMethod.BRENNER,
                 'fft': ScoreMethod.FFT,
+                'local_variance': ScoreMethod.LOCAL_VARIANCE,
+                'psd': ScoreMethod.PSD,
             }
             if method_str in method_map:
                 self.config.score_method = method_map[method_str]
@@ -1646,10 +1685,12 @@ class ElitePoolStacker:
             self.config.elite_score_kappa = float(kwargs['elite_score_kappa'])
         if 'score_method' in kwargs:
             _map = {
-                'laplacian':  ScoreMethod.LAPLACIAN,
-                'gradient':   ScoreMethod.GRADIENT,
-                'sobel':      ScoreMethod.SOBEL,
-                'tenengrad':  ScoreMethod.TENENGRAD,
+                'laplacian':      ScoreMethod.LAPLACIAN,
+                'gradient':       ScoreMethod.GRADIENT,
+                'sobel':          ScoreMethod.SOBEL,
+                'tenengrad':      ScoreMethod.TENENGRAD,
+                'local_variance': ScoreMethod.LOCAL_VARIANCE,
+                'psd':            ScoreMethod.PSD,
             }
             self.config.score_method = _map.get(str(kwargs['score_method']).lower(),
                                                   ScoreMethod.LAPLACIAN)
@@ -1737,12 +1778,14 @@ class RPiCameraLuckyImaging:
             self.config.min_score = float(kwargs['min_score'])
         if 'score_method' in kwargs:
             method_map = {
-                'laplacian': ScoreMethod.LAPLACIAN,
-                'gradient': ScoreMethod.GRADIENT,
-                'sobel': ScoreMethod.SOBEL,
-                'tenengrad': ScoreMethod.TENENGRAD,
+                'laplacian':      ScoreMethod.LAPLACIAN,
+                'gradient':       ScoreMethod.GRADIENT,
+                'sobel':          ScoreMethod.SOBEL,
+                'tenengrad':      ScoreMethod.TENENGRAD,
+                'local_variance': ScoreMethod.LOCAL_VARIANCE,
+                'psd':            ScoreMethod.PSD,
             }
-            self.config.score_method = method_map.get(kwargs['score_method'].lower(), 
+            self.config.score_method = method_map.get(kwargs['score_method'].lower(),
                                                        ScoreMethod.LAPLACIAN)
         if 'stack_method' in kwargs:
             method_map = {

@@ -85,6 +85,7 @@ class AdvancedStacker:
         self._running_sum = None
         self._running_sum_sq = None
         self._running_count = None
+        self._running_weight_sum = None  # Somme des poids pour moyenne pondérée
         
         # Statistiques
         self.stats = {
@@ -140,7 +141,6 @@ class AdvancedStacker:
         # Détecter type d'image
         if self._is_color is None:
             self._is_color = len(image.shape) == 3
-            print(f"[STACKER] Mode: {'RGB' if self._is_color else 'MONO'}, shape: {image.shape}, dtype: {image.dtype}")
         
         # Vérifier cohérence
         if len(image.shape) == 3 and not self._is_color:
@@ -168,14 +168,15 @@ class AdvancedStacker:
             self._running_sum = np.zeros_like(img)
             self._running_sum_sq = np.zeros_like(img)
             self._running_count = np.zeros(img.shape[:2], dtype=np.int32)
-        
+            self._running_weight_sum = np.zeros(img.shape[:2], dtype=np.float64)
+
         # Masque pixels valides
         if self._is_color:
             valid = np.any(img > 0, axis=2)
         else:
             valid = img > 0
-        
-        # Accumuler
+
+        # Accumuler (pondéré par weight = score moyen du buffer)
         if self._is_color:
             for c in range(3):
                 self._running_sum[:, :, c][valid] += img[:, :, c][valid] * weight
@@ -183,8 +184,9 @@ class AdvancedStacker:
         else:
             self._running_sum[valid] += img[valid] * weight
             self._running_sum_sq[valid] += (img[valid] ** 2) * weight
-        
+
         self._running_count[valid] += 1
+        self._running_weight_sum[valid] += weight
     
     def _compute_weight(self, metrics: Dict) -> float:
         """
@@ -253,20 +255,23 @@ class AdvancedStacker:
         return result
     
     def _combine_streaming(self) -> Optional[np.ndarray]:
-        """Combine en mode streaming"""
+        """Combine en mode streaming — moyenne pondérée par le score de chaque buffer."""
         if self._running_sum is None:
             return None
-        
-        # Éviter division par zéro
-        count = np.maximum(self._running_count, 1)
-        
+
+        # Diviseur : somme des poids si disponible, sinon count (rétrocompat)
+        if self._running_weight_sum is not None and np.any(self._running_weight_sum > 0):
+            divisor = np.maximum(self._running_weight_sum, 1e-10)
+        else:
+            divisor = np.maximum(self._running_count, 1).astype(np.float64)
+
         if self._is_color:
             result = np.zeros_like(self._running_sum)
             for c in range(3):
-                result[:, :, c] = self._running_sum[:, :, c] / count
+                result[:, :, c] = self._running_sum[:, :, c] / divisor
         else:
-            result = self._running_sum / count
-        
+            result = self._running_sum / divisor
+
         return result
     
     def _combine_mean(self, cube: np.ndarray, weights: np.ndarray) -> np.ndarray:

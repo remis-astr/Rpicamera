@@ -887,7 +887,9 @@ class RPiCameraLiveStackAdvanced:
                 if new_result is not None:
                     # MODE CUMULATIF : Envoyer le stack Lucky vers l'advanced_stacker
                     if self.use_advanced_stacking and self.advanced_stacker:
-                        self.advanced_stacker.add_image(new_result, quality_metrics={})
+                        # Pondération par le score moyen des frames sélectionnées du buffer
+                        buffer_weight = float(lucky_stats.get('avg_score', 1.0)) or 1.0
+                        self.advanced_stacker.add_image(new_result, weight=buffer_weight, quality_metrics={})
                         
                         # Mettre à jour le compteur de frames acceptées
                         if hasattr(self.advanced_stacker, 'get_count'):
@@ -1262,22 +1264,26 @@ class RPiCameraLiveStackAdvanced:
     def get_stats(self) -> Dict[str, Any]:
         """Retourne les statistiques courantes"""
         stats = self.stats.copy()
-        
+
+        # SNR théorique : sqrt(N frames acceptées)
+        accepted = stats.get('accepted_frames', 0)
+        stats['snr_gain'] = float(np.sqrt(max(1, accepted)))
+
         if self.session:
             stats['session_stacked'] = self.session.config.num_stacked
-        
+
         if self.advanced_stacker:
             stats['advanced_stats'] = self.advanced_stacker.stats.copy()
-        
+
         if self.drizzle_stacker:
             stats['drizzle_stats'] = self.drizzle_stacker.stats.copy()
-        
+
         if self.planetary_aligner:
             stats['planetary_stats'] = self.planetary_aligner.get_stats()
-        
+
         if self.lucky_stacker:
             stats['lucky_stats'] = self.lucky_stacker.get_stats()
-        
+
         return stats
 
 
