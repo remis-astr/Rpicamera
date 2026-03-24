@@ -1889,6 +1889,11 @@ lucky_last_filtered_array = None  # Dernier résultat filtré (pour bouton SAVE 
 lucky_paused = False              # True = stack en pause, dernier résultat affiché
 lucky_last_stack_before_filter = None  # Résultat pré-filtre (re-filtrage interactif en pause)
 
+# Pause / Save PNG pour Live Stack
+ls_paused = False                    # True = live stack en pause
+ls_last_filtered_array = None        # Dernier résultat filtré LS pour bouton SAVE PNG
+ls_pre_filter_array = None           # Stack LS avant filtres (re-filtrage interactif en pause)
+
 # Filtres de netteté post-stack Lucky (onglet Filtre)
 ls_lucky_clahe_en    = 0     # 0=off, 1=on
 ls_lucky_clahe_str   = 15    # CLAHE clipLimit ×10  (10→1.0 … 40→4.0)
@@ -1976,7 +1981,7 @@ ls_lucky_score = 0  # 0=laplacian, 1=gradient, 2=sobel, 3=tenengrad
 ls_lucky_stack = 0  # 0=mean, 1=median, 2=sigma_clip
 ls_lucky_align = 1  # 0=off, 1=on
 ls_lucky_roi = 50  # % ROI scoring (20-100)
-ls_lucky_max_shift = 30  # Décalage max alignement en pixels (0=désactivé, 1-100)
+ls_lucky_max_shift = 30  # Décalage max alignement en pixels (0=désactivé, 1-200)
 ls_lucky_save_progress = 0  # 0=off, 1=on (sauvegarde FITS+PNG tous les 2 stacks)
 lucky_score_methods = ['Laplacian', 'Gradient', 'Sobel', 'Tenengrad', 'LocalVar', 'PSD']
 lucky_stack_methods = ['Mean', 'Median', 'Sigma-Clip']
@@ -2022,7 +2027,7 @@ ls_bl_g2 = 260  # ADU 12-bit canal G2  (position impair,pair)
 ls_bl_b  = 253  # ADU 12-bit canal B
 
 # Algorithme de débayérisation : 0=bilinéaire (défaut, rapide), 1=VNG (meilleure qualité)
-debayer_vng = 1
+debayer_vng = 0
 isp_brightness = 0            # -0.5-0.5 → -50-50 (défaut 0)
 isp_contrast = 100            # 0.5-2.0 → 50-200 (défaut 1.0)
 isp_saturation = 100          # 0.0-2.0 → 0-200 (défaut 1.0)
@@ -2354,7 +2359,7 @@ livestack_limits = [
     'ls_lucky_stack',0,2,
     'ls_lucky_align',0,1,
     'ls_lucky_roi',20,100,
-    'ls_lucky_max_shift',0,100
+    'ls_lucky_max_shift',0,200
 ]
 
 # check config_file exists, if not then write default values
@@ -2719,7 +2724,7 @@ ls_lucky_score = max(0, min(ls_lucky_score, 5))  # 0-5: laplacian/gradient/sobel
 ls_lucky_stack = max(0, min(ls_lucky_stack, 2))  # 0-2: mean/median/sigma_clip
 ls_lucky_align = max(0, min(ls_lucky_align, 1))  # 0=off, 1=surface
 ls_lucky_roi = max(20, min(ls_lucky_roi, 100))
-ls_lucky_max_shift = max(0, min(ls_lucky_max_shift, 100))  # 0=désactivé, 1-100px
+ls_lucky_max_shift = max(0, min(ls_lucky_max_shift, 200))  # 0=désactivé, 1-200px
 ls_lucky_save_progress = max(0, min(ls_lucky_save_progress, 1))  # 0-1: off/on
 
 # Validation des options de sauvegarde LiveStack/LuckyStack
@@ -5470,6 +5475,62 @@ def draw_ls_start_stop_button(screen_width, screen_height, is_running=False):
     return icon_rect
 
 
+def draw_ls_pause_button(screen_width, screen_height, is_paused=False, is_active=False):
+    """Bouton PAUSE / REPRISE — 4e bouton en bas à gauche — Live Stack interface."""
+    global windowSurfaceObj, _font_cache
+    icon_size = 50; margin = 15
+    ix = margin + 3 * (icon_size + margin)
+    iy = screen_height - icon_size - margin
+    icon_rect = pygame.Rect(ix, iy, icon_size, icon_size)
+    if is_paused:
+        bg, border, tc = (70, 55, 10), (190, 150, 30), (255, 210, 70)
+        lbl1, lbl2 = "▶", "RES."
+    elif is_active:
+        bg, border, tc = (35, 55, 20), (80, 120, 45), (150, 200, 90)
+        lbl1, lbl2 = "II", "PAUSE"
+    else:
+        bg, border, tc = (25, 25, 25), (45, 45, 45), (80, 80, 80)
+        lbl1, lbl2 = "II", "PAUSE"
+    pygame.draw.rect(windowSurfaceObj, bg, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border, icon_rect, 2, border_radius=8)
+    ck = 18
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    cx, cy = icon_rect.centerx, icon_rect.centery
+    windowSurfaceObj.blit(f.render(lbl1, True, tc),
+                          f.render(lbl1, True, tc).get_rect(centerx=cx, centery=cy - 8))
+    windowSurfaceObj.blit(f.render(lbl2, True, tc),
+                          f.render(lbl2, True, tc).get_rect(centerx=cx, centery=cy + 8))
+    return icon_rect
+
+
+def draw_ls_save_png_button_ls(screen_width, screen_height):
+    """Bouton SAVE PNG — à gauche du bouton SAVE FIT (haut droite) — Live Stack.
+    Vert si une image filtrée est disponible, gris sinon."""
+    global windowSurfaceObj, _font_cache, ls_last_filtered_array
+    icon_size = 50; margin = 15
+    icon_x = screen_width - 2 * icon_size - 2 * margin
+    has_img = ls_last_filtered_array is not None
+    if has_img:
+        bg, border, tc = (15, 55, 25), (40, 130, 60), (90, 210, 110)
+    else:
+        bg, border, tc = (22, 22, 22), (45, 45, 45), (75, 75, 75)
+    icon_rect = pygame.Rect(icon_x, margin, icon_size, icon_size)
+    pygame.draw.rect(windowSurfaceObj, bg, icon_rect, border_radius=8)
+    pygame.draw.rect(windowSurfaceObj, border, icon_rect, 2, border_radius=8)
+    ck = 18
+    if ck not in _font_cache:
+        _font_cache[ck] = pygame.font.Font(None, ck)
+    f = _font_cache[ck]
+    cx, cy = icon_rect.centerx, icon_rect.centery
+    windowSurfaceObj.blit(f.render("SAVE", True, tc),
+                          f.render("SAVE", True, tc).get_rect(centerx=cx, centery=cy - 8))
+    windowSurfaceObj.blit(f.render("PNG", True, tc),
+                          f.render("PNG", True, tc).get_rect(centerx=cx, centery=cy + 8))
+    return icon_rect
+
+
 def _ls_ge_slider_positions(screen_height, screen_width=1920):
     """Positions des 3 sliders Gain/Expo/Zoom — Live Stack interface (haut-centre)."""
     slider_w = 300
@@ -5610,6 +5671,21 @@ def is_click_on_ls_stretch(mx, my, screen_height):
     return ix <= mx <= ix + icon_size and iy <= my <= iy + icon_size
 
 
+def is_click_on_ls_pause(mx, my, screen_height):
+    """Détecte un clic sur le bouton PAUSE/REPRISE (4e bouton en bas à gauche) — Live Stack."""
+    icon_size = 50; margin = 15
+    ix = margin + 3 * (icon_size + margin)
+    iy = screen_height - icon_size - margin
+    return ix <= mx <= ix + icon_size and iy <= my <= iy + icon_size
+
+
+def is_click_on_ls_save_png_ls(mx, my, screen_width):
+    """Détecte un clic sur le bouton SAVE PNG (2e bouton depuis droite) — Live Stack."""
+    icon_size = 50; margin = 15
+    ix = screen_width - 2 * icon_size - 2 * margin
+    return ix <= mx <= ix + icon_size and margin <= my <= margin + icon_size
+
+
 def is_click_on_ls_start_stop(mx, my, screen_width, screen_height):
     icon_size = 50; margin = 15
     ix = margin + icon_size + margin
@@ -5617,7 +5693,7 @@ def is_click_on_ls_start_stop(mx, my, screen_width, screen_height):
 
 
 def draw_ls_stats_bar(screen_width, screen_height, stats, is_scheduler=False,
-                      sched_frames=100, sched_done=0):
+                      sched_frames=100, sched_done=0, is_paused=False):
     """Barre de statistiques Live Stack — bas-centre."""
     global windowSurfaceObj, _font_cache
     if not stats:
@@ -5631,7 +5707,8 @@ def draw_ls_stats_bar(screen_width, screen_height, stats, is_scheduler=False,
     rejected = stats.get('rejected_frames', 0)
     snr      = stats.get('snr_gain', 1.0)
     sched_txt = f"  |  Scheduler: {sched_done}/{sched_frames}" if is_scheduler and sched_frames > 0 else ""
-    line = f"LiveStack: {accepted}/{total}  Rejetées: {rejected}  SNR: x{snr:.1f}{sched_txt}"
+    pause_txt = "  ⏸ PAUSE" if is_paused else ""
+    line = f"LiveStack: {accepted}/{total}  Rejetées: {rejected}  SNR: x{snr:.1f}{sched_txt}{pause_txt}"
     bar_w = min(len(line) * 8 + 20, screen_width - 100)
     bar_h = 24
     surf = pygame.Surface((bar_w, bar_h), pygame.SRCALPHA)
@@ -5639,19 +5716,20 @@ def draw_ls_stats_bar(screen_width, screen_height, stats, is_scheduler=False,
     tx = (screen_width - bar_w) // 2
     ty = screen_height - 95
     windowSurfaceObj.blit(surf, (tx, ty))
-    lbl = f.render(line, True, (170, 255, 180))
+    color = (255, 210, 70) if is_paused else (170, 255, 180)
+    lbl = f.render(line, True, color)
     windowSurfaceObj.blit(lbl, lbl.get_rect(centerx=screen_width // 2, centery=ty + 12))
 
 
 def _draw_ls_tab_bar(panel_x, panel_w, y):
-    """Dessine la barre d'onglets LS (5 onglets) et retourne les rects."""
+    """Dessine la barre d'onglets LS (7 onglets) et retourne les rects."""
     global windowSurfaceObj, _font_cache, ls_settings_tab
-    tab_labels = ["Capture", "Qualité", "Stacking", "Scheduler", "Image", "Stretch"]
+    tab_labels = ["Cap.", "QC", "Stack", "Sched.", "Img", "Str.", "Filtres"]
     n = len(tab_labels)
     tab_h = 24
     tab_w = panel_w // n
     rects = {}
-    ck = 17
+    ck = 15
     if ck not in _font_cache:
         _font_cache[ck] = pygame.font.Font(None, ck)
     f = _font_cache[ck]
@@ -5670,7 +5748,7 @@ def _draw_ls_tab_bar(panel_x, panel_w, y):
 
 def draw_ls_controls(screen_width, screen_height):
     """
-    Panneau de réglages Live Stack — côté droit, 4 onglets.
+    Panneau de réglages Live Stack — côté droit, 7 onglets.
     Retourne dict des rects pour détection clics.
     """
     global windowSurfaceObj, _font_cache
@@ -5687,6 +5765,11 @@ def draw_ls_controls(screen_width, screen_height):
     global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP, ghs_preset, stretch_factor, stretch_p_low, stretch_p_high
     global ls_planetary_enable, ls_planetary_mode, ls_planetary_disk_min, ls_planetary_disk_max
     global fix_bad_pixels, fix_bad_pixels_sigma, fix_bad_pixels_min_adu
+    global ls_lucky_clahe_en, ls_lucky_clahe_str, ls_lucky_clahe_tile
+    global ls_lucky_usm_en, ls_lucky_usm_sigma, ls_lucky_usm_amount
+    global ls_lucky_lr_en, ls_lucky_lr_iter, ls_lucky_lr_sigma
+    global ls_lucky_mm_en, ls_lucky_mm_iter, ls_lucky_mm_sigma, ls_lucky_mm_lambda
+    global ls_post_red, ls_post_green, ls_post_blue, ls_post_sat, ls_post_brightness
 
     panel_w  = 260
     panel_m  = 10
@@ -6113,6 +6196,123 @@ def draw_ls_controls(screen_width, screen_height):
                 f"Highlights: {mtf_highlights/100:.2f}", mtf_highlights, 50, 100, (100, 200, 220))
             start_y += slider_h + margin
 
+    # =====================================================
+    # ONGLET 6 : Filtres post-stack (partagés avec Lucky)
+    # =====================================================
+    elif ls_settings_tab == 6:
+        slider_h = 22
+        margin   = 2
+        # ── CLAHE ──────────────────────────────────────
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("CLAHE (contraste local)", True, (100, 200, 160)),
+            (panel_x + 2, start_y))
+        start_y += 16
+        control_rects['ls_lucky_clahe_en'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"CLAHE: {'ON' if ls_lucky_clahe_en else 'OFF'}",
+            ls_lucky_clahe_en, 0, 1, (60, 160, 120))
+        start_y += slider_h + margin
+        control_rects['ls_lucky_clahe_str'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Force: {ls_lucky_clahe_str/10:.1f}",
+            ls_lucky_clahe_str, 5, 40, (60, 160, 120))
+        start_y += slider_h + margin
+        control_rects['ls_lucky_clahe_tile'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Tile: {ls_lucky_clahe_tile}px",
+            ls_lucky_clahe_tile, 4, 32, (60, 160, 120))
+        start_y += slider_h + margin + 2
+
+        # ── Unsharp Mask ────────────────────────────────
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Unsharp Mask", True, (200, 160, 80)),
+            (panel_x + 2, start_y))
+        start_y += 16
+        control_rects['ls_lucky_usm_en'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"USM: {'ON' if ls_lucky_usm_en else 'OFF'}",
+            ls_lucky_usm_en, 0, 1, (180, 140, 60))
+        start_y += slider_h + margin
+        control_rects['ls_lucky_usm_sigma'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Sigma: {ls_lucky_usm_sigma/10:.1f}",
+            ls_lucky_usm_sigma, 5, 50, (180, 140, 60))
+        start_y += slider_h + margin
+        control_rects['ls_lucky_usm_amount'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Amount: {ls_lucky_usm_amount/10:.1f}",
+            ls_lucky_usm_amount, 5, 50, (180, 140, 60))
+        start_y += slider_h + margin + 2
+
+        # ── Déconvolution : OFF / LR / MM ───────────────
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Déconvolution", True, (160, 160, 220)),
+            (panel_x + 2, start_y))
+        start_y += 16
+        _deconv_mode = 1 if ls_lucky_lr_en else (2 if ls_lucky_mm_en else 0)
+        _deconv_labels = {0: 'OFF', 1: 'Lucy-Rich.', 2: 'MM-ADMM'}
+        _deconv_color  = {0: (80, 80, 100), 1: (180, 100, 60), 2: (80, 120, 200)}
+        _dc = _deconv_color[_deconv_mode]
+        control_rects['ls_lucky_deconv_mode'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Mode: {_deconv_labels[_deconv_mode]}",
+            _deconv_mode, 0, 2, _dc)
+        start_y += slider_h + margin
+        if _deconv_mode == 1:
+            control_rects['ls_lucky_lr_iter'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Iter: {ls_lucky_lr_iter}",
+                ls_lucky_lr_iter, 5, 60, (180, 100, 60))
+            start_y += slider_h + margin
+            control_rects['ls_lucky_lr_sigma'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Sigma: {ls_lucky_lr_sigma/10:.1f}",
+                ls_lucky_lr_sigma, 5, 30, (180, 100, 60))
+            start_y += slider_h + margin
+        elif _deconv_mode == 2:
+            control_rects['ls_lucky_mm_iter'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Iter: {ls_lucky_mm_iter}",
+                ls_lucky_mm_iter, 5, 30, (80, 120, 200))
+            start_y += slider_h + margin
+            control_rects['ls_lucky_mm_sigma'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"Sigma: {ls_lucky_mm_sigma/10:.1f}",
+                ls_lucky_mm_sigma, 3, 15, (80, 120, 200))
+            start_y += slider_h + margin
+            control_rects['ls_lucky_mm_lambda'] = draw_jsk_slider(
+                panel_x, start_y, slider_w, slider_h,
+                f"\u03bb TV: {ls_lucky_mm_lambda/100:.2f}",
+                ls_lucky_mm_lambda, 1, 15, (80, 120, 200))
+            start_y += slider_h + margin
+
+        # ── Balance RVB + Saturation ─────────────────────
+        start_y += 4
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Balance couleurs (post-CLAHE)", True, (200, 140, 200)),
+            (panel_x + 2, start_y))
+        start_y += 16
+        control_rects['ls_post_red'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Rouge: {ls_post_red/100:.2f}\u00d7", ls_post_red, 50, 200, (200, 80, 80))
+        start_y += slider_h + margin
+        control_rects['ls_post_green'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Vert: {ls_post_green/100:.2f}\u00d7", ls_post_green, 50, 200, (80, 180, 80))
+        start_y += slider_h + margin
+        control_rects['ls_post_blue'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Bleu: {ls_post_blue/100:.2f}\u00d7", ls_post_blue, 50, 200, (80, 130, 220))
+        start_y += slider_h + margin
+        control_rects['ls_post_sat'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Saturation: {ls_post_sat/100:.2f}\u00d7", ls_post_sat, 0, 200, (170, 100, 190))
+        start_y += slider_h + margin
+        control_rects['ls_post_brightness'] = draw_jsk_slider(
+            panel_x, start_y, slider_w, slider_h,
+            f"Luminosit\u00e9: {ls_post_brightness:+d}", ls_post_brightness, -100, 100, (190, 190, 120))
+        start_y += slider_h + margin
+
     return control_rects
 
 
@@ -6131,6 +6331,12 @@ def handle_ls_slider_click(mx, my, control_rects):
     global ghs_D, ghs_b, ghs_SP, ghs_LP, ghs_HP, stretch_factor, stretch_p_low, stretch_p_high
     global ls_planetary_enable, ls_planetary_mode, ls_planetary_disk_min, ls_planetary_disk_max
     global fix_bad_pixels, fix_bad_pixels_sigma, fix_bad_pixels_min_adu
+    global ls_lucky_clahe_en, ls_lucky_clahe_str, ls_lucky_clahe_tile
+    global ls_lucky_usm_en, ls_lucky_usm_sigma, ls_lucky_usm_amount
+    global ls_lucky_lr_en, ls_lucky_lr_iter, ls_lucky_lr_sigma
+    global ls_lucky_mm_en, ls_lucky_mm_iter, ls_lucky_mm_sigma, ls_lucky_mm_lambda
+    global ls_post_red, ls_post_green, ls_post_blue, ls_post_sat, ls_post_brightness
+    global ls_paused, ls_pre_filter_array, ls_last_filtered_array
     import math as _math
 
     for name, rect in control_rects.items():
@@ -6302,6 +6508,50 @@ def handle_ls_slider_click(mx, my, control_rects):
                 fix_bad_pixels_sigma = max(10, int(10 + ratio * 90 + 0.5))
             elif name == 'ls_raw_fix_adu':
                 fix_bad_pixels_min_adu = max(10, int(10 + ratio * 490 + 0.5))
+            # --- Filtres post-stack (onglet 6, partagés avec Lucky) ---
+            elif name == 'ls_lucky_clahe_en':
+                ls_lucky_clahe_en = 1 if ratio > 0.5 else 0
+            elif name == 'ls_lucky_clahe_str':
+                ls_lucky_clahe_str = max(5, min(40, int(5 + ratio * 35 + 0.5)))
+            elif name == 'ls_lucky_clahe_tile':
+                ls_lucky_clahe_tile = max(4, min(32, int(4 + ratio * 28 + 0.5)))
+            elif name == 'ls_lucky_usm_en':
+                ls_lucky_usm_en = 1 if ratio > 0.5 else 0
+            elif name == 'ls_lucky_usm_sigma':
+                ls_lucky_usm_sigma = max(5, min(50, int(5 + ratio * 45 + 0.5)))
+            elif name == 'ls_lucky_usm_amount':
+                ls_lucky_usm_amount = max(5, min(50, int(5 + ratio * 45 + 0.5)))
+            elif name == 'ls_lucky_deconv_mode':
+                _dm = max(0, min(2, int(ratio * 2 + 0.5)))
+                ls_lucky_lr_en = 1 if _dm == 1 else 0
+                ls_lucky_mm_en = 1 if _dm == 2 else 0
+            elif name == 'ls_lucky_lr_iter':
+                ls_lucky_lr_iter = max(5, min(60, int(5 + ratio * 55 + 0.5)))
+            elif name == 'ls_lucky_lr_sigma':
+                ls_lucky_lr_sigma = max(5, min(30, int(5 + ratio * 25 + 0.5)))
+            elif name == 'ls_lucky_mm_iter':
+                ls_lucky_mm_iter = max(5, min(30, int(5 + ratio * 25 + 0.5)))
+            elif name == 'ls_lucky_mm_sigma':
+                ls_lucky_mm_sigma = max(3, min(15, int(3 + ratio * 12 + 0.5)))
+            elif name == 'ls_lucky_mm_lambda':
+                ls_lucky_mm_lambda = max(1, min(15, int(1 + ratio * 14 + 0.5)))
+            elif name == 'ls_post_red':
+                ls_post_red = max(50, min(200, int(50 + ratio * 150 + 0.5)))
+            elif name == 'ls_post_green':
+                ls_post_green = max(50, min(200, int(50 + ratio * 150 + 0.5)))
+            elif name == 'ls_post_blue':
+                ls_post_blue = max(50, min(200, int(50 + ratio * 150 + 0.5)))
+            elif name == 'ls_post_sat':
+                ls_post_sat = max(0, min(200, int(ratio * 200 + 0.5)))
+            elif name == 'ls_post_brightness':
+                ls_post_brightness = max(-100, min(100, int(-100 + ratio * 200 + 0.5)))
+            # Re-appliquer les filtres si stack en pause
+            if name.startswith(('ls_lucky_', 'ls_post_')) and ls_paused and ls_pre_filter_array is not None:
+                try:
+                    ls_last_filtered_array = apply_lucky_post_stack_filters(
+                        ls_pre_filter_array.copy(), color_correction=True)
+                except Exception:
+                    pass
 
             # Propager les paramètres stacking vers livestack.configure()
             # (les paramètres UI-only ou caméra-directs sont déjà traités ci-dessus)
@@ -6339,6 +6589,7 @@ def draw_ls_interface(screen_width, screen_height):
     """
     global _ls_slider_rects, ls_settings_visible, livestack_active, livestack
     global ls_scheduler_enabled, ls_sched_frames_done, ls_sched_frames
+    global ls_paused
 
     has_stack = False
     if livestack is not None and livestack.session is not None:
@@ -6349,20 +6600,23 @@ def draw_ls_interface(screen_width, screen_height):
             pass
 
     draw_ls_settings_icon(screen_width, screen_height, ls_settings_visible == 1)
-    draw_ls_save_button(screen_width, screen_height, has_stack)
+    draw_ls_save_button(screen_width, screen_height, has_stack or ls_paused)
+    draw_ls_save_png_button_ls(screen_width, screen_height)
     draw_ls_exit_button(screen_width, screen_height)
     draw_ls_reset_button(screen_width, screen_height)
     draw_ls_stretch_button(screen_width, screen_height)
+    draw_ls_pause_button(screen_width, screen_height, ls_paused, livestack_active)
     draw_ls_start_stop_button(screen_width, screen_height, livestack_active)
     draw_ls_gain_expo_zoom(screen_width, screen_height)
 
-    if livestack_active and livestack is not None:
+    if (livestack_active or ls_paused) and livestack is not None:
         try:
             stats = livestack.get_stats()
             draw_ls_stats_bar(screen_width, screen_height, stats,
                               is_scheduler=bool(ls_scheduler_enabled),
                               sched_frames=ls_sched_frames,
-                              sched_done=ls_sched_frames_done)
+                              sched_done=ls_sched_frames_done,
+                              is_paused=ls_paused)
         except Exception:
             pass
 
@@ -6775,6 +7029,29 @@ def draw_lucky_rec_button(screen_width, screen_height, is_recording=False, elaps
     return icon_rect
 
 
+def save_ls_filtered_png(img_bgr, filename=None):
+    """Sauvegarde l'image Live Stack filtrée (uint8 BGR) en PNG 8-bit."""
+    global livestack
+    import cv2 as _cv, time as _t
+    from pathlib import Path as _Path
+    try:
+        if livestack is not None and hasattr(livestack, 'output_dir'):
+            output_dir = livestack.output_dir
+        else:
+            output_dir = _Path("/home/admin/stacks/live")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if filename is None:
+            ts = _t.strftime("%Y%m%d_%H%M%S")
+            filename = f"livestack_filtered_{ts}"
+        png_path = output_dir / f"{filename}.png"
+        _cv.imwrite(str(png_path), img_bgr)
+        print(f"[LS PNG] Filtré sauvegardé : {png_path}")
+        return str(png_path)
+    except Exception as e:
+        print(f"[LS PNG] Erreur sauvegarde : {e}")
+        return None
+
+
 def save_lucky_filtered_png(img_bgr, filename=None):
     """Sauvegarde l'image Lucky filtrée (uint8 BGR) en PNG 8-bit.
     Utilisée pour le bouton SAVE PNG et la sauvegarde finale.
@@ -7103,7 +7380,7 @@ def draw_lucky_controls(screen_width, screen_height):
             shift_label = f"Shift max: {ls_lucky_max_shift}px" if ls_lucky_max_shift > 0 else "Shift max: OFF"
             control_rects['ls_lucky_max_shift'] = draw_jsk_slider(
                 panel_x, start_y, slider_w, slider_h,
-                shift_label, ls_lucky_max_shift, 0, 100, (60, 100, 170))
+                shift_label, ls_lucky_max_shift, 0, 200, (60, 100, 170))
             start_y += slider_h + margin
 
         control_rects['ls_lucky_roi'] = draw_jsk_slider(
@@ -7377,7 +7654,7 @@ def handle_lucky_slider_click(mx, my, control_rects):
             elif name == 'ls_lucky_align':
                 ls_lucky_align = max(0, min(1, int(ratio + 0.5)))
             elif name == 'ls_lucky_max_shift':
-                ls_lucky_max_shift = max(0, min(100, int(ratio * 100)))
+                ls_lucky_max_shift = max(0, min(200, int(ratio * 200)))
                 # Propagation live si le stacker tourne
                 if luckystack is not None:
                     luckystack.configure(lucky_max_shift=float(ls_lucky_max_shift))
@@ -14475,6 +14752,7 @@ def preview():
     global livestack_active, luckystack_active, raw_format, raw_stream_size, capture_size, jsk_live_mode
     global lucky_recorder
     global lucky_last_filtered_array, lucky_paused, lucky_last_stack_before_filter
+    global ls_paused, ls_last_filtered_array, ls_pre_filter_array
     global ls_lucky_clahe_en, ls_lucky_clahe_str, ls_lucky_clahe_tile
     global ls_lucky_usm_en, ls_lucky_usm_sigma, ls_lucky_usm_amount
     global ls_lucky_lr_en, ls_lucky_lr_iter, ls_lucky_lr_sigma
@@ -16233,6 +16511,13 @@ while True:
                         stacked_array = _lsp['last_display']
 
                         if stacked_array is not None:
+                            # Stocker avant filtres pour re-filtrage interactif en pause
+                            ls_pre_filter_array = stacked_array.copy()
+                            # Appliquer les filtres post-stack (CLAHE, USM, déconvolution, balance)
+                            stacked_array = apply_lucky_post_stack_filters(stacked_array, color_correction=True)
+                            # Conserver pour le bouton SAVE PNG
+                            ls_last_filtered_array = stacked_array.copy()
+
                             # Convertir en surface pygame
                             if len(stacked_array.shape) == 3:
                                 transposed = np.swapaxes(stacked_array, 0, 1)
@@ -16317,6 +16602,35 @@ while True:
                             import traceback
                             traceback.print_exc()
                         livestack_display_done = False
+
+                # ===== LIVE STACK PAUSED: afficher le dernier résultat en ré-appliquant les filtres =====
+                elif ls_paused and ls_pre_filter_array is not None:
+                    try:
+                        _disp = apply_lucky_post_stack_filters(ls_pre_filter_array.copy(), color_correction=True)
+                        ls_last_filtered_array = _disp
+                        if len(_disp.shape) == 3:
+                            _t = np.swapaxes(_disp, 0, 1)
+                            if raw_format >= 2:
+                                _img = pygame.surfarray.make_surface(_t)
+                            else:
+                                _img = pygame.surfarray.make_surface(_t[:, :, [2, 1, 0]])
+                        else:
+                            _img = pygame.surfarray.make_surface(_disp.T)
+                        display_modes = pygame.display.list_modes()
+                        if display_modes and display_modes != -1:
+                            _pw, _ph = display_modes[0]
+                        else:
+                            _si = pygame.display.Info()
+                            _pw, _ph = _si.current_w, _si.current_h
+                        _img = pygame.transform.scale(_img, (_pw, _ph))
+                        windowSurfaceObj.blit(_img, (0, 0))
+                        if ls_interface_mode == 1:
+                            draw_ls_interface(_pw, _ph)
+                        pygame.display.update()
+                        livestack_display_done = True
+                    except Exception as _pe:
+                        if show_cmds == 1:
+                            print(f"[DEBUG] Erreur affichage pause LiveStack: {_pe}")
 
                 # ===== LUCKY STACK PROCESSING =====
                 elif luckystack_active and luckystack is not None:
@@ -17925,7 +18239,7 @@ while True:
                 _ls_slider_dragging = False
                 continue
 
-            # SAVE → sauvegarder le stack courant
+            # SAVE FIT → sauvegarder le stack courant en FITS
             if is_click_on_ls_save(mousex, mousey, fs_width):
                 if livestack is not None and livestack.session is not None:
                     try:
@@ -17940,12 +18254,50 @@ while True:
                     print("[LS INTERFACE] Rien à sauvegarder")
                 continue
 
+            # SAVE PNG → sauvegarder l'image filtrée en PNG
+            if is_click_on_ls_save_png_ls(mousex, mousey, fs_width):
+                if ls_last_filtered_array is not None:
+                    save_ls_filtered_png(ls_last_filtered_array)
+                else:
+                    print("[LS PNG] Aucune image disponible (pas encore de stack)")
+                continue
+
+            # PAUSE / REPRISE → geler le stack pour ajuster les filtres / expo / gain
+            if is_click_on_ls_pause(mousex, mousey, fs_height):
+                if livestack_active:
+                    # Mettre en pause : suspendre sans réinitialiser le stack accumulé
+                    ls_paused = True
+                    livestack_active = False
+                    if livestack is not None:
+                        livestack.pause()
+                    apply_controls_immediately(
+                        gain_value=ls_gain if ls_gain > 0 else None,
+                        exposure_time=ls_exposure_us)
+                    print("[LS INTERFACE] Stack en PAUSE — ajustez filtres / expo / gain")
+                elif ls_paused:
+                    # Reprendre : reprendre l'accumulation sans reset
+                    ls_paused = False
+                    if livestack is not None:
+                        livestack.resume()
+                    apply_controls_immediately(
+                        gain_value=ls_gain if ls_gain > 0 else None,
+                        exposure_time=ls_exposure_us)
+                    # Mettre à jour la cible d'exposition du guard (l'expo a peut-être changé en pause)
+                    pygame._ls_target_exposure_us = ls_exposure_us
+                    pygame._ls_exposure_skip_count = 0
+                    livestack_active = True
+                    print("[LS INTERFACE] Stack REPRIS")
+                continue
+
             # RESET → réinitialiser la session de stacking
             if is_click_on_ls_reset(mousex, mousey, fs_height):
-                if livestack_active:
+                if livestack_active or ls_paused:
                     livestack_active = False
                     if livestack is not None:
                         livestack.stop()
+                ls_paused = False
+                ls_last_filtered_array = None
+                ls_pre_filter_array = None
                 if hasattr(pygame, '_ls_raw_save_queue'):
                     pygame._ls_raw_save_queue.put(None)
                     del pygame._ls_raw_save_queue
@@ -17973,6 +18325,7 @@ while True:
                 if livestack_active:
                     # STOP
                     livestack_active = False
+                    ls_paused = False
                     if livestack is not None:
                         livestack.stop()
                     # Arrêter le worker de sauvegarde RAW si actif
@@ -17987,6 +18340,8 @@ while True:
                         exposure_time=ls_exposure_us)
                     print("[LS INTERFACE] Stack arrêté")
                 else:
+                    # START : réinitialise l'état pause si on repart de zéro
+                    ls_paused = False
                     # START : si scheduler ON → appliquer paramètres scheduler à la caméra
                     if ls_scheduler_enabled:
                         apply_controls_immediately(
@@ -18143,6 +18498,7 @@ while True:
 
                 ls_interface_mode = 0
                 ls_settings_visible = 0
+                ls_paused = False
                 _ls_slider_rects = {}
                 _ls_slider_dragging = False
                 _ls_ge_dragging = None
@@ -18272,7 +18628,7 @@ while True:
 
             # RESET → réinitialiser la session Lucky
             if is_click_on_ls_reset(mousex, mousey, fs_height):
-                if luckystack_active:
+                if luckystack_active or lucky_paused:
                     luckystack_active = False
                     if luckystack is not None:
                         luckystack.stop()
@@ -18293,20 +18649,23 @@ while True:
             # PAUSE / REPRISE → geler le stack pour ajuster les filtres
             if is_click_on_lucky_pause(mousex, mousey, fs_height):
                 if luckystack_active:
-                    # Mettre en pause : arrêter l'acquisition sans réinitialiser
+                    # Mettre en pause : suspendre sans réinitialiser le stack accumulé
                     lucky_paused = True
                     luckystack_active = False
                     if luckystack is not None:
-                        luckystack.stop()
+                        luckystack.pause()
                     apply_controls_immediately(
                         gain_value=ls_gain if ls_gain > 0 else None,
                         exposure_time=ls_exposure_us)
                     print("[LUCKY INTERFACE] Stack en PAUSE — ajustez les filtres")
                 elif lucky_paused:
-                    # Reprendre : redémarrer le stack sans reset (continue d'accumuler)
+                    # Reprendre : reprendre l'accumulation sans reset
                     lucky_paused = False
                     if luckystack is not None:
-                        luckystack.start()
+                        luckystack.resume()
+                    apply_controls_immediately(
+                        gain_value=ls_gain if ls_gain > 0 else None,
+                        exposure_time=ls_exposure_us)
                     luckystack_active = True
                     print("[LUCKY INTERFACE] Stack REPRIS")
                 continue
