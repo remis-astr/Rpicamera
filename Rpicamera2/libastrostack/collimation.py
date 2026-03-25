@@ -456,25 +456,48 @@ class CollimationDetector:
 
     def get_collimation_score(self):
         """Retourne un score de collimation (0-100).
-        100 = parfaitement collimate (tous les cercles concentriques).
-        Base sur l'excentricite max normalisee par le rayon du focuser."""
-        if not self.focuser_center or 'focuser' not in self.circles:
-            return None
+        100 = parfaitement collimate.
 
-        if not self.eccentricities:
+        Chaque indicateur est normalise par le rayon de son cercle PARENT :
+          - Secondaire  : ecc(secondaire vs focuser)  / focuser_r
+          - Primaire    : ecc(primaire vs secondaire)  / secondary_r
+          - Camera      : ecc(camera vs secondaire)    / secondary_r
+
+        Seuil : 10% du rayon parent -> score 0.
+        Score global = minimum des indicateurs actifs (maillon faible).
+        """
+        if not self.focuser_center or 'focuser' not in self.circles:
             return None
 
         focuser_r = self.circles['focuser'][2]
         if focuser_r <= 0:
             return None
 
-        # Excentricite max en proportion du rayon du focuser
-        # Seuls le secondaire et le reflet camera sont pertinents pour le score
-        # (le reflet du primaire n'est pas un indicateur de collimation direct)
-        relevant = {k: v for k, v in self.eccentricities.items() if k in ('secondary', 'camera')}
-        if not relevant:
+        fcx, fcy = self.focuser_center
+        TOLERANCE = 0.10  # 10% du rayon parent = score 0
+
+        scores = []
+
+        # --- Secondaire : doit etre centre dans le focuser ---
+        if 'secondary' in self.circles:
+            scx, scy, secondary_r = self.circles['secondary']
+            ecc = np.sqrt((scx - fcx) ** 2 + (scy - fcy) ** 2)
+            ratio = ecc / (focuser_r * TOLERANCE)
+            scores.append(max(0, int(100 - ratio * 100)))
+
+        # --- Primaire et camera : doivent etre centres dans le secondaire ---
+        if 'secondary' in self.circles:
+            scx, scy, secondary_r = self.circles['secondary']
+            if secondary_r > 0:
+                for name in ('primary', 'camera'):
+                    if name in self.circles:
+                        ox, oy, _ = self.circles[name]
+                        ecc = np.sqrt((ox - scx) ** 2 + (oy - scy) ** 2)
+                        ratio = ecc / (secondary_r * TOLERANCE)
+                        scores.append(max(0, int(100 - ratio * 100)))
+
+        if not scores:
             return None
-        max_ecc = max(relevant.values())
-        # 0 px d'ecart = 100%, focuser_r/4 d'ecart = 0%
-        score = max(0, 100 - (max_ecc / (focuser_r * 0.25)) * 100)
-        return int(score)
+
+        # Score = maillon faible (indicateur le plus degrade)
+        return min(scores)
