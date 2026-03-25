@@ -12917,24 +12917,26 @@ def draw_collimation_overlay(screen_width, screen_height, detector, scale_x, sca
         # Mapper les coordonnées image vers les coordonnées écran
         sx = int(ox * scale_x)
         sy = int(oy * scale_y)
-        sr = int(r * max(scale_x, scale_y))  # Rayon scalé
+        sr_x = int(r * scale_x)  # Demi-axe horizontal (échelle X)
+        sr_y = int(r * scale_y)  # Demi-axe vertical (échelle Y)
 
         color = CIRCLE_COLORS[name]
         label = CIRCLE_LABELS[name]
 
-        # Cercle détecté — plus épais si sélectionné en mode manuel
+        # Ellipse détectée — compense l'étirement non-uniforme de l'affichage
         is_selected = (manual_mode == 1 and name == selected_circle)
         circle_width = 4 if is_selected else 2
-        pygame.draw.circle(windowSurfaceObj, color, (sx, sy), sr, circle_width)
+        pygame.draw.ellipse(windowSurfaceObj, color,
+                           (sx - sr_x, sy - sr_y, 2 * sr_x, 2 * sr_y), circle_width)
 
         # Anneau externe pour indiquer la sélection
         if is_selected:
-            pygame.draw.circle(windowSurfaceObj, (255, 255, 255), (sx, sy), sr + 5, 1)
+            pygame.draw.ellipse(windowSurfaceObj, (255, 255, 255),
+                               (sx - sr_x - 5, sy - sr_y - 5, 2 * sr_x + 10, 2 * sr_y + 10), 1)
             # Petites flèches cardinales indiquant que le cercle est déplaçable
-            arrow_d = min(sr + 18, sr + 18)
             for dx, dy in [(0, -1), (0, 1), (-1, 0), (1, 0)]:
-                ax = sx + dx * arrow_d
-                ay = sy + dy * arrow_d
+                ax = sx + dx * (sr_x + 18) if dx != 0 else sx
+                ay = sy + dy * (sr_y + 18) if dy != 0 else sy
                 pygame.draw.circle(windowSurfaceObj, (255, 255, 255), (ax, ay), 3, 0)
 
         # Point au centre du cercle
@@ -12951,7 +12953,7 @@ def draw_collimation_overlay(screen_width, screen_height, detector, scale_x, sca
         text_surface = font_label.render(f"{label}{ecc_text}{lock_indicator}", True, color)
         # Positionner le label au-dessus du cercle
         text_x = sx - text_surface.get_width() // 2
-        text_y = sy - sr - 18
+        text_y = sy - sr_y - 18
         # Fond semi-transparent pour lisibilité
         bg_rect = pygame.Rect(text_x - 2, text_y - 1,
                              text_surface.get_width() + 4,
@@ -12970,17 +12972,18 @@ def draw_collimation_overlay(screen_width, screen_height, detector, scale_x, sca
                 pygame.draw.line(windowSurfaceObj, color,
                                (fcx, fcy), (sx, sy), 1)
 
-    # --- Cercles théoriques concentriques (pointillés blancs) ---
+    # --- Cercles théoriques concentriques (pointillés) ---
     if focuser_center is not None and 'focuser' in circles:
         fcx = int(focuser_center[0] * scale_x)
         fcy = int(focuser_center[1] * scale_y)
-        focuser_r = int(circles['focuser'][2] * max(scale_x, scale_y))
+        focuser_rx = int(circles['focuser'][2] * scale_x)
+        focuser_ry = int(circles['focuser'][2] * scale_y)
 
-        # 5 cercles espacés régulièrement du centre au bord du focuser
+        # 5 ellipses espacées régulièrement du centre au bord du focuser
         for i in range(1, 6):
-            ref_r = int(focuser_r * i / 5)
-            # Pointillés simulés : dessiner des arcs
-            _draw_dashed_circle(windowSurfaceObj, (80, 80, 80), (fcx, fcy), ref_r)
+            ref_rx = int(focuser_rx * i / 5)
+            ref_ry = int(focuser_ry * i / 5)
+            _draw_dashed_ellipse(windowSurfaceObj, (80, 80, 80), (fcx, fcy), ref_rx, ref_ry)
 
     # --- Score de collimation ---
     score = detector.get_collimation_score()
@@ -13024,21 +13027,22 @@ def draw_collimation_overlay(screen_width, screen_height, detector, scale_x, sca
         windowSurfaceObj.blit(score_text, (score_x, 15))
 
 
-def _draw_dashed_circle(surface, color, center, radius, dash_length=8, gap_length=6):
-    """Dessine un cercle en pointillés."""
-    if radius <= 0:
+def _draw_dashed_ellipse(surface, color, center, rx, ry, dash_length=8, gap_length=6):
+    """Dessine une ellipse en pointillés (compense l'étirement écran)."""
+    if rx <= 0 or ry <= 0:
         return
-    circumference = 2 * 3.14159 * radius
+    # Approximation périmètre ellipse (Ramanujan)
+    circumference = 3.14159 * (3 * (rx + ry) - ((3 * rx + ry) * (rx + 3 * ry)) ** 0.5)
     n_segments = max(1, int(circumference / (dash_length + gap_length)))
     angle_step = 2 * 3.14159 / n_segments
 
     for i in range(n_segments):
         angle_start = i * angle_step
         angle_end = angle_start + (dash_length / (dash_length + gap_length)) * angle_step
-        x1 = int(center[0] + radius * np.cos(angle_start))
-        y1 = int(center[1] + radius * np.sin(angle_start))
-        x2 = int(center[0] + radius * np.cos(angle_end))
-        y2 = int(center[1] + radius * np.sin(angle_end))
+        x1 = int(center[0] + rx * np.cos(angle_start))
+        y1 = int(center[1] + ry * np.sin(angle_start))
+        x2 = int(center[0] + rx * np.cos(angle_end))
+        y2 = int(center[1] + ry * np.sin(angle_end))
         pygame.draw.line(surface, color, (x1, y1), (x2, y2), 1)
 
 
@@ -13162,8 +13166,8 @@ def draw_collimation_gain_slider(screen_width, screen_height, value):
     pygame.draw.rect(windowSurfaceObj, (40, 40, 50), bg_rect, border_radius=5)
     pygame.draw.rect(windowSurfaceObj, (80, 80, 90), bg_rect, 1, border_radius=5)
 
-    # Barre de remplissage
-    max_gain = max_gains[Pi_Cam] if Pi_Cam < len(max_gains) else 64
+    # Barre de remplissage (plage limitée à 100 pour réglage fin)
+    max_gain = 100
     if value > 0 and max_gain > 0:
         fill_ratio = min(1.0, value / max_gain)
         fill_w = int(fill_ratio * (slider_w - 10))
@@ -13199,13 +13203,13 @@ def is_click_on_collimation_gain_slider(mousex, mousey, screen_width, screen_hei
     sy = screen_height - slider_h - margin - (slider_h + gap)
 
     if sx <= mousex <= sx + slider_w and sy <= mousey <= sy + slider_h:
-        max_gain = max_gains[Pi_Cam] if Pi_Cam < len(max_gains) else 64
+        max_gain = 100
         rel_x = mousex - sx
         ratio = rel_x / slider_w
         # Zone gauche (< 5%) = AUTO (0)
         if ratio < 0.05:
             return 0
-        # Sinon mapper sur 1 a max_gain
+        # Sinon mapper sur 1 a 100
         value = max(1, int(ratio * max_gain))
         return min(value, max_gain)
     return None
