@@ -1977,7 +1977,7 @@ planetary_windows = [128, 256, 512]
 # Lucky Imaging parameters
 ls_lucky_buffer = 10  # Taille buffer (10-200)
 ls_lucky_keep = 10  # % à garder (1-50)
-ls_lucky_score = 0  # 0=laplacian, 1=gradient, 2=sobel, 3=tenengrad
+ls_lucky_score = 1  # 0=laplacian, 1=gradient, 2=sobel, 3=tenengrad
 ls_lucky_stack = 0  # 0=mean, 1=median, 2=sigma_clip
 ls_lucky_align = 1  # 0=off, 1=on
 ls_lucky_roi = 50  # % ROI scoring (20-100)
@@ -5806,6 +5806,42 @@ def draw_ls_controls(screen_width, screen_height):
     # ONGLET 0 : Capture
     # =====================================================
     if ls_settings_tab == 0:
+        # --- Sélecteur Format de capture ---
+        windowSurfaceObj.blit(
+            _font_cache[ck_sect].render("Format capture", True, (110, 195, 135)),
+            (panel_x + 2, start_y))
+        start_y += 16
+        _fmt_labels  = ['YUV', 'RGB8', 'RAW12', 'RAW16']
+        _fmt_act_col = [(50,130,80), (50,110,140), (160,100,40), (130,70,130)]
+        _fmt_off_col = (30, 48, 36)
+        _seg_w = slider_w // 4
+        _ck_fmt = 17
+        if _ck_fmt not in _font_cache:
+            _font_cache[_ck_fmt] = pygame.font.Font(None, _ck_fmt)
+        for _fi, _fl in enumerate(_fmt_labels):
+            _fr = pygame.Rect(panel_x + _fi * _seg_w, start_y, _seg_w - 2, slider_h)
+            _fa = (raw_format == _fi)
+            _fbg = _fmt_act_col[_fi] if _fa else _fmt_off_col
+            _fbd = tuple(min(255, c + 60) for c in _fbg) if _fa else (55, 78, 58)
+            pygame.draw.rect(windowSurfaceObj, _fbg, _fr, border_radius=4)
+            pygame.draw.rect(windowSurfaceObj, _fbd, _fr, 1, border_radius=4)
+            _ftc = (235, 235, 235) if _fa else (105, 140, 110)
+            windowSurfaceObj.blit(
+                _font_cache[_ck_fmt].render(_fl, True, _ftc),
+                _font_cache[_ck_fmt].render(_fl, True, _ftc).get_rect(center=_fr.center))
+            control_rects[f'ls_capture_format_{_fi}'] = _fr
+        start_y += slider_h + margin
+        # Avertissement si session en cours (changement actif au prochain START)
+        if livestack is not None and getattr(livestack, 'is_running', False):
+            _ck_w = 14
+            if _ck_w not in _font_cache:
+                _font_cache[_ck_w] = pygame.font.Font(None, _ck_w)
+            windowSurfaceObj.blit(
+                _font_cache[_ck_w].render("→ actif au prochain START", True, (210, 165, 55)),
+                (panel_x + 4, start_y))
+            start_y += 14
+        start_y += 6
+
         windowSurfaceObj.blit(
             _font_cache[ck_sect].render("Alignement", True, (110, 195, 135)),
             (panel_x + 2, start_y))
@@ -6337,6 +6373,7 @@ def handle_ls_slider_click(mx, my, control_rects):
     global ls_lucky_mm_en, ls_lucky_mm_iter, ls_lucky_mm_sigma, ls_lucky_mm_lambda
     global ls_post_red, ls_post_green, ls_post_blue, ls_post_sat, ls_post_brightness
     global ls_paused, ls_pre_filter_array, ls_last_filtered_array
+    global raw_format
     import math as _math
 
     for name, rect in control_rects.items():
@@ -6344,6 +6381,8 @@ def handle_ls_slider_click(mx, my, control_rects):
             ratio = max(0.0, min(1.0, (mx - rect.x) / rect.width))
             if name.startswith('ls_tab_'):
                 ls_settings_tab = int(name[-1])
+            elif name.startswith('ls_capture_format_'):
+                raw_format = int(name[-1])
             elif name == 'ls_alignment_mode':
                 ls_alignment_mode = max(0, min(3, int(ratio * 3 + 0.5)))
             elif name == 'ls_preview_refresh':
@@ -7029,6 +7068,23 @@ def draw_lucky_rec_button(screen_width, screen_height, is_recording=False, elaps
     return icon_rect
 
 
+def get_dated_save_dir(base_path):
+    """Retourne base_path/YYYY-MM-DD/ (créé si absent)."""
+    from pathlib import Path as _Path
+    import datetime as _dt
+    dated = _Path(base_path) / _dt.date.today().strftime("%Y-%m-%d")
+    dated.mkdir(parents=True, exist_ok=True)
+    return dated
+
+
+def get_dated_pic_dir():
+    """Retourne pic_dir/YYYY-MM-DD/ (créé si absent)."""
+    import datetime as _dt, os as _os
+    dated = pic_dir + _dt.date.today().strftime("%Y-%m-%d") + "/"
+    _os.makedirs(dated, exist_ok=True)
+    return dated
+
+
 def save_ls_filtered_png(img_bgr, filename=None):
     """Sauvegarde l'image Live Stack filtrée (uint8 BGR) en PNG 8-bit."""
     global livestack
@@ -7038,7 +7094,7 @@ def save_ls_filtered_png(img_bgr, filename=None):
         if livestack is not None and hasattr(livestack, 'output_dir'):
             output_dir = livestack.output_dir
         else:
-            output_dir = _Path("/home/admin/stacks/live")
+            output_dir = get_dated_save_dir("/home/admin/stacks/live")
         output_dir.mkdir(parents=True, exist_ok=True)
         if filename is None:
             ts = _t.strftime("%Y%m%d_%H%M%S")
@@ -7063,7 +7119,7 @@ def save_lucky_filtered_png(img_bgr, filename=None):
         if luckystack is not None and hasattr(luckystack, 'output_dir'):
             output_dir = luckystack.output_dir
         else:
-            output_dir = _Path("/home/admin/stacks/lucky")
+            output_dir = get_dated_save_dir("/home/admin/stacks/lucky")
         output_dir.mkdir(parents=True, exist_ok=True)
         if filename is None:
             ts = _t.strftime("%Y%m%d_%H%M%S")
@@ -16444,8 +16500,7 @@ while True:
                                 _use_fits = True
                             except ImportError:
                                 _use_fits = False
-                            _raw_dir = os.path.expanduser("~/stacks/raw_frames")
-                            os.makedirs(_raw_dir, exist_ok=True)
+                            _raw_dir = str(get_dated_save_dir(os.path.expanduser("~/stacks/raw_frames")))
                             while True:
                                 item = pygame._ls_raw_save_queue.get()
                                 if item is None:
@@ -18401,6 +18456,8 @@ while True:
                         livestack = create_advanced_livestack_session(_cam_params)
                     else:
                         livestack.camera_params = _cam_params
+                    from pathlib import Path as _Path
+                    livestack.output_dir = get_dated_save_dir("/home/admin/stacks/live")
 
                     livestack.configure(
                         stacking_method=['mean', 'median', 'kappa_sigma', 'winsorized', 'weighted'][ls_stack_method],
@@ -18613,9 +18670,8 @@ while True:
                         lucky_recorder = JSKVideoRecorder()
                     import datetime as _dt
                     ts = _dt.datetime.now().strftime("%y%m%d%H%M%S")
-                    import os as _os
-                    _os.makedirs("/home/admin/stacks/lucky", exist_ok=True)
-                    out = f"/home/admin/stacks/lucky/lucky_progress_{ts}.mp4"
+                    _lucky_vid_dir = get_dated_save_dir("/home/admin/stacks/lucky")
+                    out = str(_lucky_vid_dir / f"lucky_progress_{ts}.mp4")
                     rw, rh = vwidth, vheight
                     if lucky_recorder.start(out, rw, rh, fps=2):
                         print(f"[LUCKY VIDEO] Enregistrement démarré: {out}")
@@ -18746,6 +18802,8 @@ while True:
                         luckystack = create_advanced_livestack_session(_cam_params)
                     else:
                         luckystack.camera_params = _cam_params
+                    from pathlib import Path as _Path
+                    luckystack.output_dir = get_dated_save_dir("/home/admin/stacks/lucky")
 
                     luckystack.configure(
                         stacking_method=['mean', 'median', 'kappa_sigma', 'winsorized', 'weighted'][ls_stack_method],
@@ -19793,8 +19851,9 @@ while True:
                     text(0,0,6,2,1,"Please Wait, taking still ...",int(fv*1.7),1)
                     now = datetime.datetime.now()
                     timestamp = now.strftime("%y%m%d%H%M%S")
+                    _spdir = get_dated_pic_dir()
                     if extns[extn] != 'raw':
-                        fname =  pic_dir + str(timestamp) + '.' + extns2[extn]
+                        fname =  _spdir + str(timestamp) + '.' + extns2[extn]
                         if lver != "bookwo" and lver != "trixie":
                             datastr = "libcamera-still"
                         else:
@@ -19802,7 +19861,7 @@ while True:
                         datastr += " --camera " + str(camera) + " -e " + extns[extn] + " -n "
                         datastr += "-t " + str(timet) + " -o " + fname
                     else:
-                        fname =  pic_dir + str(timestamp) + '.' + extns2[extn]
+                        fname =  _spdir + str(timestamp) + '.' + extns2[extn]
                         if lver != "bookwo" and lver != "trixie":
                             datastr = "libcamera-still"
                         else:
@@ -21152,12 +21211,13 @@ while True:
                         text(0,0,6,2,1,"Please Wait, taking Timelapse ...",int(fv*1.7),1)
                         now = datetime.datetime.now()
                         timestamp = now.strftime("%y%m%d%H%M%S")
+                        _tpdir = get_dated_pic_dir()
                         count = 0
                         # Forcer .jpg pour Allsky
                         if allsky_mode > 0:
-                            fname =  pic_dir + str(timestamp) + '_%04d.jpg'
+                            fname =  _tpdir + str(timestamp) + '_%04d.jpg'
                         else:
-                            fname =  pic_dir + str(timestamp) + '_%04d.' + extns2[extn]
+                            fname =  _tpdir + str(timestamp) + '_%04d.' + extns2[extn]
                         if lver != "bookwo" and lver != "trixie":
                             datastr = "libcamera-still"
                         else:
@@ -21287,7 +21347,7 @@ while True:
                                 show = 0
                                 while count == old_count:
                                     time.sleep(0.1)
-                                    pics3 = glob.glob(pic_dir + "*.*")
+                                    pics3 = glob.glob(_tpdir + "*.*")
                                     counts = []
                                     for xu in range(0,len(pics3)):
                                         ww = pics3[xu].split("/")
@@ -21310,7 +21370,7 @@ while True:
                                                 text(0,2,3,1,1,str(tshots),fv,12)
                                                 stop = 1
                                                 count = tshots
-                                                                                        
+
                                 old_count = count
 
                                 # ALLSKY: Appliquer stretch si activé
@@ -21380,7 +21440,7 @@ while True:
 
                         # ALLSKY: Assembler vidéo si mode activé
                         if allsky_mode > 0 and stop == 0:
-                            video_filename = pic_dir + timestamp + "_allsky.mp4"
+                            video_filename = _tpdir + timestamp + "_allsky.mp4"
 
                             # ALLSKY STACKING: Stacker les images si activé
                             stacked_images = []
@@ -21392,7 +21452,7 @@ while True:
                                 pygame.display.update()
 
                                 stacked_images, original_images_to_delete = stack_timelapse_images(
-                                    pic_dir, timestamp, allsky_stack_count, quality
+                                    _tpdir, timestamp, allsky_stack_count, quality
                                 )
 
                                 if stacked_images:
@@ -21405,9 +21465,9 @@ while True:
 
                             # Utiliser les images stackées si disponibles, sinon les originales
                             if stacked_images:
-                                success = assemble_allsky_video(pic_dir, use_stacked_timestamp, allsky_video_fps, video_filename)
+                                success = assemble_allsky_video(_tpdir, use_stacked_timestamp, allsky_video_fps, video_filename)
                             else:
-                                success = assemble_allsky_video(pic_dir, timestamp, allsky_video_fps, video_filename)
+                                success = assemble_allsky_video(_tpdir, timestamp, allsky_video_fps, video_filename)
 
                             if success:
                                 print(f"[Allsky] Vidéo créée : {video_filename}")
@@ -21460,6 +21520,7 @@ while True:
                         text(0,0,6,2,1,"Please Wait, taking Timelapse ...",int(fv*1.7),1)
                         now = datetime.datetime.now()
                         timestamp = now.strftime("%y%m%d%H%M%S")
+                        _tpdir = get_dated_pic_dir()
                         start2 = time.monotonic()
                         stop = 0
                         pics3 = []
@@ -21492,9 +21553,9 @@ while True:
                                         print("[WARN] Timeout: le processus ne s'est pas terminé après 30s")
                                 # Forcer .jpg pour Allsky (format %04d pour cohérence avec mode normal)
                                 if allsky_mode > 0:
-                                    fname =  pic_dir + str(timestamp) + "_%04d.jpg" % count
+                                    fname =  _tpdir + str(timestamp) + "_%04d.jpg" % count
                                 else:
-                                    fname =  pic_dir + str(timestamp) + "_" + str(count) + "." + extns2[extn]
+                                    fname =  _tpdir + str(timestamp) + "_" + str(count) + "." + extns2[extn]
                                 if lver != "bookwo" and lver != "trixie":
                                     datastr = "libcamera-still"
                                 else:
@@ -21586,7 +21647,7 @@ while True:
                                 show = 0
                                 while count == old_count:
                                     time.sleep(0.1)
-                                    pics3 = glob.glob(pic_dir + "*.*")
+                                    pics3 = glob.glob(_tpdir + "*.*")
                                     counts = []
                                     for xu in range(0,len(pics3)):
                                         ww = pics3[xu].split("/")
@@ -21672,7 +21733,7 @@ while True:
 
                         # ALLSKY: Assembler vidéo si mode activé
                         if allsky_mode > 0 and stop == 0:
-                            video_filename = pic_dir + timestamp + "_allsky.mp4"
+                            video_filename = _tpdir + timestamp + "_allsky.mp4"
 
                             # ALLSKY STACKING: Stacker les images si activé
                             stacked_images = []
@@ -21684,7 +21745,7 @@ while True:
                                 pygame.display.update()
 
                                 stacked_images, original_images_to_delete = stack_timelapse_images(
-                                    pic_dir, timestamp, allsky_stack_count, quality
+                                    _tpdir, timestamp, allsky_stack_count, quality
                                 )
 
                                 if stacked_images:
@@ -21697,9 +21758,9 @@ while True:
 
                             # Utiliser les images stackées si disponibles, sinon les originales
                             if stacked_images:
-                                success = assemble_allsky_video(pic_dir, use_stacked_timestamp, allsky_video_fps, video_filename)
+                                success = assemble_allsky_video(_tpdir, use_stacked_timestamp, allsky_video_fps, video_filename)
                             else:
-                                success = assemble_allsky_video(pic_dir, timestamp, allsky_video_fps, video_filename)
+                                success = assemble_allsky_video(_tpdir, timestamp, allsky_video_fps, video_filename)
 
                             if success:
                                 print(f"[Allsky] Vidéo créée : {video_filename}")
@@ -21754,7 +21815,8 @@ while True:
                         text(0,0,6,2,1,"Please Wait, taking Timelapse ...",int(fv*1.7),1)
                         now = datetime.datetime.now()
                         timestamp = now.strftime("%y%m%d%H%M%S")
-                        fname =  pic_dir + str(timestamp) + '_%04d.' + extns2[extn]
+                        _tpdir = get_dated_pic_dir()
+                        fname =  _tpdir + str(timestamp) + '_%04d.' + extns2[extn]
                         if codecs2[codec] != 'raw':
                             if lver != "bookwo" and lver != "trixie":
                                 datastr = "libcamera-vid"
@@ -21772,7 +21834,7 @@ while True:
                             else:
                                 datastr += " --framerate " + str(fps)
                         else:
-                            fname =  pic_dir + str(timestamp) + '_%04d.' + codecs2[codec]
+                            fname =  _tpdir + str(timestamp) + '_%04d.' + codecs2[codec]
                             if lver != "bookwo" and lver != "trixie":
                                 datastr = "libcamera-raw"
                             else:
