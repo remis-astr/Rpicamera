@@ -346,10 +346,12 @@ class BayerLuckyStacker:
         self.last_bayer_stack: Optional[np.ndarray] = None
         self._align_ref_g1:    Optional[np.ndarray] = None
 
-        # Stack cumulatif inter-buffer (identique au lucky RGB8)
-        # Chaque buffer complété est accumulé → image progressivement meilleure
-        self._cumul_stack:  Optional[np.ndarray] = None   # float64 (H, W)
-        self._cumul_count:  int = 0
+        # Stack cumulatif inter-buffer pondéré par score
+        # Chaque buffer est pondéré par le score moyen de ses frames sélectionnées
+        # → les buffers avec de meilleures frames contribuent davantage au résultat final
+        self._cumul_stack:  Optional[np.ndarray] = None   # float64 (H, W) somme pondérée
+        self._cumul_count:  int = 0                        # nombre de buffers accumulés
+        self._cumul_weight: float = 0.0                    # somme des poids (scores moyens)
 
     # ------------------------------------------------------------------
     # Interface principale
@@ -424,7 +426,9 @@ class BayerLuckyStacker:
         """
         if self._cumul_stack is None or self._cumul_count == 0:
             return None
-        bayer_mean = (self._cumul_stack / self._cumul_count).astype(np.float32)
+        # Division par la somme des poids (score-weighted mean inter-buffer)
+        divisor = self._cumul_weight if self._cumul_weight > 0 else float(self._cumul_count)
+        bayer_mean = (self._cumul_stack / divisor).astype(np.float32)
         return debayer_bayer_stack(bayer_mean, red_gain, blue_gain, global_bl)
 
     def get_stats(self) -> Dict:
@@ -457,6 +461,7 @@ class BayerLuckyStacker:
             self._align_ref_g1    = None
             self._cumul_stack     = None
             self._cumul_count     = 0
+            self._cumul_weight    = 0.0
 
     def update_config(self, **kwargs):
         """Met à jour la configuration à chaud (sans reset du buffer).
@@ -522,13 +527,17 @@ class BayerLuckyStacker:
         self._align_ref_g1    = ref_g1
         self.stacks_done     += 1
 
-        # Accumulation inter-buffer (identique au lucky RGB8)
-        # Le stack du buffer courant est ajouté à la moyenne cumulative
+        # Accumulation inter-buffer pondérée par le score moyen des frames sélectionnées
+        # Les buffers avec de meilleures frames (score élevé) pèsent davantage
+        buffer_score = float(np.mean([scores[i] for i in idx_sorted[:keep]]))
+        weight = max(buffer_score, 1e-9)  # Éviter poids nul
+
         if self._cumul_stack is None:
-            self._cumul_stack = result.astype(np.float64)
+            self._cumul_stack = result.astype(np.float64) * weight
         else:
-            self._cumul_stack += result.astype(np.float64)
-        self._cumul_count += 1
+            self._cumul_stack += result.astype(np.float64) * weight
+        self._cumul_weight += weight
+        self._cumul_count  += 1
 
         # Vider le buffer pour le cycle suivant
         self._frames.clear()
