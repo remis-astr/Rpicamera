@@ -1293,13 +1293,13 @@ def _ls_process_frame_thread(arr_copy, proc_kw, livestack_obj):
             return None
 
         # Post-traitement → uint8 pour pygame
-        # Le stretch N'est PAS appliqué ici : il est appliqué dans le main loop
-        # pour permettre le réglage interactif en pause (ls_pre_stretch_array).
         if proc_kw.get('raw_format', 0) >= 2:
             if stacked.dtype != np.uint8:
                 stacked = np.clip(stacked, 0, 255).astype(np.uint8)
         else:
             stacked = apply_isp_to_preview(stacked)
+            if proc_kw.get('stretch_preset', 0) != 0:
+                stacked = astro_stretch(stacked)
             if stacked.dtype != np.uint8:
                 stacked = np.clip(stacked, 0, 255).astype(np.uint8)
 
@@ -1637,7 +1637,7 @@ jsk_denoise_type = 0        # 0=OFF, 1=Bilateral, 2=FastNLM, 3=Gaussian, 4=Media
 jsk_denoise_strength = 5    # 1-10
 jsk_hdr_weights = [100, 100, 100, 100, 100, 100]  # Poids des images HDR (0-100), un par niveau de bit
 jsk_hdr_methods = ['OFF', 'Median', 'Mean', 'Mertens']
-jsk_denoise_types = ['OFF', 'Bilateral', 'Gaussian', 'Median', 'Guided']
+jsk_denoise_types = ['OFF', 'Bilateral', 'FastNLM', 'Gaussian', 'Median']
 jsk_processor = None        # Instance JSKLiveProcessor
 jsk_recorder = None         # Instance JSKVideoRecorder
 jsk_rec_blink = 0           # État clignotement point rouge REC
@@ -1899,7 +1899,6 @@ lucky_raw_pre_stretch_array = None    # Float post-ISP avant stretch (RAW lucky 
 ls_paused = False                    # True = live stack en pause
 ls_last_filtered_array = None        # Dernier résultat filtré LS pour bouton SAVE PNG
 ls_pre_filter_array = None           # Stack LS avant filtres (re-filtrage interactif en pause)
-ls_pre_stretch_array = None          # Stack LS avant stretch (re-stretch interactif en pause)
 
 # Filtres de netteté post-stack Lucky (onglet Filtre)
 ls_lucky_clahe_en    = 0     # 0=off, 1=on
@@ -1915,16 +1914,6 @@ ls_lucky_mm_en       = 0     # 0=off, 1=on  (MM exclusif avec LR)
 ls_lucky_mm_iter     = 15    # MM itérations (5–100)
 ls_lucky_mm_sigma    = 8     # MM PSF sigma ×10  (5→0.5 … 30→3.0)  défaut=0.8px
 ls_lucky_mm_lambda   = 2     # MM régularisation TV ×100 (1→0.01 … 50→0.50)  défaut=0.02
-ls_lucky_wpsf_en     = 0     # 0=off, 1=on  (WavePSF RL, exclusif avec LR/MM)
-ls_lucky_wpsf_iter   = 20    # WavePSF RL itérations (5-50)
-ls_wpsf_aperture     = 200   # Diamètre ouverture mm (50-1000)
-ls_wpsf_obstruction  = 0     # Obstruction centrale ×100 (0=libre, 35=SCT typ.)
-ls_wpsf_pixel_scale  = 20    # Échelle image ×100 arcsec/px (5→0.05 … 200→2.00)
-ls_wpsf_seeing       = 15    # FWHM seeing ×10 arcsec (0=off, 5-30 → 0.5-3.0)
-ls_wpsf_defocus      = 0     # Z4 defocus ×100 (-100→-1.0 … +100→+1.0 λ RMS)
-ls_wpsf_astig_x      = 0     # Z5 astigmatisme oblique ×100
-ls_wpsf_astig_y      = 0     # Z6 astigmatisme droit ×100
-ls_wpsf_spherical    = 0     # Z11 sphérique ×100
 # Balance RVB et saturation post-traitement (correction couleur après CLAHE)
 ls_post_red   = 100   # Gain rouge post-traitement ×0.01 (50→×0.50 … 200→×2.00)
 ls_post_green = 100   # Gain vert  post-traitement ×0.01
@@ -5786,9 +5775,6 @@ def draw_ls_controls(screen_width, screen_height):
     global ls_lucky_usm_en, ls_lucky_usm_sigma, ls_lucky_usm_amount
     global ls_lucky_lr_en, ls_lucky_lr_iter, ls_lucky_lr_sigma
     global ls_lucky_mm_en, ls_lucky_mm_iter, ls_lucky_mm_sigma, ls_lucky_mm_lambda
-    global ls_lucky_wpsf_en, ls_lucky_wpsf_iter
-    global ls_wpsf_aperture, ls_wpsf_obstruction, ls_wpsf_pixel_scale, ls_wpsf_seeing
-    global ls_wpsf_defocus, ls_wpsf_astig_x, ls_wpsf_astig_y, ls_wpsf_spherical
     global ls_post_red, ls_post_green, ls_post_blue, ls_post_sat, ls_post_brightness
 
     panel_w  = 260
@@ -6305,14 +6291,14 @@ def draw_ls_controls(screen_width, screen_height):
             _font_cache[ck_sect].render("Déconvolution", True, (160, 160, 220)),
             (panel_x + 2, start_y))
         start_y += 16
-        _deconv_mode = 1 if ls_lucky_lr_en else (2 if ls_lucky_mm_en else (3 if ls_lucky_wpsf_en else 0))
-        _deconv_labels = {0: 'OFF', 1: 'Lucy-Rich.', 2: 'MM-ADMM', 3: 'WavePSF RL'}
-        _deconv_color  = {0: (80, 80, 100), 1: (180, 100, 60), 2: (80, 120, 200), 3: (60, 160, 120)}
+        _deconv_mode = 1 if ls_lucky_lr_en else (2 if ls_lucky_mm_en else 0)
+        _deconv_labels = {0: 'OFF', 1: 'Lucy-Rich.', 2: 'MM-ADMM'}
+        _deconv_color  = {0: (80, 80, 100), 1: (180, 100, 60), 2: (80, 120, 200)}
         _dc = _deconv_color[_deconv_mode]
         control_rects['ls_lucky_deconv_mode'] = draw_jsk_slider(
             panel_x, start_y, slider_w, slider_h,
             f"Mode: {_deconv_labels[_deconv_mode]}",
-            _deconv_mode, 0, 3, _dc)
+            _deconv_mode, 0, 2, _dc)
         start_y += slider_h + margin
         if _deconv_mode == 1:
             control_rects['ls_lucky_lr_iter'] = draw_jsk_slider(
@@ -6340,53 +6326,6 @@ def draw_ls_controls(screen_width, screen_height):
                 panel_x, start_y, slider_w, slider_h,
                 f"\u03bb TV: {ls_lucky_mm_lambda/100:.2f}",
                 ls_lucky_mm_lambda, 1, 15, (80, 120, 200))
-            start_y += slider_h + margin
-        elif _deconv_mode == 3:
-            _wc = (60, 160, 120)
-            control_rects['ls_lucky_wpsf_iter'] = draw_jsk_slider(
-                panel_x, start_y, slider_w, slider_h,
-                f"Iter RL: {ls_lucky_wpsf_iter}",
-                ls_lucky_wpsf_iter, 5, 50, _wc)
-            start_y += slider_h + margin
-            control_rects['ls_wpsf_aperture'] = draw_jsk_slider(
-                panel_x, start_y, slider_w, slider_h,
-                f"Diam. {ls_wpsf_aperture}mm",
-                ls_wpsf_aperture, 50, 1000, _wc)
-            start_y += slider_h + margin
-            control_rects['ls_wpsf_obstruction'] = draw_jsk_slider(
-                panel_x, start_y, slider_w, slider_h,
-                f"Obstr. {ls_wpsf_obstruction}%",
-                ls_wpsf_obstruction, 0, 50, _wc)
-            start_y += slider_h + margin
-            control_rects['ls_wpsf_pixel_scale'] = draw_jsk_slider(
-                panel_x, start_y, slider_w, slider_h,
-                f"Échelle {ls_wpsf_pixel_scale/100:.2f}\"/px",
-                ls_wpsf_pixel_scale, 5, 200, _wc)
-            start_y += slider_h + margin
-            control_rects['ls_wpsf_seeing'] = draw_jsk_slider(
-                panel_x, start_y, slider_w, slider_h,
-                f"Seeing {ls_wpsf_seeing/10:.1f}\"" if ls_wpsf_seeing > 0 else "Seeing OFF",
-                ls_wpsf_seeing, 0, 30, _wc)
-            start_y += slider_h + margin
-            control_rects['ls_wpsf_defocus'] = draw_jsk_slider(
-                panel_x, start_y, slider_w, slider_h,
-                f"Defocus {ls_wpsf_defocus/100:+.2f}\u03bb",
-                ls_wpsf_defocus, -100, 100, _wc)
-            start_y += slider_h + margin
-            control_rects['ls_wpsf_astig_x'] = draw_jsk_slider(
-                panel_x, start_y, slider_w, slider_h,
-                f"Astig\u00d7 {ls_wpsf_astig_x/100:+.2f}\u03bb",
-                ls_wpsf_astig_x, -100, 100, _wc)
-            start_y += slider_h + margin
-            control_rects['ls_wpsf_astig_y'] = draw_jsk_slider(
-                panel_x, start_y, slider_w, slider_h,
-                f"Astig+ {ls_wpsf_astig_y/100:+.2f}\u03bb",
-                ls_wpsf_astig_y, -100, 100, _wc)
-            start_y += slider_h + margin
-            control_rects['ls_wpsf_spherical'] = draw_jsk_slider(
-                panel_x, start_y, slider_w, slider_h,
-                f"Sph\u00e9r. {ls_wpsf_spherical/100:+.2f}\u03bb",
-                ls_wpsf_spherical, -100, 100, _wc)
             start_y += slider_h + margin
 
         # ── Balance RVB + Saturation ─────────────────────
@@ -6438,9 +6377,6 @@ def handle_ls_slider_click(mx, my, control_rects):
     global ls_lucky_usm_en, ls_lucky_usm_sigma, ls_lucky_usm_amount
     global ls_lucky_lr_en, ls_lucky_lr_iter, ls_lucky_lr_sigma
     global ls_lucky_mm_en, ls_lucky_mm_iter, ls_lucky_mm_sigma, ls_lucky_mm_lambda
-    global ls_lucky_wpsf_en, ls_lucky_wpsf_iter
-    global ls_wpsf_aperture, ls_wpsf_obstruction, ls_wpsf_pixel_scale, ls_wpsf_seeing
-    global ls_wpsf_defocus, ls_wpsf_astig_x, ls_wpsf_astig_y, ls_wpsf_spherical
     global ls_post_red, ls_post_green, ls_post_blue, ls_post_sat, ls_post_brightness
     global ls_paused, ls_pre_filter_array, ls_last_filtered_array
     global raw_format
@@ -6631,10 +6567,9 @@ def handle_ls_slider_click(mx, my, control_rects):
             elif name == 'ls_lucky_usm_amount':
                 ls_lucky_usm_amount = max(5, min(50, int(5 + ratio * 45 + 0.5)))
             elif name == 'ls_lucky_deconv_mode':
-                _dm = max(0, min(3, int(ratio * 3 + 0.5)))
-                ls_lucky_lr_en   = 1 if _dm == 1 else 0
-                ls_lucky_mm_en   = 1 if _dm == 2 else 0
-                ls_lucky_wpsf_en = 1 if _dm == 3 else 0
+                _dm = max(0, min(2, int(ratio * 2 + 0.5)))
+                ls_lucky_lr_en = 1 if _dm == 1 else 0
+                ls_lucky_mm_en = 1 if _dm == 2 else 0
             elif name == 'ls_lucky_lr_iter':
                 ls_lucky_lr_iter = max(5, min(60, int(5 + ratio * 55 + 0.5)))
             elif name == 'ls_lucky_lr_sigma':
@@ -6645,24 +6580,6 @@ def handle_ls_slider_click(mx, my, control_rects):
                 ls_lucky_mm_sigma = max(3, min(15, int(3 + ratio * 12 + 0.5)))
             elif name == 'ls_lucky_mm_lambda':
                 ls_lucky_mm_lambda = max(1, min(15, int(1 + ratio * 14 + 0.5)))
-            elif name == 'ls_lucky_wpsf_iter':
-                ls_lucky_wpsf_iter = max(5, min(50, int(5 + ratio * 45 + 0.5)))
-            elif name == 'ls_wpsf_aperture':
-                ls_wpsf_aperture = max(50, min(1000, int(50 + ratio * 950 + 0.5)))
-            elif name == 'ls_wpsf_obstruction':
-                ls_wpsf_obstruction = max(0, min(50, int(ratio * 50 + 0.5)))
-            elif name == 'ls_wpsf_pixel_scale':
-                ls_wpsf_pixel_scale = max(5, min(200, int(5 + ratio * 195 + 0.5)))
-            elif name == 'ls_wpsf_seeing':
-                ls_wpsf_seeing = max(0, min(30, int(ratio * 30 + 0.5)))
-            elif name == 'ls_wpsf_defocus':
-                ls_wpsf_defocus = max(-100, min(100, int(-100 + ratio * 200 + 0.5)))
-            elif name == 'ls_wpsf_astig_x':
-                ls_wpsf_astig_x = max(-100, min(100, int(-100 + ratio * 200 + 0.5)))
-            elif name == 'ls_wpsf_astig_y':
-                ls_wpsf_astig_y = max(-100, min(100, int(-100 + ratio * 200 + 0.5)))
-            elif name == 'ls_wpsf_spherical':
-                ls_wpsf_spherical = max(-100, min(100, int(-100 + ratio * 200 + 0.5)))
             elif name == 'ls_post_red':
                 ls_post_red = max(50, min(200, int(50 + ratio * 150 + 0.5)))
             elif name == 'ls_post_green':
@@ -6674,7 +6591,7 @@ def handle_ls_slider_click(mx, my, control_rects):
             elif name == 'ls_post_brightness':
                 ls_post_brightness = max(-100, min(100, int(-100 + ratio * 200 + 0.5)))
             # Re-appliquer les filtres si stack en pause
-            if name.startswith(('ls_lucky_', 'ls_post_', 'ls_wpsf_')) and ls_paused and ls_pre_filter_array is not None:
+            if name.startswith(('ls_lucky_', 'ls_post_')) and ls_paused and ls_pre_filter_array is not None:
                 try:
                     ls_last_filtered_array = apply_lucky_post_stack_filters(
                         ls_pre_filter_array.copy(), color_correction=True)
@@ -6953,9 +6870,6 @@ def apply_lucky_post_stack_filters(img, color_correction=False):
     global ls_lucky_usm_en, ls_lucky_usm_sigma, ls_lucky_usm_amount
     global ls_lucky_lr_en, ls_lucky_lr_iter, ls_lucky_lr_sigma
     global ls_lucky_mm_en, ls_lucky_mm_iter, ls_lucky_mm_sigma, ls_lucky_mm_lambda
-    global ls_lucky_wpsf_en, ls_lucky_wpsf_iter
-    global ls_wpsf_aperture, ls_wpsf_obstruction, ls_wpsf_pixel_scale, ls_wpsf_seeing
-    global ls_wpsf_defocus, ls_wpsf_astig_x, ls_wpsf_astig_y, ls_wpsf_spherical
     global ls_post_red, ls_post_green, ls_post_blue, ls_post_sat, ls_post_brightness
 
     if img is None:
@@ -6964,7 +6878,7 @@ def apply_lucky_post_stack_filters(img, color_correction=False):
     _color_active = color_correction and (img.ndim == 3) and (
         ls_post_red != 100 or ls_post_green != 100 or ls_post_blue != 100 or ls_post_sat != 100)
     _brightness_active = color_correction and (ls_post_brightness != 0)
-    if not ls_lucky_clahe_en and not ls_lucky_usm_en and not ls_lucky_lr_en and not ls_lucky_mm_en and not ls_lucky_wpsf_en and not _color_active and not _brightness_active:
+    if not ls_lucky_clahe_en and not ls_lucky_usm_en and not ls_lucky_lr_en and not ls_lucky_mm_en and not _color_active and not _brightness_active:
         return img
 
     is_color = (img.ndim == 3)
@@ -7081,62 +6995,6 @@ def apply_lucky_post_stack_filters(img, color_correction=False):
             uy += np.fft.irfft2(Dy_fft * np.fft.rfft2(x), s=sh) - zy
 
         gray = np.clip(x * 255.0, 0, 255).astype(np.uint8)
-
-    # ── Déconvolution WavePSF Richardson-Lucy (PSF optique Fourier + Zernike) ──
-    # PSF calculée depuis les aberrations du front d'onde du télescope.
-    # RL itératif en domaine fréquentiel (scipy.fft) — qualité max, pas de contrainte temps.
-    elif ls_lucky_wpsf_en:
-        from scipy.fft import rfft2 as _rfft2, irfft2 as _irfft2
-        from libastrostack.wavefront_psf import compute_wavefront_psf as _compute_wpsf
-        niters = int(ls_lucky_wpsf_iter)
-        try:
-            psf, _fwhm = _compute_wpsf(
-                aperture_D_mm     = float(ls_wpsf_aperture),
-                obstruction_ratio = ls_wpsf_obstruction / 100.0,
-                pixel_scale_arcsec= ls_wpsf_pixel_scale  / 100.0,
-                seeing_arcsec     = ls_wpsf_seeing        / 10.0,
-                z_defocus         = ls_wpsf_defocus        / 100.0,
-                z_astig_x         = ls_wpsf_astig_x        / 100.0,
-                z_astig_y         = ls_wpsf_astig_y        / 100.0,
-                z_spherical       = ls_wpsf_spherical       / 100.0,
-            )
-        except Exception:
-            psf = None
-        if psf is not None and psf.sum() > 0:
-            img_f = gray.astype(np.float32) / 255.0
-            sh = img_f.shape
-            # Embarquer la PSF centrée dans un tableau de la taille de l'image,
-            # puis la translater pour que son centre soit à [0,0] (convention FFT).
-            kh, kw = psf.shape
-            psf_full = np.zeros(sh, dtype=np.float32)
-            cy_im, cx_im = sh[0] // 2, sh[1] // 2
-            ky, kx = kh // 2, kw // 2
-            y0 = cy_im - ky; y1 = y0 + kh
-            x0 = cx_im - kx; x1 = x0 + kw
-            # Garder uniquement la partie qui tient dans l'image
-            if y0 >= 0 and y1 <= sh[0] and x0 >= 0 and x1 <= sh[1]:
-                psf_full[y0:y1, x0:x1] = psf
-            else:
-                # Découpage si PSF trop grande
-                py0 = max(0, -y0); py1 = py0 + min(kh, sh[0] - max(0, y0))
-                px0 = max(0, -x0); px1 = px0 + min(kw, sh[1] - max(0, x0))
-                iy0 = max(0, y0);  iy1 = iy0 + (py1 - py0)
-                ix0 = max(0, x0);  ix1 = ix0 + (px1 - px0)
-                psf_full[iy0:iy1, ix0:ix1] = psf[py0:py1, px0:px1]
-            # Décaler vers [0,0] (centre FFT)
-            psf_full = np.roll(np.roll(psf_full, -(cy_im - ky), axis=0), -(cx_im - kx), axis=1)
-            # Pré-calculer FFT de la PSF et de son miroir (transposé = flippé pour sym.)
-            H      = _rfft2(psf_full)
-            H_conj = np.conj(H)
-            # RL itératif en domaine fréquentiel
-            estimate = img_f.copy()
-            for _ in range(niters):
-                blurred    = np.real(_irfft2(H * _rfft2(estimate), s=sh))
-                blurred    = np.clip(blurred, 1e-7, None)
-                ratio_img  = img_f / blurred
-                correction = np.real(_irfft2(H_conj * _rfft2(ratio_img), s=sh))
-                estimate   = np.clip(estimate * correction, 0.0, 1.0)
-            gray = np.clip(estimate * 255.0, 0, 255).astype(np.uint8)
 
     if is_color:
         ycrcb_out = cv2.merge([gray, cr, cb])
@@ -14918,57 +14776,6 @@ def ghs_stretch(array, D, b, SP, LP, HP):
 
 
 
-def _percentile_u8_fast(img, p_low_pct, p_high_pct):
-    """
-    Estimation rapide des percentiles pour image uint8 via histogramme.
-    Sous-échantillonnage 16× (chaque 4e pixel) → ~1.5M valeurs → ~11ms vs 500ms np.percentile.
-    Retourne (vmin, vmax) en valeurs uint8 [0-255].
-    """
-    sub = img[::4, ::4]
-    hist = np.bincount(sub.ravel(), minlength=256)
-    cdf = hist.cumsum()
-    total = cdf[-1]
-    vmin = int(np.searchsorted(cdf, total * p_low_pct  / 100.0))
-    vmax = int(np.searchsorted(cdf, total * p_high_pct / 100.0))
-    return vmin, max(vmax, vmin + 1)
-
-
-def _build_stretch_lut_u8(preset, vmin, vmax, **params):
-    """
-    Construit une LUT uint8→uint8 (256 entrées) pour le preset stretch donné.
-    Calcul sur 256 points = < 0.1ms quelle que soit la résolution.
-    """
-    from libastrostack.stretch import stretch_ghs as _ghs_fn
-    x = np.arange(256, dtype=np.float32)
-    xn = np.clip((x - vmin) / float(vmax - vmin), 0.0, 1.0)
-
-    if preset == 1:   # GHS
-        stretched = _ghs_fn(xn,
-                            D=params['D'], b=params['b'], SP=params['SP'],
-                            LP=params['LP'], HP=params['HP'],
-                            clip_low=0.0, clip_high=100.0, normalize_output=True)
-    elif preset == 2:  # Arcsinh
-        factor = max(params['factor'], 0.01)
-        af = np.arcsinh(factor)
-        stretched = np.arcsinh(xn * factor) / (af if af > 1e-10 else 1.0)
-    elif preset == 3:  # Log
-        f = max(params['log_factor'], 0.01)
-        stretched = np.log1p(xn * f) / np.log1p(f)
-    elif preset == 4:  # MTF
-        s, hv, m = params['mtf_shadows'], params['mtf_highlights'], params['mtf_midtone']
-        xc = np.clip((xn - s) / max(hv - s, 1e-6), 0.0, 1.0)
-        denom = (2 * m - 1) * xc - m
-        with np.errstate(divide='ignore', invalid='ignore'):
-            stretched = np.where(np.abs(denom) > 1e-10, (m - 1) * xc / denom, 0.0)
-        stretched = np.where(xc == 0.0, 0.0, stretched)
-        stretched = np.where(xc == 1.0, 1.0, stretched)
-        stretched = np.clip(stretched, 0.0, 1.0)
-    else:
-        stretched = xn
-
-    return np.clip(stretched * 255.0, 0, 255).astype(np.uint8)
-
-
 def astro_stretch(array):
     """
     Applique un étirement astro selon le preset sélectionné
@@ -14988,34 +14795,6 @@ def astro_stretch(array):
 
     if stretch_preset == 0:
         # OFF - pas de stretch
-        return array
-
-    # ── Chemin rapide : LUT uint8 (JSK live, Lucky RGB8, Live Stack ISP) ────
-    # L'entrée uint8 n'a que 256 valeurs possibles → percentile histogramme +
-    # LUT appliquée via cv2.LUT : ~18ms vs ~1100ms (percentile + arcsinh/GHS).
-    if array.dtype == np.uint8:
-        p_low_pct  = stretch_p_low  / 10.0   # stocké ×10
-        p_high_pct = stretch_p_high / 100.0  # stocké ×100
-        # Cas non-standard : preset 1 utilise des percentiles fixes dans ghs_stretch
-        if stretch_preset == 1:
-            # GHS : pas de clip percentile externe (ghs_stretch normalise en interne)
-            vmin, vmax = 0, 255
-        else:
-            vmin, vmax = _percentile_u8_fast(array, p_low_pct, p_high_pct)
-        if vmax > vmin:
-            if stretch_preset == 1:
-                lut_params = dict(D=ghs_D/10.0, b=ghs_b/10.0, SP=ghs_SP/100.0,
-                                  LP=ghs_LP/100.0, HP=ghs_HP/100.0)
-            elif stretch_preset == 2:
-                lut_params = dict(factor=stretch_factor/10.0)
-            elif stretch_preset == 3:
-                lut_params = dict(log_factor=float(log_factor))
-            else:  # MTF
-                lut_params = dict(mtf_shadows=mtf_shadows/100.0,
-                                  mtf_midtone=mtf_midtone/100.0,
-                                  mtf_highlights=mtf_highlights/100.0)
-            lut = _build_stretch_lut_u8(stretch_preset, vmin, vmax, **lut_params)
-            return cv2.LUT(array, lut)
         return array
 
     elif stretch_preset == 1:
@@ -15145,7 +14924,7 @@ def preview():
     global livestack_active, luckystack_active, raw_format, raw_stream_size, capture_size, jsk_live_mode
     global lucky_recorder
     global lucky_last_filtered_array, lucky_paused, lucky_last_stack_before_filter, lucky_raw_pre_stretch_array
-    global ls_paused, ls_last_filtered_array, ls_pre_filter_array, ls_pre_stretch_array
+    global ls_paused, ls_last_filtered_array, ls_pre_filter_array
     global ls_lucky_clahe_en, ls_lucky_clahe_str, ls_lucky_clahe_tile
     global ls_lucky_usm_en, ls_lucky_usm_sigma, ls_lucky_usm_amount
     global ls_lucky_lr_en, ls_lucky_lr_iter, ls_lucky_lr_sigma
@@ -16903,13 +16682,6 @@ while True:
                         stacked_array = _lsp['last_display']
 
                         if stacked_array is not None:
-                            # Stocker avant stretch pour re-stretch interactif en pause
-                            ls_pre_stretch_array = stacked_array.copy()
-                            # Appliquer le stretch astro (déplacé du thread → main loop)
-                            if stretch_preset != 0:
-                                stacked_array = astro_stretch(stacked_array)
-                            if stacked_array.dtype != np.uint8:
-                                stacked_array = np.clip(stacked_array, 0, 255).astype(np.uint8)
                             # Stocker avant filtres pour re-filtrage interactif en pause
                             ls_pre_filter_array = stacked_array.copy()
                             # Appliquer les filtres post-stack (CLAHE, USM, déconvolution, balance)
@@ -17002,17 +16774,10 @@ while True:
                             traceback.print_exc()
                         livestack_display_done = False
 
-                # ===== LIVE STACK PAUSED: ré-appliquer stretch + filtres en temps réel =====
-                elif ls_paused and ls_pre_stretch_array is not None:
+                # ===== LIVE STACK PAUSED: afficher le dernier résultat en ré-appliquant les filtres =====
+                elif ls_paused and ls_pre_filter_array is not None:
                     try:
-                        _pre = ls_pre_stretch_array.copy()
-                        # Re-appliquer le stretch avec les paramètres courants
-                        if stretch_preset != 0:
-                            _pre = astro_stretch(_pre)
-                        if _pre.dtype != np.uint8:
-                            _pre = np.clip(_pre, 0, 255).astype(np.uint8)
-                        ls_pre_filter_array = _pre  # Mettre à jour pour cohérence
-                        _disp = apply_lucky_post_stack_filters(_pre, color_correction=True)
+                        _disp = apply_lucky_post_stack_filters(ls_pre_filter_array.copy(), color_correction=True)
                         ls_last_filtered_array = _disp
                         if len(_disp.shape) == 3:
                             _t = np.swapaxes(_disp, 0, 1)
@@ -18809,7 +18574,6 @@ while True:
                 ls_paused = False
                 ls_last_filtered_array = None
                 ls_pre_filter_array = None
-                ls_pre_stretch_array = None
                 if hasattr(pygame, '_ls_raw_save_queue'):
                     pygame._ls_raw_save_queue.put(None)
                     del pygame._ls_raw_save_queue
